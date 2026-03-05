@@ -7,39 +7,30 @@
 
 #SBATCH --job-name=download
 #SBATCH --output=logs/%x-%j.log
+#SBATCH --partition=gpu
+#SBATCH --account=cis251382-gpu
+#SBATCH --qos=gpu
 #SBATCH --time=2-00:00:00
-#SBATCH --partition=preempt
 
-#SBATCH --nodes=4
-#SBATCH --ntasks-per-node=2
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
 #SBATCH --mem=32G
-#SBATCH --cpus-per-task=4
+#SBATCH --cpus-per-task=16
 
-source devconfig.sh
-source devsecret.sh
-trap "rm -rf $NFS_MOUNT $SSD_MOUNT" EXIT
+# ============================================================
+# TODO: Replace this section with your dataset download logic.
+#
+# Set DEST_DIR to where you want raw data saved on Anvil scratch.
+# Example for DCLM from S3 (requires AWS CLI configured):
+#
+#   DEST_DIR="/anvil/scratch/x-dlee18/LLM-continual-learning/dataset/raw"
+#   mkdir -p $DEST_DIR
+#   prefix=s3://commoncrawl/contrib/datacomp/DCLM-baseline/global-shard_03_of_10/local-shard_1_of_10/
+#   aws s3 sync $prefix $DEST_DIR/ --no-sign-request
+#
+# For a HuggingFace dataset, use:
+#   python -c "from datasets import load_dataset; ds = load_dataset('...'); ds.save_to_disk('$DEST_DIR')"
+# ============================================================
 
-download_dclm28b() {
-    # Each task file contains the S3 link and the local file path.
-    prefix=s3://commoncrawl/contrib/datacomp/DCLM-baseline/global-shard_03_of_10/local-shard_1_of_10/
-    aws s3 ls $prefix | while read -r line; do
-        name=$(echo $line | awk '{print $4}')
-        link=$prefix$name
-        name=gs0310-ls110_$name
-        file=$SSD_MOUNT/$name
-        task=$NFS_MOUNT/$name.task
-        echo $link >> $task
-        echo $file >> $task
-    done
-    # Dispatch the tasks to the nodes.
-    srun -W 0 scripts/dataset/modules/download_dclm_step1.sh
-}
-
-case $DATASET in
-    dclm28b)
-        download_dclm28b
-        ;;
-    *)
-        echo "Unknown dataset: $1"
-        exit 1
-esac
+echo "TODO: configure dataset download in scripts/dataset/download.sh"
+exit 1

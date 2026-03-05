@@ -2,24 +2,27 @@
 
 #SBATCH --job-name=evaluate
 #SBATCH --output=logs/evaluate-%j.log
+#SBATCH --partition=gpu
+#SBATCH --account=cis251382-gpu
+#SBATCH --qos=gpu
 #SBATCH --nodes=1
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:2
 #SBATCH --cpus-per-task=32
-#SBATCH --mem=256G
+#SBATCH --mem=128G
 #SBATCH --time=2-00:00:00
 
 source scripts/config.sh
-source scripts/secret.sh
 
-trap "rm -rf $NFS_MOUNT $SSD_MOUNT" EXIT
+trap "rm -rf $SSD_MOUNT" EXIT
 
 export OMP_NUM_THREADS=8
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
 export HF_DATASETS_TRUST_REMOTE_CODE=true
 
+# Copy checkpoint from Anvil scratch to local node storage
 mkdir -p $SSD_WEIGHTS
-gcloud storage cp -r $GCP_WEIGHTS/flame-moe/$JOBID/* $SSD_WEIGHTS/
+rsync -a "$LOCAL_WEIGHTS/flame-moe/$JOBID/" "$SSD_WEIGHTS/"
 mkdir -p logs/evaluate/$JOBID
 
 echo $ITER > $SSD_WEIGHTS/latest_checkpointed_iteration.txt

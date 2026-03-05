@@ -6,17 +6,17 @@ tokenize() {
     # Skip if task file is empty (already processed).
     [ ! -s "$task" ] && return 0
 
-    # Read GCS link and local file path.
-    link=$(sed -n '1p' $task)
+    # Read source path and local temp path.
+    src=$(sed -n '1p' $task)
     file=$(sed -n '2p' $task)
 
-    # Download from GCS (max 3 attempts).
+    # Copy from Anvil scratch to local node storage (max 3 attempts).
     for i in {1..3}; do
-        echo "Downloading $link (Attempt $i of 3)"
-        gcloud storage cp $link $file > /dev/null 2>&1 && break
-        echo "Failed to download $link, retrying..." && sleep 5
+        echo "Copying $src (Attempt $i of 3)"
+        cp "$src" "$file" > /dev/null 2>&1 && break
+        echo "Failed to copy $src, retrying..." && sleep 5
         if [ $i -eq 3 ]; then
-            echo "ERROR: Failed to download $link after 3 attempts." >&2
+            echo "ERROR: Failed to copy $src after 3 attempts." >&2
             return 1
         fi
     done
@@ -39,16 +39,14 @@ tokenize() {
         fi
     done
 
-    # Upload the tokenized files to GCS (max 3 attempts).
+    # Copy tokenized files to output directory on Anvil scratch (max 3 attempts).
     for i in {1..3}; do
-        echo "Uploading tokenized files to GCS (Attempt $i of 3)"
-        gcloud storage cp \
-            ${file%.jsonl}_text_document.bin \
-            ${file%.jsonl}_text_document.idx \
-            $GCP_DATASET_DIR/$DATASET/tokenized/$TOKENIZER/ > /dev/null 2>&1 && break
-        echo "Failed to upload tokenized files, retrying..." && sleep 5
+        echo "Saving tokenized files (Attempt $i of 3)"
+        mkdir -p "$OUTPUT_DIR" && \
+        cp ${file%.jsonl}_text_document.bin ${file%.jsonl}_text_document.idx "$OUTPUT_DIR/" > /dev/null 2>&1 && break
+        echo "Failed to save tokenized files, retrying..." && sleep 5
         if [ $i -eq 3 ]; then
-            echo "ERROR: Failed to upload tokenized files after 3 attempts." >&2
+            echo "ERROR: Failed to save tokenized files after 3 attempts." >&2
             return 1
         fi
     done

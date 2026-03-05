@@ -4,15 +4,16 @@
 #SBATCH --job-name=capture-1.7b
 #SBATCH --output=logs/%x/%j.log
 
-#SBATCH --partition=flame
-#SBATCH --time=14-00:00:00
-#SBATCH --qos=flame-t1b_g1_qos
+#SBATCH --partition=gpu
+#SBATCH --account=cis251382-gpu
+#SBATCH --qos=gpu
+#SBATCH --time=4-00:00:00
 
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --mem=1536G
-#SBATCH --cpus-per-task=208
-#SBATCH --gres=gpu:8
+#SBATCH --mem=480G
+#SBATCH --cpus-per-task=128
+#SBATCH --gres=gpu:4
 
 source scripts/config.sh
 
@@ -32,8 +33,8 @@ export RDZV_ENDPOINT="localhost:8000"
 # where to load the pretrained weights and dataset
 export TRAIN_JOB_ID=31245
 export TRAIN_JOB_NAME=flame-moe-1.7b
-export TRAIN_WEIGHTS=$GCP_WEIGHTS/$TRAIN_JOB_NAME/$TRAIN_JOB_ID
-export TRAIN_DATASET=$GCP_DATASET/dclm-138b/tokenized/EleutherAI/pythia-12b
+export TRAIN_WEIGHTS=$LOCAL_WEIGHTS/$TRAIN_JOB_NAME/$TRAIN_JOB_ID
+export TRAIN_DATASET=$LOCAL_DATASET/dclm-138b/tokenized/EleutherAI/pythia-12b
 
 srun scripts/empirical_analysis/modules/capture_step1.sh
 

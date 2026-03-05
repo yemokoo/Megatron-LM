@@ -17,6 +17,7 @@ This document explains how the codebase is structured and **exactly where to mak
 9. [Evaluation](#9-evaluation)
 10. [Empirical Analysis Tools](#10-empirical-analysis-tools)
 11. [External Dependencies (Submodules)](#11-external-dependencies-submodules)
+12. [Continual Learning Routing Experiment](#12-continual-learning-routing-experiment)
 
 ---
 
@@ -407,6 +408,79 @@ cd ..
 git add Megatron-LM
 git commit -m "update Megatron-LM submodule"
 ```
+
+---
+
+## 12. Continual Learning Routing Experiment
+
+This experiment investigates whether training on a new data distribution (Task B) disrupts the routing patterns formed during pretraining on a previous distribution (Task A). This is the core problem that Lifelong-MoE-style methods aim to solve.
+
+**Hypothesis to test:** After continuing training on Task B (Python code), does the router assign A-domain tokens (Wikipedia) to different experts than it did right after Task A training?
+
+### Datasets
+
+| Stage | Dataset | HuggingFace ID | Distribution |
+|---|---|---|---|
+| Task A | English Wikipedia | `wikimedia/wikipedia` (20220301.en) | Encyclopedic prose |
+| Task B | Python code | `codeparrot/codeparrot-clean` | Source code |
+
+### New Scripts
+
+```
+scripts/
+├── dataset/
+│   ├── download_wikipedia.sh    # Download + tokenize Wikipedia (Task A)
+│   └── download_code.sh         # Download + tokenize Python code (Task B)
+└── experiment/
+    ├── stage_A_train.sh         # Train FLAME-MoE-290M on Wikipedia
+    ├── stage_B_train.sh         # Continue training on code from Stage A checkpoint
+    └── capture_routing.sh       # Capture router traces (always evaluated on Wikipedia)
+```
+
+### Step-by-Step Execution
+
+```bash
+# 0. Create log directories
+mkdir -p logs/download-wikipedia logs/download-code \
+         logs/continual-stage-A logs/continual-stage-B logs/capture-routing
+
+# 1. Prepare datasets (can run in parallel)
+sbatch scripts/dataset/download_wikipedia.sh
+sbatch scripts/dataset/download_code.sh
+
+# 2. Train Stage A: Wikipedia pretraining (~500 iters, ~1B tokens)
+sbatch scripts/experiment/stage_A_train.sh
+#   → note the SLURM job ID printed at the end (e.g. 12345)
+
+# 3. Train Stage B: continue from Stage A on Python code
+sbatch --export=STAGE_A_JOB_ID=12345 scripts/experiment/stage_B_train.sh
+#   → note the SLURM job ID (e.g. 12346)
+
+# 4. Capture routing on Wikipedia samples (A-domain) for both checkpoints
+sbatch --export=CAPTURE_JOB_ID=12345,CAPTURE_STAGE=A scripts/experiment/capture_routing.sh
+sbatch --export=CAPTURE_JOB_ID=12346,CAPTURE_STAGE=B scripts/experiment/capture_routing.sh
+```
+
+### Output
+
+After Step 4, routing traces are saved to:
+```
+actives/continual-stage-A/<job_id>/   ← routing at each iter of Stage A (on Wikipedia)
+actives/continual-stage-B/<job_id>/   ← routing at each iter of Stage B (still on Wikipedia)
+```
+
+Compare the two with the existing analysis tools in [empirical_analysis/work/expert_specialization.py](empirical_analysis/work/expert_specialization.py) and [analysis/](analysis/). If routing is disrupted, different experts will be selected for the same Wikipedia tokens after Stage B training.
+
+### Scale Controls
+
+To make the experiment faster/smaller, edit these variables in the stage scripts:
+
+| Variable | Location | Default | Effect |
+|---|---|---|---|
+| `TRAIN_ITERS` | `stage_A_train.sh`, `stage_B_train.sh` | 500 | Total gradient steps per stage |
+| `SAVE_INTERVAL` | both stage scripts | 50–100 | How often to save checkpoints for capture |
+| `max_examples` | `download_code.sh` (Python) | 200,000 | Size of Task B dataset |
+| `NODES` | `#SBATCH --nodes` | 2 | Compute resources |
 
 ---
 

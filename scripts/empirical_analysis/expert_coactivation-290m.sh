@@ -4,15 +4,16 @@
 #SBATCH --job-name=expert-coactivation-290m
 #SBATCH --output=logs/%x/%j.log
 
-#SBATCH --partition=flame
-#SBATCH --time=14-00:00:00
-#SBATCH --qos=flame-t1b_g1_qos
+#SBATCH --partition=gpu
+#SBATCH --account=cis251382-gpu
+#SBATCH --qos=gpu
+#SBATCH --time=4-00:00:00
 
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --mem=1536G
-#SBATCH --cpus-per-task=208
-#SBATCH --gres=gpu:8
+#SBATCH --mem=480G
+#SBATCH --cpus-per-task=128
+#SBATCH --gres=gpu:4
 
 source scripts/config.sh
 

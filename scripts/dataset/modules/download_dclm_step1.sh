@@ -37,14 +37,15 @@ download() {
         fi
     done
 
-    # Upload extracted file to GCS (max 3 attempts)
+    # Move extracted file to dataset directory on Anvil scratch (max 3 attempts)
     file=${file%.zstd}
+    DEST_DIR="/anvil/scratch/x-dlee18/LLM-continual-learning/dataset/$DATASET/textfiles"
     for i in {1..3}; do
-        echo "Uploading $file (Attempt $i of 3)"
-        gcloud storage cp $file $GCP_DATASET_DIR/$DATASET/textfiles/ > /dev/null 2>&1 && break
-        echo "Failed to upload $file, retrying..." && sleep 5
+        echo "Saving $file (Attempt $i of 3)"
+        mkdir -p "$DEST_DIR" && mv "$file" "$DEST_DIR/" > /dev/null 2>&1 && break
+        echo "Failed to save $file, retrying..." && sleep 5
         if [ $i -eq 3 ]; then
-            echo "ERROR: Failed to upload $file after 3 attempts." >&2
+            echo "ERROR: Failed to save $file after 3 attempts." >&2
             return 1
         fi
     done

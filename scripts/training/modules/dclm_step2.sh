@@ -31,19 +31,20 @@ SAVE_ARGS=(
 )
 
 # Start training with torchrun
+mkdir -p $SSD_WEIGHTS
+mkdir -p $TRAIN_WEIGHTS
 cd Megatron-LM && torchrun "${TORCH_ARGS[@]}" pretrain_gpt.py \
     "${MODEL_ARGS[@]}" "${INFRA_ARGS[@]}" "${TRAIN_ARGS[@]}" "${DATA_ARGS[@]}" "${SAVE_ARGS[@]}" &
 TORCHRUN_PID=$!
 
-# Upload weights every 15 minutes while training is running
-mkdir -p $SSD_WEIGHTS
+# Sync weights to Anvil scratch every 15 minutes while training is running
 (
     while kill -0 $TORCHRUN_PID 2>/dev/null; do
-        until gcloud storage rsync --recursive $SSD_WEIGHTS/ $TRAIN_WEIGHTS/; do continue; done
+        rsync -a "$SSD_WEIGHTS/" "$TRAIN_WEIGHTS/"
         sleep 15m
     done
 ) &
 
-# Final upload after training completes
+# Final sync after training completes
 wait $TORCHRUN_PID
-until gcloud storage rsync --recursive $SSD_WEIGHTS/ $TRAIN_WEIGHTS/; do continue; done
+rsync -a "$SSD_WEIGHTS/" "$TRAIN_WEIGHTS/"
