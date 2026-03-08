@@ -17,8 +17,8 @@ MODEL_ARGS=(
 
     # Mixture of Experts
     --moe-ffn-hidden-size $MOE_FFN_HIDDEN_SIZE
-    --num-experts 64
-    --moe-router-topk 6
+    --num-experts ${NUM_EXPERTS:-64}
+    --moe-router-topk ${MOE_ROUTER_TOPK:-6}
     --moe-shared-expert-intermediate-size $((2 * MOE_FFN_HIDDEN_SIZE))
     --moe-layer-freq $MOE_LAYER_FREQ
     --moe-router-dtype fp32

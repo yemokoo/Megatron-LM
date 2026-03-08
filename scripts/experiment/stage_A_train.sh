@@ -24,9 +24,11 @@ export HIDDEN_SIZE=1024
 export FFN_HIDDEN_SIZE=5472
 export MOE_FFN_HIDDEN_SIZE=704
 export MOE_LAYER_FREQ="[0]*1+[1]*8"
+export NUM_EXPERTS=4
+export MOE_ROUTER_TOPK=2
 export MICRO_BATCH_SIZE=4
 export PIPELINE_MODEL_PARALLEL_SIZE=1
-export EXPERT_MODEL_PARALLEL_SIZE=8
+export EXPERT_MODEL_PARALLEL_SIZE=1
 
 # ~500 iters × 1024 global batch × 2048 tokens = ~1B tokens from Wikipedia
 export TRAIN_ITERS=500

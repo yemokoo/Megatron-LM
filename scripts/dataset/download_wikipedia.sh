@@ -18,9 +18,9 @@
 
 source scripts/config.sh
 
-LOCAL_BASE="/anvil/scratch/x-dlee18/LLM-continual-learning"
-RAW_DIR="$LOCAL_BASE/dataset/wikipedia/raw"
-TOK_DIR="$LOCAL_BASE/dataset/wikipedia/tokenized/EleutherAI/pythia-12b"
+export LOCAL_BASE="${LOCAL_BASE:-$PWD/.local}"
+export RAW_DIR="$LOCAL_BASE/dataset/wikipedia/raw"
+export TOK_DIR="$LOCAL_BASE/dataset/wikipedia/tokenized/EleutherAI/pythia-12b"
 mkdir -p "$RAW_DIR" "$TOK_DIR"
 
 # Step 1: Download Wikipedia from HuggingFace and write to JSONL
@@ -28,7 +28,7 @@ python3 - <<'EOF'
 import os, json
 from datasets import load_dataset
 
-raw_dir = os.environ.get("RAW_DIR", "/anvil/scratch/x-dlee18/LLM-continual-learning/dataset/wikipedia/raw")
+raw_dir = os.environ["RAW_DIR"]
 os.makedirs(raw_dir, exist_ok=True)
 
 print("Loading Wikipedia (20220301.en) from HuggingFace...")
@@ -58,8 +58,6 @@ if buf:
 
 print("Download complete.")
 EOF
-
-export RAW_DIR="$RAW_DIR"
 
 # Step 2: Tokenize each shard using Megatron's preprocessing
 for shard in "$RAW_DIR"/shard_*.jsonl; do
