@@ -24,15 +24,15 @@ MODEL_ARGS=(
     --moe-router-dtype fp32
     --moe-router-pre-softmax
     --moe-router-score-function softmax
-    --moe-aux-loss-coeff 0.01
-    --moe-z-loss-coeff 0.001
+    --moe-aux-loss-coeff ${MOE_AUX_LOSS_COEFF:-0.01}
+    --moe-z-loss-coeff ${MOE_Z_LOSS_COEFF:-0.001}
 
     # Regularization
     --hidden-dropout 0.0
     --attention-dropout 0.0
 
     # Initialization
-    --init-method-std 0.02
+    --init-method-std ${INIT_METHOD_STD:-0.02}
 
     # Tokenizer
     --tokenizer-type HuggingFaceTokenizer
