@@ -1271,6 +1271,30 @@ def _add_logging_args(parser):
                        help='The wandb experiment name.')
     group.add_argument('--wandb-save-dir', type=str, default='',
                        help='Path to save the wandb results locally.')
+    group.add_argument('--wandb-step-offset', type=int, default=0,
+                       help='Constant offset added to W&B metric step indices.')
+    group.add_argument('--probe-data-path', nargs='*', default=None,
+                       help='Optional probe dataset blend used for periodic evaluation. '
+                       'Format matches --data-path.')
+    group.add_argument('--probe-name', type=str, default='',
+                       help='Display/log name for the probe dataset.')
+    group.add_argument('--probe-eval-iters', type=int, default=0,
+                       help='Number of iterations for probe evaluation.')
+    group.add_argument('--probe-eval-interval', type=int, default=0,
+                       help='Run probe evaluation every N training iterations.')
+    group.add_argument('--probe-step-offset', type=int, default=0,
+                       help='Constant offset added to probe iteration indices when logging metrics.')
+    group.add_argument('--secondary-probe-data-path', nargs='*', default=None,
+                       help='Optional second probe dataset blend used for periodic evaluation. '
+                       'Format matches --data-path.')
+    group.add_argument('--secondary-probe-name', type=str, default='',
+                       help='Display/log name for the second probe dataset.')
+    group.add_argument('--secondary-probe-eval-iters', type=int, default=0,
+                       help='Number of iterations for second probe evaluation.')
+    group.add_argument('--secondary-probe-eval-interval', type=int, default=0,
+                       help='Run second probe evaluation every N training iterations.')
+    group.add_argument('--secondary-probe-step-offset', type=int, default=0,
+                       help='Constant offset added to second probe iteration indices when logging metrics.')
     group.add_argument('--logging-level', type=int, default=None,
                        help='Set default logging level')
     return parser
@@ -2349,6 +2373,22 @@ def _add_moe_args(parser):
     group.add_argument('--moe-use-upcycling', action='store_true',
                        help='Load a checkpoint of a dense model, convert it into an MoE model, and save the converted model to the path specified by --save. '
                        'Upcycling is implemented on the top of distributed checkpointing, so it supports parallel modes different from the dense model.')
+    group.add_argument('--moe-expand-from-num-experts', type=int, default=None,
+                       help='Load a smaller MoE checkpoint, copy its experts/router into the first slots of the current larger MoE model, and leave the newly added experts randomly initialized.')
+    group.add_argument('--moe-freeze-existing-experts', action='store_true',
+                       help='Freeze the experts copied from the smaller MoE checkpoint when --moe-expand-from-num-experts is used.')
+    group.add_argument('--moe-freeze-existing-router', action='store_true',
+                       help='Freeze the copied router rows when --moe-expand-from-num-experts is used.')
+    group.add_argument('--moe-train-new-experts-and-router-only', action='store_true',
+                       help='When expanding from a smaller MoE checkpoint, freeze every parameter except the newly added experts and the trainable portion of the expanded router.')
+    group.add_argument('--moe-resume-from-num-experts', type=int, default=None,
+                       help='When resuming from an already-expanded MoE checkpoint, re-apply continual-learning freezing using this many original experts.')
+    group.add_argument('--moe-old-model-kl-load', type=str, default=None,
+                       help='Checkpoint directory for reconstructing the pre-expansion MoE teacher during resumed continual learning.')
+    group.add_argument('--moe-old-model-kl-coeff', type=float, default=0.0,
+                       help='Scale factor lambda for KL distillation from the pre-expansion MoE teacher model during continual learning.')
+    group.add_argument('--moe-old-model-kl-temperature', type=float, default=1.0,
+                       help='Temperature used for old-model logits distillation during continual learning.')
     group.add_argument('--moe-permute-fusion', action='store_true',
                        help='Fuse token rearrangement ops during token dispatching.')
 

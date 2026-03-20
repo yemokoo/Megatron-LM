@@ -6,6 +6,7 @@ import dataclasses
 from datetime import datetime
 import functools
 import gc
+import json
 import logging
 import math
 import os
@@ -61,6 +62,12 @@ from megatron.training.utils import (
 )
 from megatron.legacy.data.data_samplers import build_pretraining_data_loader
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
+from megatron.core.transformer.moe.continual_learning_utils import (
+    expand_moe_model,
+    freeze_all_but_new_moe_params,
+    freeze_preexisting_moe_params,
+    inspect_moe_expansion,
+)
 from megatron.core.transformer.moe import upcycling_utils
 from megatron.core.transformer.moe.moe_utils import track_moe_metrics
 from megatron.core.parallel_state import (
@@ -103,9 +110,20 @@ from . import one_logger_utils
 from . import ft_integration
 
 stimer = StragglerDetector()
+_OLD_MOE_DISTILL_TEACHER = None
+
+
+def set_old_moe_distill_teacher(model):
+    global _OLD_MOE_DISTILL_TEACHER
+    _OLD_MOE_DISTILL_TEACHER = model
+
+
+def get_old_moe_distill_teacher():
+    return _OLD_MOE_DISTILL_TEACHER
 
 
 def destroy_global_state():
+    set_old_moe_distill_teacher(None)
     destroy_global_vars()
     destroy_num_microbatches_calculator()
     destroy_global_memory_buffer()
@@ -268,6 +286,7 @@ def pretrain(
     model_provider,
     model_type,
     forward_step_func,
+    probe_eval_func=None,
     process_non_loss_data_func=None,
     extra_args_provider=None,
     args_defaults={},
@@ -445,7 +464,7 @@ def pretrain(
                 forward_step_func,
                 model, optimizer, opt_param_scheduler,
                 train_data_iterator, valid_data_iterator,
-                process_non_loss_data_func, config, checkpointing_context,
+                probe_eval_func, process_non_loss_data_func, config, checkpointing_context,
                 non_loss_data_func)
 
         print_datetime('after training is done')
@@ -804,8 +823,80 @@ def setup_model_and_optimizer(model_provider_func,
         if (args.fp16 or args.bf16) and optimizer is not None:
             optimizer.reload_model_params()
         print_rank_0(f'Upcycled checkpoint saved to {args.save}')
+    elif args.moe_expand_from_num_experts is not None:
+        torch.distributed.barrier()
+        assert args.load is not None, "--moe-expand-from-num-experts requires --load."
+        assert args.num_experts is not None, "--moe-expand-from-num-experts requires an MoE target model."
+        assert (
+            args.moe_expand_from_num_experts < args.num_experts
+        ), "--moe-expand-from-num-experts must be smaller than --num-experts."
+        assert (
+            args.expert_model_parallel_size == 1
+        ), "MoE expansion currently supports only --expert-model-parallel-size 1."
 
-    if (args.load is not None or args.pretrained_checkpoint is not None) and not args.moe_use_upcycling:
+        target_num_experts = args.num_experts
+        args.num_experts = args.moe_expand_from_num_experts
+        source_model = get_model(model_provider_func, model_type, wrap_with_ddp=False)
+        args.num_experts = target_num_experts
+
+        _, args.num_floating_point_operations_so_far = load_checkpoint(
+            source_model,
+            None,
+            None,
+            checkpointing_context=checkpointing_context,
+        )
+        source_unwrapped_model = unwrap_model(source_model)
+        for target_shard, source_shard in zip(unwrapped_model, source_unwrapped_model):
+            expand_moe_model(target_shard, source_shard, args.moe_expand_from_num_experts)
+            if args.moe_train_new_experts_and_router_only:
+                freeze_all_but_new_moe_params(
+                    target_shard,
+                    args.moe_expand_from_num_experts,
+                    freeze_existing_experts=True,
+                    freeze_existing_router=True,
+                )
+            else:
+                freeze_preexisting_moe_params(
+                    target_shard,
+                    args.moe_expand_from_num_experts,
+                    args.moe_freeze_existing_experts,
+                    args.moe_freeze_existing_router,
+                )
+            if torch.distributed.get_rank() == 0:
+                audit_dir = os.path.join(args.save, "expansion_audit")
+                os.makedirs(audit_dir, exist_ok=True)
+                audit_path = os.path.join(
+                    audit_dir,
+                    f"expand_{args.moe_expand_from_num_experts}_to_{target_num_experts}.json",
+                )
+                with open(audit_path, "w", encoding="utf-8") as f:
+                    json.dump(
+                        inspect_moe_expansion(
+                            target_shard, source_shard, args.moe_expand_from_num_experts
+                        ),
+                        f,
+                        indent=2,
+                    )
+
+        if args.moe_old_model_kl_coeff > 0:
+            for teacher_shard in source_model:
+                teacher_shard.eval()
+                for param in teacher_shard.parameters():
+                    param.requires_grad = False
+            set_old_moe_distill_teacher(source_model)
+        else:
+            del source_model
+            set_old_moe_distill_teacher(None)
+        args.iteration = 0 if args.finetune else 1
+        if (args.fp16 or args.bf16) and optimizer is not None:
+            optimizer.reload_model_params()
+        print_rank_0(
+            f'Expanded MoE checkpoint from {args.moe_expand_from_num_experts} to {target_num_experts} experts.'
+        )
+
+    if args.moe_use_upcycling or args.moe_expand_from_num_experts is not None:
+        pass
+    elif (args.load is not None or args.pretrained_checkpoint is not None):
         one_logger and one_logger.log_metrics({
             'load_checkpoint_start_time': one_logger_utils.get_timestamp_in_ms()
         })
@@ -820,6 +911,63 @@ def setup_model_and_optimizer(model_provider_func,
             'load_checkpoint_finish_time': one_logger_utils.get_timestamp_in_ms(),
             'load_checkpoint_time': timers('load-checkpoint').active_time()
         })
+
+        if args.moe_resume_from_num_experts is not None:
+            assert args.moe_resume_from_num_experts < args.num_experts, (
+                '--moe-resume-from-num-experts must be smaller than --num-experts.'
+            )
+            for target_shard in unwrapped_model:
+                if args.moe_train_new_experts_and_router_only:
+                    freeze_all_but_new_moe_params(
+                        target_shard,
+                        args.moe_resume_from_num_experts,
+                        freeze_existing_experts=True,
+                        freeze_existing_router=True,
+                    )
+                else:
+                    freeze_preexisting_moe_params(
+                        target_shard,
+                        args.moe_resume_from_num_experts,
+                        args.moe_freeze_existing_experts,
+                        args.moe_freeze_existing_router,
+                    )
+
+            if args.moe_old_model_kl_coeff > 0 and args.moe_old_model_kl_load:
+                teacher_load_dir = args.moe_old_model_kl_load
+                target_num_experts = args.num_experts
+                original_load = args.load
+                original_finetune = args.finetune
+                original_no_load_optim = args.no_load_optim
+                original_no_load_rng = args.no_load_rng
+                original_consumed_train_samples = args.consumed_train_samples
+                original_consumed_valid_samples = args.consumed_valid_samples
+                args.num_experts = args.moe_resume_from_num_experts
+                args.load = teacher_load_dir
+                args.finetune = True
+                args.no_load_optim = True
+                args.no_load_rng = True
+                args.consumed_train_samples = 0
+                args.consumed_valid_samples = 0
+                source_model = get_model(model_provider_func, model_type, wrap_with_ddp=False)
+                args.num_experts = target_num_experts
+                _ = load_checkpoint(source_model, None, None)
+                args.load = original_load
+                args.finetune = original_finetune
+                args.no_load_optim = original_no_load_optim
+                args.no_load_rng = original_no_load_rng
+                args.consumed_train_samples = original_consumed_train_samples
+                args.consumed_valid_samples = original_consumed_valid_samples
+                for teacher_shard in source_model:
+                    teacher_shard.eval()
+                    for param in teacher_shard.parameters():
+                        param.requires_grad = False
+                set_old_moe_distill_teacher(source_model)
+            else:
+                set_old_moe_distill_teacher(None)
+
+            print_rank_0(
+                f'Resumed expanded MoE checkpoint at iteration {args.iteration} with continual-learning freeze reapplied.'
+            )
     else:
         args.iteration = 0
         args.num_floating_point_operations_so_far = 0
@@ -1037,62 +1185,63 @@ def training_log(loss_dict, total_loss_dict, learning_rate, decoupled_learning_r
        (iteration % args.tensorboard_log_interval == 0):
         timers.write(timers_to_log, writer, iteration,
                      normalizer=total_iterations)
+    wandb_iteration = iteration + getattr(args, 'wandb_step_offset', 0)
     if writer and (iteration % args.tensorboard_log_interval == 0):
         if wandb_writer:
             wandb_writer.log({'samples vs steps': args.consumed_train_samples},
-                             iteration)
+                             wandb_iteration)
         writer.add_scalar('learning-rate', learning_rate, iteration)
         writer.add_scalar('learning-rate vs samples', learning_rate,
                             args.consumed_train_samples)
         if wandb_writer:
-            wandb_writer.log({'learning-rate': learning_rate}, iteration)
+            wandb_writer.log({'learning-rate': learning_rate}, wandb_iteration)
         if args.decoupled_lr is not None:
             writer.add_scalar('decoupled-learning-rate', decoupled_learning_rate, iteration)
         if args.skipped_train_samples > 0:
             writer.add_scalar('skipped-train-samples', args.skipped_train_samples, iteration)
             if wandb_writer:
-                wandb_writer.log({'skipped-train-samples': args.skipped_train_samples}, iteration)
+                wandb_writer.log({'skipped-train-samples': args.skipped_train_samples}, wandb_iteration)
         writer.add_scalar('batch-size', batch_size, iteration)
         writer.add_scalar('batch-size vs samples', batch_size,
                           args.consumed_train_samples)
         if wandb_writer:
-            wandb_writer.log({'batch-size': batch_size}, iteration)
+            wandb_writer.log({'batch-size': batch_size}, wandb_iteration)
         for key in loss_dict:
             writer.add_scalar(key , loss_dict[key], iteration)
             writer.add_scalar(key + ' vs samples', loss_dict[key],
                               args.consumed_train_samples)
             if wandb_writer:
-                wandb_writer.log({key: loss_dict[key]}, iteration)
+                wandb_writer.log({key: loss_dict[key]}, wandb_iteration)
         if args.log_loss_scale_to_tensorboard:
             writer.add_scalar('loss-scale', loss_scale, iteration)
             writer.add_scalar('loss-scale vs samples', loss_scale,
                               args.consumed_train_samples)
             if wandb_writer:
-                wandb_writer.log({'loss-scale': loss_scale}, iteration)
+                wandb_writer.log({'loss-scale': loss_scale}, wandb_iteration)
         if args.log_world_size_to_tensorboard:
             writer.add_scalar('world-size', args.world_size, iteration)
             writer.add_scalar('world-size vs samples', args.world_size,
                               args.consumed_train_samples)
             if wandb_writer:
-                wandb_writer.log({'world-size': args.world_size}, iteration)
+                wandb_writer.log({'world-size': args.world_size}, wandb_iteration)
         if grad_norm is not None:
             writer.add_scalar('grad-norm', grad_norm, iteration)
             writer.add_scalar('grad-norm vs samples', grad_norm,
                               args.consumed_train_samples)
             if wandb_writer:
-                wandb_writer.log({'grad-norm': grad_norm}, iteration)
+                wandb_writer.log({'grad-norm': grad_norm}, wandb_iteration)
         if num_zeros_in_grad is not None:
             writer.add_scalar('num-zeros', num_zeros_in_grad, iteration)
             writer.add_scalar('num-zeros vs samples', num_zeros_in_grad,
                               args.consumed_train_samples)
             if wandb_writer:
-                wandb_writer.log({'num-zeros': num_zeros_in_grad}, iteration)
+                wandb_writer.log({'num-zeros': num_zeros_in_grad}, wandb_iteration)
         if params_norm is not None:
             writer.add_scalar('params-norm', params_norm, iteration)
             writer.add_scalar('params-norm vs samples', params_norm,
                               args.consumed_train_samples)
             if wandb_writer:
-                wandb_writer.log({'params-norm': params_norm}, iteration)
+                wandb_writer.log({'params-norm': params_norm}, wandb_iteration)
         if args.log_memory_to_tensorboard:
             mem_stats = torch.cuda.memory_stats()
             writer.add_scalar(
@@ -1117,7 +1266,15 @@ def training_log(loss_dict, total_loss_dict, learning_rate, decoupled_learning_r
             )
     if args.num_experts is not None:
         moe_loss_scale = 1 / get_num_microbatches()
-        track_moe_metrics(moe_loss_scale, iteration, writer, wandb_writer, total_loss_dict, args.moe_per_layer_logging)
+        track_moe_metrics(
+            moe_loss_scale,
+            iteration,
+            writer,
+            wandb_writer,
+            total_loss_dict,
+            args.moe_per_layer_logging,
+            wandb_step=wandb_iteration,
+        )
 
     if iteration % args.log_interval == 0:
         if args.record_memory_history and is_last_rank():
@@ -1140,7 +1297,7 @@ def training_log(loss_dict, total_loss_dict, learning_rate, decoupled_learning_r
                                   elapsed_time_per_iteration, iteration)
             if wandb_writer:
                 wandb_writer.log({'iteration-time': elapsed_time_per_iteration},
-                                 iteration)
+                                 wandb_iteration)
         log_string = f" [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]"
         log_string += ' iteration {:8d}/{:8d} |'.format(
             iteration, args.train_iters)
@@ -1157,7 +1314,7 @@ def training_log(loss_dict, total_loss_dict, learning_rate, decoupled_learning_r
                 if writer:
                     writer.add_scalar('throughput', throughput, iteration)
                 if wandb_writer:
-                    wandb_writer.log({'throughput': throughput}, iteration)
+                    wandb_writer.log({'throughput': throughput}, wandb_iteration)
         # Decoupled_learning_rate should be not None only on first and last pipeline stage.
         log_string += f' learning rate: {learning_rate:.6E} |'
         if args.decoupled_lr is not None and (mpu.is_pipeline_first_stage(ignore_virtual=True) or
@@ -1411,7 +1568,7 @@ def checkpoint_and_decide_exit(model, optimizer, opt_param_scheduler, iteration,
 
 def train(forward_step_func, model, optimizer, opt_param_scheduler,
           train_data_iterator, valid_data_iterator,
-          process_non_loss_data_func, config, checkpointing_context, non_loss_data_func):
+          probe_eval_func, process_non_loss_data_func, config, checkpointing_context, non_loss_data_func):
     """Training function: run train_step desired number of times, run validation, checkpoint."""
     args = get_args()
     timers = get_timers()
@@ -1665,6 +1822,16 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
                                           report_memory_flag, skipped_iter,
                                           grad_norm, params_norm, num_zeros_in_grad)
 
+        should_run_primary_probe = (
+            args.probe_eval_interval and iteration % args.probe_eval_interval == 0
+        )
+        should_run_secondary_probe = (
+            getattr(args, 'secondary_probe_eval_interval', 0)
+            and iteration % args.secondary_probe_eval_interval == 0
+        )
+        if probe_eval_func is not None and (should_run_primary_probe or should_run_secondary_probe):
+            probe_eval_func(model, iteration)
+
         # Evaluation.
         if args.eval_interval and iteration % args.eval_interval == 0 and \
             args.do_valid:
@@ -1899,7 +2066,7 @@ def evaluate_and_print_results(prefix, forward_step_func,
             if wandb_writer and is_last_rank():
                 wandb_writer.log({
                     '{} validation'.format(key): total_loss_dict[key].item()},
-                    iteration)
+                    iteration + getattr(args, 'wandb_step_offset', 0))
 
     if process_non_loss_data_func is not None and writer and is_last_rank():
         process_non_loss_data_func(collected_non_loss_data, iteration, writer)

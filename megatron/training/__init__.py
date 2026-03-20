@@ -12,6 +12,7 @@ from .global_vars import get_adlr_autoresume
 from .global_vars import get_timers
 from .initialize  import initialize_megatron
 from .training import pretrain, get_model, get_train_valid_test_num_samples
+from .training import get_old_moe_distill_teacher
 
 from .utils import (print_rank_0,
                     is_last_rank,

@@ -601,12 +601,20 @@ def reduce_aux_losses_tracker_across_ranks():
 
 
 def track_moe_metrics(
-    loss_scale, iteration, writer, wandb_writer=None, total_loss_dict=None, per_layer_logging=False
+    loss_scale,
+    iteration,
+    writer,
+    wandb_writer=None,
+    total_loss_dict=None,
+    per_layer_logging=False,
+    wandb_step=None,
 ):
     """Track the MoE metrics for logging."""
     # Aux loss logging
     reduce_aux_losses_tracker_across_ranks()
     tracker = parallel_state.get_moe_layer_wise_logging_tracker()
+    if wandb_step is None:
+        wandb_step = iteration
     if writer is not None:
         aux_losses = {k: v['values'].float() * loss_scale for k, v in tracker.items()}
         for name, loss_list in aux_losses.items():
@@ -628,14 +636,14 @@ def track_moe_metrics(
             # As a workaround, we log each scalar individually first, then we can create
             # a custom panel to manually group them to a single plot.
             if wandb_writer:
-                wandb_writer.log({f"{name}": loss_list.mean()}, iteration)
+                wandb_writer.log({f"{name}": loss_list.mean()}, wandb_step)
                 if per_layer_logging:
                     wandb_writer.log(
                         {
                             f"moe/{name}_layer_{i}": loss
                             for i, loss in enumerate(loss_list.tolist())
                         },
-                        iteration,
+                        wandb_step,
                     )
 
     clear_aux_losses_tracker()
