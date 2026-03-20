@@ -1,18 +1,51 @@
-/dataset
-/weights
-/results
-
-/logs
-/site
+# Local experiment artifacts
+/.local/
+/.logs/
+/dataset/
+/weights/
+/results/
+/figures/
+/site/
+/logs/
 /slurm-*
 
+# Secrets and local env files
 /scripts/secret.sh
-.env*
+.env
+.env.*
 
-/figures
-/results
+# Python cache / tooling cache
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
 
-*.pyc
-.nfs*
+# Local Python / Conda environments
+/.conda/
+.venv/
+venv/
 
-.vscode
+# Experiment tracking
+wandb/
+tensorboard/
+events.out.tfevents*
+
+# Build outputs and compiled extensions
+build/
+dist/
+*.egg-info/
+*.so
+*.o
+*.a
+
+# Checkpoints and runtime scratch
+*.distcp
+*.nfs*
+
+# Editor / OS noise
+.vscode/
+.idea/
+.DS_Store

@@ -63,6 +63,21 @@ Flow:
 3. Pass MoE expansion flags into Megatron-LM.
 4. Continue training on a shifted-domain dataset.
 
+Conceptually, Stage B is not a fresh pretraining run.
+
+It is:
+
+- Stage A checkpoint loading
+- expert expansion from a smaller MoE to a larger MoE
+- optional freezing of the copied experts and router rows
+- continual learning on the new domain
+
+So the expected workflow is:
+
+1. Train Stage A on the general-domain proxy data.
+2. Save a usable Stage A checkpoint.
+3. Launch Stage B from that checkpoint with a larger expert count.
+
 Default local Stage B dataset:
 
 - `$LOCAL_DATASET/python-code/tokenized/EleutherAI/pythia-12b`
@@ -239,24 +254,25 @@ STAGE_A_RUN_ID=<run_id> SOURCE_NUM_EXPERTS=2 NUM_EXPERTS=6 bash scripts/experime
 
 ## Is TransformerEngine required?
 
-Not strictly for this local experiment.
+For this repo as actually validated on the local Docker setup: yes, effectively.
 
-Why:
+Why the earlier assumption changed:
 
-- `pretrain_gpt.py` supports both `local` and `transformer_engine`.
-- `arguments.py` defaults to `transformer_engine`, but the local scripts now pass `--transformer-impl "$TRANSFORMER_IMPL"` explicitly.
-- The local GPT layer path supports MoE without TransformerEngine.
+- `pretrain_gpt.py` does support both `local` and `transformer_engine` layer specs.
+- However, in this fork, importing `pretrain_gpt.py` still pulls code paths that import `megatron.core.extensions.transformer_engine`.
+- In practice, `python pretrain_gpt.py --help` failed without `transformer_engine`, even when the intended runtime flag was `--transformer-impl local`.
 
-Important nuance:
+What this means:
 
-- TransformerEngine is still useful for performance and for some optimized kernels.
-- Some advanced paths in Megatron require it, but the current Stage A/B setup does not.
-- Because these scripts do not enable FP8 or grouped GEMM, they do not rely on the main TE-only MoE fast paths.
+- `TRANSFORMER_IMPL=local` still controls which GPT layer spec is selected.
+- But the runtime environment still needs the `transformer_engine` Python package installed.
+- Apex is not strictly required for basic bring-up; the current validated path falls back to Torch norm when Apex is absent.
 
 Practical recommendation:
 
-- Start with `TRANSFORMER_IMPL=local`
-- Move to `transformer_engine` only if you specifically want speed or parity with a TE-based cluster environment
+- Treat TransformerEngine as a required dependency for local bring-up in this repo.
+- Treat Apex as optional until a later runtime error proves otherwise.
+- Keep `TRANSFORMER_IMPL=local` for the first sanity-check runs unless you specifically want TE-backed model layers.
 
 ## Is CUDA 12.4 required?
 
@@ -277,23 +293,76 @@ What is actually required in practice:
 
 So the real requirement is compatibility between PyTorch, CUDA, NCCL, and optional TransformerEngine, not CUDA 12.4 specifically.
 
-## Environment reality check from this workspace
+## Environment reality check from the validated local Docker setup
 
-In the current shell environment used for inspection:
+The local bring-up that actually reached `pretrain_gpt.py --help` used:
 
-- `python3` exists
-- `torch` is not installed in that interpreter
-- `transformer_engine` is not installed in that interpreter
+- Docker container based on `nvidia/cuda:12.2.2-cudnn8-devel-ubuntu20.04`
+- container name: `flame-moe-3090`
+- Conda installed under `/workspace/FLAME-MoE/.conda`
+- Conda env name: `flame3090`
+- Python `3.10`
+- PyTorch `2.5.1+cu121`
+- `torchrun` works
+- `transformer_engine` import works
+- `python Megatron-LM/pretrain_gpt.py --help` prints help successfully
 
-This does not prove your training environment is broken, because the actual training scripts rely on the target runtime environment, not necessarily the inspection shell. But it does mean the current shell cannot launch training as-is.
+Useful re-entry commands:
+
+```bash
+docker start flame-moe-3090
+docker exec -it flame-moe-3090 bash
+source /workspace/FLAME-MoE/.conda/etc/profile.d/conda.sh
+conda activate flame3090
+```
+
+## Precision note for RTX 3090
+
+The local scripts currently pass `--bf16` by default.
+
+For first bring-up on RTX 3090, `fp16` is the safer default:
+
+- Ampere consumer GPUs do not make bf16 the safest assumption for Megatron bring-up.
+- The first goal here is not optimal performance, but getting Stage A to run reliably.
+- In practice, switching the local scripts from `--bf16` to `--fp16` is the recommended first sanity-check path.
+
+So yes, this recommendation is specifically tied to the current local target hardware:
+
+- RTX 3090 local server bring-up first
+- reliability before optimization
+- avoid spending time debugging bf16-specific behavior if fp16 already satisfies the smoke test goal
+
+## Wikipedia subset note
+
+For the local smoke test, a small Stage A subset was prepared instead of a large training corpus.
+
+What was done:
+
+- source dataset: `wikimedia/wikipedia`
+- config used successfully: `20231101.en`
+- subset size: `20,000` streamed English Wikipedia documents
+- raw output directory: `$LOCAL_BASE/dataset/wikipedia/raw`
+- tokenized output directory: `$LOCAL_BASE/dataset/wikipedia/tokenized/EleutherAI/pythia-12b`
+
+Important implementation notes from the actual run:
+
+- `20220301.en` was not available in the current `datasets` package view; `20231101.en` worked.
+- In this repo's `Megatron-LM/tools/preprocess_data.py`, `--chunk-size` was not a valid flag.
+- `--json-keys text` worked; `--json-key text` was not the correct CLI spelling for this version.
+
+This subset is only for pipeline validation:
+
+- enough to confirm tokenization and Stage A startup
+- far too small to represent a real `10B`-token Stage A corpus
 
 ## Suggested next steps
 
-1. Prepare Stage A proxy data under `$LOCAL_BASE/dataset/wikipedia/tokenized/EleutherAI/pythia-12b`
-2. Run a small Stage A baseline such as `NUM_EXPERTS=4`
-3. Expand with Stage B to `NUM_EXPERTS=7` or `8`
-4. Track:
+1. Switch the local Stage A script from `--bf16` to `--fp16` or make precision configurable.
+2. Run a 4x3090 Stage A sanity-check on GPUs `4,5,6,7`.
+3. After Stage A bring-up succeeds, decide whether to keep the small Wikipedia subset only for smoke testing or prepare a larger public Stage A corpus.
+4. Expand with Stage B to `NUM_EXPERTS=7` or `8`.
+5. Track:
    - Stage A validation perplexity before and after Stage B
    - Stage B in-domain validation perplexity
    - router usage and old-vs-new expert utilization
-5. If the goal is closer Figure 3 fidelity, add an intermediate multilingual stage
+6. If the goal is closer Figure 3 fidelity, add an intermediate multilingual stage
