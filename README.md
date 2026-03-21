@@ -3,9 +3,10 @@
 This repository contains our local continual-learning workflow for FLAME-MoE on top of a vendored [Megatron-LM](./Megatron-LM) tree.
 
 The current codebase is centered around:
-- local multi-GPU `fp32` training on 3090/A100-class machines
+- local multi-GPU training on 3090/A100-class machines
 - exact physical dataset splits for train/test
 - continual-learning experiments for `A -> B`, `B -> A`, and `7-expert` runs
+- new dense-plus-attention-LoRA experiments on mixed `wiki + code` data
 - routing, masking, interpolation, and probe-curve evaluation suites
 
 ## Current Focus
@@ -22,6 +23,8 @@ Canonical top-level entrypoints:
 - [stage_A_7experts_local_fp32.sh](./scripts/experiment/stage_A_7experts_local_fp32.sh)
 - [stage_A_7experts_resume_local_fp32.sh](./scripts/experiment/stage_A_7experts_resume_local_fp32.sh)
 - [stage_B_after_A_7experts_no_freeze_local_fp32.sh](./scripts/experiment/stage_B_after_A_7experts_no_freeze_local_fp32.sh)
+- [pretrain_mixed_dense_local_bf16.sh](./scripts/experiment/pretrain_mixed_dense_local_bf16.sh)
+- [train_mixed_qv_lora_experts_local_bf16.sh](./scripts/experiment/train_mixed_qv_lora_experts_local_bf16.sh)
 
 The implementation-detail scripts under `stage_*` are still the real workers. The short aliases above are the preferred entrypoints when possible.
 
@@ -62,6 +65,36 @@ Continual 4-expert / 7-expert comparisons:
 7-expert runs:
 - wiki 7-expert resumed A: [stage-a-7experts-resume-local-fp32-gpu0123-r1](./.local/weights/continual-stage-A-7experts-resume-local/stage-a-7experts-resume-local-fp32-gpu0123-r1)
 - code after wiki 7-expert continual: [stage-b-after-a-7experts-no-freeze-local-fp32-gpu0123-r1](./.local/weights/continual-stage-B-after-A-7experts-no-freeze-local/stage-b-after-a-7experts-no-freeze-local-fp32-gpu0123-r1)
+
+## Attention LoRA Experiments
+
+We also maintain a new experiment path that does not modify the existing FFN-MoE continual-learning codepath.
+
+Current design:
+- Stage 1: train a dense transformer backbone on mixed `wiki + code` train-exact data
+- Stage 2: load that dense checkpoint, add routed LoRA experts on attention `Q` and `V`, and continue training
+- the Stage 2 default is to freeze the backbone and train only the attention LoRA experts plus their router
+
+Current defaults for this path:
+- dense FFN hidden size stays at `5472`
+- attention LoRA routing uses `top-1`
+- both exact train splits are mixed 1:1 by construction
+- probes are still logged on wiki test and code test
+- intended precision is `bf16` on A100-class GPUs
+
+Relevant files:
+- model config for dense pretrain: [flame-dense.sh](./configs/model/flame-dense.sh)
+- model config for attention LoRA experts: [flame-qv-lora-experts.sh](./configs/model/flame-qv-lora-experts.sh)
+- attention LoRA module: [qv_lora_attention.py](./Megatron-LM/megatron/core/transformer/qv_lora_attention.py)
+- custom GPT layer spec: [qv_lora_layer_specs.py](./Megatron-LM/megatron/core/models/gpt/qv_lora_layer_specs.py)
+- stage 1 launcher: [pretrain_mixed_dense_local_bf16.sh](./scripts/experiment/pretrain_mixed_dense_local_bf16.sh)
+- stage 2 launcher: [train_mixed_qv_lora_experts_local_bf16.sh](./scripts/experiment/train_mixed_qv_lora_experts_local_bf16.sh)
+
+Typical flow:
+```bash
+bash scripts/experiment/pretrain_mixed_dense_local_bf16.sh
+bash scripts/experiment/train_mixed_qv_lora_experts_local_bf16.sh
+```
 
 ## Continual-Learning Semantics
 
@@ -157,7 +190,7 @@ Important directories:
 - [scripts/experiment](./scripts/experiment): local training entrypoints
 - [eval](./eval): evaluation runners
 - [analysis](./analysis): analysis and plotting scripts
-- [Megatron-LM](./Megatron-LM): vendored training engine
+- [Megatron-LM](./Megatron-LM): vendored training engine, including the new attention LoRA experiment path
 - [apex](./apex): vendored extension source
 - [TransformerEngine](./TransformerEngine): vendored extension source
 
@@ -192,4 +225,4 @@ Each subfolder is exported as a minimal Megatron load directory with a single re
 ## Notes
 
 - The old top-level README described the earlier release/SLURM workflow. This file now reflects the current local continual-learning workflow.
-- If a script or doc conflicts with this README, prefer the local fp32 experiment scripts and the per-suite READMEs under `eval/`.
+- If a script or doc conflicts with this README, prefer the current local experiment scripts under `scripts/experiment/`, including both the fp32 continual-learning path and the newer mixed dense / attention-LoRA bf16 path.

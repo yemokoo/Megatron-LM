@@ -15,10 +15,13 @@ Branch in active use:
 - `slurm`
 
 Top-level docs and setup files already updated:
+- KT image preset decision: if restricted to the shown NGC presets, start from `24.07` and use the no-conda setup path in `KT_24_07_SETUP.md`
 - `README.md`
 - `.gitignore`
 - `environment.a100.yml`
 - `scripts/miscellaneous/install_a100_env.sh`
+- `KT_24_07_SETUP.md`
+- `scripts/miscellaneous/install_kt_24_07_no_conda.sh`
 - `scripts/release/install_hf_tools.sh`
 - `scripts/release/upload_models_to_hf.py`
 
@@ -107,6 +110,31 @@ Useful commands:
 .conda/envs/flame3090/bin/python scripts/release/upload_models_to_hf.py --dry-run
 .conda/envs/flame3090/bin/python scripts/release/upload_models_to_hf.py
 ```
+
+## KT Server Image Decision
+
+If the KT server only allows choosing from the shown NGC PyTorch images (`25.05`, `25.01`, `24.07`, `23.09`), the recommended starting point is:
+- `24.07`
+
+Reasoning:
+- it keeps `Python 3.10`, which is closest to the currently validated local environment
+- it is less disruptive for Megatron-LM + TransformerEngine + Apex than the newer `25.01` / `25.05` images that move to Python `3.12`
+- it is newer and more practical than `23.09`, while still staying conservative
+
+Important nuance:
+- choose `24.07` as the base image
+- do not rely on the image's stock `PyTorch 2.4` as the final runtime
+- recreate a project-local venv with `scripts/miscellaneous/install_kt_24_07_no_conda.sh`
+- that script now reinstalls a project-local stack close to the previously validated local env: `Python 3.10`, `torch 2.5.1+cu121`, local Apex, and local TransformerEngine
+
+Practical KT-server plan:
+1. start from NGC PyTorch `24.07`
+2. clone this repo and checkout `slurm`
+3. if the session is reclaimed on low utilization, run `python scripts/miscellaneous/session_warmup.py` in another pane while installing
+4. default warmup is light (`1s` compute / `4s` sleep); if needed, raise it with `--matrix-size 3072 --compute-seconds 2.0 --sleep-seconds 2.0`
+5. run `bash scripts/miscellaneous/install_kt_24_07_no_conda.sh`
+6. `source .venv-kt2407/bin/activate`
+7. run smoke tests before full training/eval
 
 ## A100 Migration Priority
 

@@ -7,7 +7,19 @@ cd "$PROJECT_ROOT"
 export LOCAL_BASE="${LOCAL_BASE:-$PROJECT_ROOT/.local}"
 export LOCAL_DATASET="${LOCAL_DATASET:-$LOCAL_BASE/dataset}"
 export LOCAL_WEIGHTS="${LOCAL_WEIGHTS:-$LOCAL_BASE/weights}"
-export PYTHON_BIN="${PYTHON_BIN:-$PROJECT_ROOT/.conda/envs/flame3090/bin/python}"
+DEFAULT_PROJECT_PYTHON="$PROJECT_ROOT/.conda/envs/flame3090/bin/python"
+if [[ -n "${PYTHON_BIN:-}" ]]; then
+    export PYTHON_BIN
+elif [[ -x "$DEFAULT_PROJECT_PYTHON" ]]; then
+    export PYTHON_BIN="$DEFAULT_PROJECT_PYTHON"
+elif command -v python >/dev/null 2>&1; then
+    export PYTHON_BIN="$(command -v python)"
+elif command -v python3 >/dev/null 2>&1; then
+    export PYTHON_BIN="$(command -v python3)"
+else
+    echo "ERROR: could not find a usable python interpreter"
+    exit 1
+fi
 
 export BASE_WEIGHTS_DIR="${BASE_WEIGHTS_DIR:-$LOCAL_WEIGHTS/continual-stage-A/stage-a-local-fp32-20260310-103742}"
 export TARGET_FULL_WEIGHTS_DIR="${TARGET_FULL_WEIGHTS_DIR:-$LOCAL_WEIGHTS/continual-stage-A-to_B/stage-b-resume-local-fp32-20260311-171347}"

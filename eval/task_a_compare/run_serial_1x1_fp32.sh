@@ -27,7 +27,19 @@ export GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-$((MICRO_BATCH_SIZE * NPROC_PER_M
 export OUTPUT_ROOT="${OUTPUT_ROOT:-$LOCAL_WEIGHTS/task-a-compare-serial-1x1}"
 export LABEL_A="${LABEL_A:-stage-a}"
 export LABEL_B="${LABEL_B:-stage-b}"
-export PYTHON_BIN="${PYTHON_BIN:-$PROJECT_ROOT/.conda/envs/flame3090/bin/python}"
+DEFAULT_PROJECT_PYTHON="$PROJECT_ROOT/.conda/envs/flame3090/bin/python"
+if [[ -n "${PYTHON_BIN:-}" ]]; then
+    export PYTHON_BIN
+elif [[ -x "$DEFAULT_PROJECT_PYTHON" ]]; then
+    export PYTHON_BIN="$DEFAULT_PROJECT_PYTHON"
+elif command -v python >/dev/null 2>&1; then
+    export PYTHON_BIN="$(command -v python)"
+elif command -v python3 >/dev/null 2>&1; then
+    export PYTHON_BIN="$(command -v python3)"
+else
+    echo "ERROR: could not find a usable python interpreter"
+    exit 1
+fi
 export SHOW_PROGRESS="${SHOW_PROGRESS:-0}"
 export DATASET_SPLIT="${DATASET_SPLIT:-95,5,0}"
 export DATASET_SPLIT_NAME="${DATASET_SPLIT_NAME:-train}"

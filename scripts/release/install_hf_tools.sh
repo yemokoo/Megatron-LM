@@ -8,7 +8,7 @@ PYTHON_BIN="${PYTHON_BIN:-$PROJECT_ROOT/.conda/envs/flame3090/bin/python}"
 PIP_BIN="${PIP_BIN:-$PYTHON_BIN -m pip}"
 
 if [[ ! -x "$PYTHON_BIN" ]]; then
-  echo "ERROR: project python not found under .conda/envs/flame3090"
+  echo "ERROR: could not find a usable python interpreter"
   exit 1
 fi
 
@@ -22,5 +22,5 @@ PY
 echo "HF tooling is ready."
 echo "Next steps:"
 echo "  1. ~/.local/bin/hf auth login"
-echo "  2. .conda/envs/flame3090/bin/python scripts/release/upload_models_to_hf.py --dry-run"
-echo "  3. .conda/envs/flame3090/bin/python scripts/release/upload_models_to_hf.py"
+echo "  2. python scripts/release/upload_models_to_hf.py --dry-run"
+echo "  3. python scripts/release/upload_models_to_hf.py"
