@@ -133,6 +133,24 @@ class TransformerConfig(ModelParallelConfig):
     multi_latent_attention: bool = False
     """Whether to use multi-latent attention."""
 
+    attn_lora_num_experts: int = 0
+    """Number of routed LoRA experts attached to attention Q/V projections."""
+
+    attn_lora_rank: int = 0
+    """LoRA rank used for each attention expert."""
+
+    attn_lora_topk: int = 1
+    """Number of attention LoRA experts selected per token."""
+
+    attn_lora_alpha: float = 1.0
+    """Scaling factor applied to attention LoRA expert outputs."""
+
+    attn_lora_router_dtype: str = "fp32"
+    """Router dtype for attention LoRA experts."""
+
+    attn_lora_train_router_and_experts_only: bool = False
+    """Freeze all non-LoRA/router params after checkpoint load."""
+
     ####################
     # initialization
     ####################

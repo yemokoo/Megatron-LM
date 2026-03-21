@@ -2455,4 +2455,18 @@ def _add_experimental_args(parser):
                        help='Dtype of exp_avg when enabling precision-aware-optimizer')
     group.add_argument('--exp-avg-sq-dtype', default='fp32', choices=['fp32', 'fp16', 'fp8'],
                        help='Dtype of exp_avg_sq when enabling precision-aware-optimizer')
+    group.add_argument('--attn-lora-num-experts', type=int, default=0,
+                       help='Number of routed LoRA experts attached to attention Q/V projections.')
+    group.add_argument('--attn-lora-rank', type=int, default=0,
+                       help='LoRA rank for each attention expert.')
+    group.add_argument('--attn-lora-topk', type=int, default=1,
+                       help='Number of attention LoRA experts selected per token.')
+    group.add_argument('--attn-lora-alpha', type=float, default=1.0,
+                       help='Scaling factor for attention LoRA expert outputs.')
+    group.add_argument('--attn-lora-router-dtype', type=str, default='fp32',
+                       choices=['fp32', 'bf16'],
+                       help='Router dtype for attention LoRA experts.')
+    group.add_argument('--attn-lora-train-router-and-experts-only', action='store_true',
+                       help='Freeze all backbone parameters after loading and train only '
+                            'attention LoRA experts plus their routers.')
     return parser

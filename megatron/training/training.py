@@ -64,6 +64,7 @@ from megatron.legacy.data.data_samplers import build_pretraining_data_loader
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
 from megatron.core.transformer.moe.continual_learning_utils import (
     expand_moe_model,
+    freeze_all_but_attn_lora_router_params,
     freeze_all_but_new_moe_params,
     freeze_preexisting_moe_params,
     inspect_moe_expansion,
@@ -911,6 +912,11 @@ def setup_model_and_optimizer(model_provider_func,
             'load_checkpoint_finish_time': one_logger_utils.get_timestamp_in_ms(),
             'load_checkpoint_time': timers('load-checkpoint').active_time()
         })
+
+        if args.attn_lora_train_router_and_experts_only:
+            for target_shard in unwrapped_model:
+                freeze_all_but_attn_lora_router_params(target_shard)
+            print_rank_0('Reapplied attention LoRA/router-only freeze after checkpoint load.')
 
         if args.moe_resume_from_num_experts is not None:
             assert args.moe_resume_from_num_experts < args.num_experts, (

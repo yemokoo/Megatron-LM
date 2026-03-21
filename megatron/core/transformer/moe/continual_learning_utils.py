@@ -5,6 +5,7 @@ import torch
 
 from megatron.core.transformer.moe.experts import GroupedMLP, SequentialMLP, TEGroupedMLP
 from megatron.core.transformer.moe.router import Router
+from megatron.core.transformer.qv_lora_attention import QVLoraExpertRouter
 
 
 _EXPERT_SUFFIX_RE = re.compile(r"(?:weight|bias)(\d+)$")
@@ -156,6 +157,17 @@ def freeze_all_but_new_moe_params(
                 expert_idx = int(match.group(1))
                 param.requires_grad = expert_idx >= num_existing_experts if freeze_existing_experts else True
 
+
+
+
+def freeze_all_but_attn_lora_router_params(model):
+    for param in model.parameters():
+        param.requires_grad = False
+
+    for module in model.modules():
+        if isinstance(module, QVLoraExpertRouter):
+            for param in module.parameters():
+                param.requires_grad = True
 
 def _tensor_summary(tensor):
     return {
