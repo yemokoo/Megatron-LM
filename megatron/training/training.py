@@ -136,6 +136,41 @@ def _load_attn_lora_source_model(
     return source_model
 
 
+def _load_teacher_model_from_checkpoint(
+    model_provider_func, model_type, checkpointing_context, teacher_load_dir
+):
+    args = get_args()
+    original_load = args.load
+    original_finetune = args.finetune
+    original_no_load_optim = args.no_load_optim
+    original_no_load_rng = args.no_load_rng
+    original_consumed_train_samples = args.consumed_train_samples
+    original_consumed_valid_samples = args.consumed_valid_samples
+
+    args.load = teacher_load_dir
+    args.finetune = True
+    args.no_load_optim = True
+    args.no_load_rng = True
+    args.consumed_train_samples = 0
+    args.consumed_valid_samples = 0
+
+    source_model = get_model(model_provider_func, model_type, wrap_with_ddp=False)
+    _ = load_checkpoint(source_model, None, None, checkpointing_context=checkpointing_context)
+
+    args.load = original_load
+    args.finetune = original_finetune
+    args.no_load_optim = original_no_load_optim
+    args.no_load_rng = original_no_load_rng
+    args.consumed_train_samples = original_consumed_train_samples
+    args.consumed_valid_samples = original_consumed_valid_samples
+
+    for teacher_shard in source_model:
+        teacher_shard.eval()
+        for param in teacher_shard.parameters():
+            param.requires_grad = False
+    return source_model
+
+
 def get_old_moe_distill_teacher():
     return _OLD_MOE_DISTILL_TEACHER
 
@@ -1121,6 +1156,27 @@ def setup_model_and_optimizer(model_provider_func,
                 'Resumed expanded attention LoRA checkpoint at iteration '
                 f'{args.iteration} with continual-learning freeze reapplied.'
             )
+        if (
+            args.moe_resume_from_num_experts is None
+            and args.attn_lora_resume_from_num_experts is None
+            and args.moe_old_model_kl_coeff > 0
+            and args.moe_old_model_kl_load
+        ):
+            source_model = _load_teacher_model_from_checkpoint(
+                model_provider_func,
+                model_type,
+                checkpointing_context,
+                args.moe_old_model_kl_load,
+            )
+            set_old_moe_distill_teacher(source_model)
+            print_rank_0(
+                f'Loaded old-model KL teacher from {args.moe_old_model_kl_load} for continual learning.'
+            )
+        elif (
+            args.moe_resume_from_num_experts is None
+            and args.attn_lora_resume_from_num_experts is None
+        ):
+            set_old_moe_distill_teacher(None)
     else:
         args.iteration = 0
         args.num_floating_point_operations_so_far = 0
