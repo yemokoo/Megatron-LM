@@ -126,6 +126,8 @@ export GPU_LOG="${GPU_LOG:-$LOG_DIR/gpu_usage.csv}"
 export RUN_METADATA="${RUN_METADATA:-$LOG_DIR/run_metadata.json}"
 export DATASET_NAME="${DATASET_NAME:-code_exact}"
 export DATASET_SOURCE="${DATASET_SOURCE:-Python code exact train}"
+export OLD_MODEL_KL_COEFF="${OLD_MODEL_KL_COEFF:-1.0}"
+export OLD_MODEL_KL_TEMPERATURE="${OLD_MODEL_KL_TEMPERATURE:-1.0}"
 export PROBE_DATASET="${PROBE_DATASET:-$LOCAL_DATASET/python-code-full/tokenized/EleutherAI/pythia-12b-step1800-test-matchwiki-exact}"
 export PROBE_NAME="${PROBE_NAME:-code_probe}"
 export PROBE_EVAL_ITERS="${PROBE_EVAL_ITERS:-25}"
@@ -221,6 +223,8 @@ metadata = {
     'num_layers': int(os.environ['NUM_LAYERS']),
     'hidden_size': int(os.environ['HIDDEN_SIZE']),
     'ffn_hidden_size': int(os.environ['FFN_HIDDEN_SIZE']),
+    'old_model_kl_coeff': float(os.environ['OLD_MODEL_KL_COEFF']),
+    'old_model_kl_temperature': float(os.environ['OLD_MODEL_KL_TEMPERATURE']),
     'probe_step_offset': int(os.environ['PROBE_STEP_OFFSET']),
     'precision': os.environ['PRECISION'],
 }
@@ -271,6 +275,9 @@ SAVE_ARGS=(
     --load "$SSD_SOURCE_WEIGHTS"
     --eval-interval "$EVAL_INTERVAL"
     --tensorboard-dir "$SSD_TARGET_WEIGHTS"
+    --moe-old-model-kl-coeff "$OLD_MODEL_KL_COEFF"
+    --moe-old-model-kl-temperature "$OLD_MODEL_KL_TEMPERATURE"
+    --moe-old-model-kl-load "$SSD_SOURCE_WEIGHTS"
 )
 
 PROBE_ARGS=(
