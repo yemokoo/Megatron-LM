@@ -36,7 +36,31 @@ except ImportError:
     try:
         import apex  # pylint: disable=unused-import
 
-        LayerNormImpl = FusedLayerNorm
+        from megatron.core.transformer.torch_norm import WrappedTorchNorm
+
+        class LayerNormImpl:
+            """Use fused LayerNorm when possible, but fall back for RMSNorm."""
+
+            def __new__(
+                cls,
+                config: TransformerConfig,
+                hidden_size: int,
+                eps: float = 1e-5,
+                **kwargs,
+            ):
+                if config.normalization == "RMSNorm":
+                    return WrappedTorchNorm(
+                        config=config,
+                        hidden_size=hidden_size,
+                        eps=eps,
+                        **kwargs,
+                    )
+                return FusedLayerNorm(
+                    config=config,
+                    hidden_size=hidden_size,
+                    eps=eps,
+                    **kwargs,
+                )
 
     except ImportError:
         from megatron.core.transformer.torch_norm import WrappedTorchNorm
