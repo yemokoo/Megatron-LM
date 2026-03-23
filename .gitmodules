@@ -1,6 +1,6 @@
 [submodule "Megatron-LM"]
 	path = Megatron-LM
-	url = https://github.com/yuzc19/Megatron-LM
+	url = https://github.com/yemokoo/Megatron-LM.git
 	branch = multi-nodes
 [submodule "apex"]
 	path = apex
