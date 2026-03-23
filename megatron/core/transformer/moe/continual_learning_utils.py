@@ -49,6 +49,17 @@ def _copy_grouped_mlp(dst_mlp, src_mlp, num_existing_experts):
         dst_weight2[:num_existing_experts, :, :].copy_(src_weight2[:num_existing_experts, :, :])
 
 
+def _copy_qv_lora_router(dst_router, src_router, num_existing_experts):
+    with torch.no_grad():
+        dst_router.router_weight[:num_existing_experts].copy_(
+            src_router.router_weight[:num_existing_experts]
+        )
+        dst_router.q_lora_a[:num_existing_experts].copy_(src_router.q_lora_a[:num_existing_experts])
+        dst_router.q_lora_b[:num_existing_experts].copy_(src_router.q_lora_b[:num_existing_experts])
+        dst_router.v_lora_a[:num_existing_experts].copy_(src_router.v_lora_a[:num_existing_experts])
+        dst_router.v_lora_b[:num_existing_experts].copy_(src_router.v_lora_b[:num_existing_experts])
+
+
 def expand_moe_model(target_model, source_model, num_existing_experts):
     _load_matching_state(target_model, source_model)
 
@@ -62,6 +73,10 @@ def expand_moe_model(target_model, source_model, num_existing_experts):
             _copy_router(target_module, source_module, num_existing_experts)
         elif isinstance(target_module, GroupedMLP) and isinstance(source_module, GroupedMLP):
             _copy_grouped_mlp(target_module, source_module, num_existing_experts)
+        elif isinstance(target_module, QVLoraExpertRouter) and isinstance(
+            source_module, QVLoraExpertRouter
+        ):
+            _copy_qv_lora_router(target_module, source_module, num_existing_experts)
 
 
 def _freeze_router(module, num_existing_experts):
@@ -91,6 +106,27 @@ def _freeze_grouped_experts(module, num_existing_experts):
     module.weight2.register_hook(_zero_existing_weight2_grads)
 
 
+def _freeze_qv_lora_experts(module, num_existing_experts):
+    def _zero_existing_expert_grads(grad):
+        grad = grad.clone()
+        grad[:num_existing_experts].zero_()
+        return grad
+
+    module.q_lora_a.register_hook(_zero_existing_expert_grads)
+    module.q_lora_b.register_hook(_zero_existing_expert_grads)
+    module.v_lora_a.register_hook(_zero_existing_expert_grads)
+    module.v_lora_b.register_hook(_zero_existing_expert_grads)
+
+
+def _freeze_qv_lora_router(module, num_existing_experts):
+    def _zero_existing_router_grads(grad):
+        grad = grad.clone()
+        grad[:num_existing_experts].zero_()
+        return grad
+
+    module.router_weight.register_hook(_zero_existing_router_grads)
+
+
 def _freeze_te_grouped_experts(module, num_existing_experts):
     for name, param in module.named_parameters():
         match = _EXPERT_SUFFIX_RE.search(name)
@@ -118,6 +154,11 @@ def freeze_preexisting_moe_params(
             _freeze_grouped_experts(module, num_existing_experts)
         elif isinstance(module, TEGroupedMLP):
             _freeze_te_grouped_experts(module, num_existing_experts)
+        elif isinstance(module, QVLoraExpertRouter):
+            if freeze_existing_router:
+                _freeze_qv_lora_router(module, num_existing_experts)
+            if freeze_existing_experts:
+                _freeze_qv_lora_experts(module, num_existing_experts)
 
 
 def freeze_all_but_new_moe_params(
@@ -156,6 +197,18 @@ def freeze_all_but_new_moe_params(
                     continue
                 expert_idx = int(match.group(1))
                 param.requires_grad = expert_idx >= num_existing_experts if freeze_existing_experts else True
+            continue
+
+        if isinstance(module, QVLoraExpertRouter):
+            module.router_weight.requires_grad = True
+            module.q_lora_a.requires_grad = True
+            module.q_lora_b.requires_grad = True
+            module.v_lora_a.requires_grad = True
+            module.v_lora_b.requires_grad = True
+            if freeze_existing_router:
+                _freeze_qv_lora_router(module, num_existing_experts)
+            if freeze_existing_experts:
+                _freeze_qv_lora_experts(module, num_existing_experts)
 
 
 
@@ -247,6 +300,43 @@ def _audit_sequential_mlp(module_name, target_mlp, source_mlp, num_existing_expe
     }
 
 
+def _audit_qv_lora_router(module_name, target_router, source_router, num_existing_experts):
+    return {
+        "module": module_name,
+        "type": "QVLoraExpertRouter",
+        "copied_rows": num_existing_experts,
+        "num_target_experts": int(target_router.router_weight.shape[0]),
+        "num_source_experts": int(source_router.router_weight.shape[0]),
+        "router_weight": _tensor_summary(target_router.router_weight),
+        "q_lora_a": _tensor_summary(target_router.q_lora_a),
+        "q_lora_b": _tensor_summary(target_router.q_lora_b),
+        "v_lora_a": _tensor_summary(target_router.v_lora_a),
+        "v_lora_b": _tensor_summary(target_router.v_lora_b),
+        "copied_router_rows_match": bool(
+            torch.equal(
+                target_router.router_weight[:num_existing_experts].detach().cpu(),
+                source_router.router_weight[:num_existing_experts].detach().cpu(),
+            )
+        ),
+        "copied_q_lora_a_max_abs_diff": _max_abs_diff(
+            target_router.q_lora_a[:num_existing_experts],
+            source_router.q_lora_a[:num_existing_experts],
+        ),
+        "copied_q_lora_b_max_abs_diff": _max_abs_diff(
+            target_router.q_lora_b[:num_existing_experts],
+            source_router.q_lora_b[:num_existing_experts],
+        ),
+        "copied_v_lora_a_max_abs_diff": _max_abs_diff(
+            target_router.v_lora_a[:num_existing_experts],
+            source_router.v_lora_a[:num_existing_experts],
+        ),
+        "copied_v_lora_b_max_abs_diff": _max_abs_diff(
+            target_router.v_lora_b[:num_existing_experts],
+            source_router.v_lora_b[:num_existing_experts],
+        ),
+    }
+
+
 def inspect_moe_expansion(target_model, source_model, num_existing_experts):
     audit: Dict[str, Any] = {
         "num_existing_experts": num_existing_experts,
@@ -267,6 +357,14 @@ def inspect_moe_expansion(target_model, source_model, num_existing_experts):
         elif isinstance(target_module, SequentialMLP) and isinstance(source_module, SequentialMLP):
             audit["expert_modules"].append(
                 _audit_sequential_mlp(module_name, target_module, source_module, num_existing_experts)
+            )
+        elif isinstance(target_module, QVLoraExpertRouter) and isinstance(
+            source_module, QVLoraExpertRouter
+        ):
+            audit["expert_modules"].append(
+                _audit_qv_lora_router(
+                    module_name, target_module, source_module, num_existing_experts
+                )
             )
 
     return audit

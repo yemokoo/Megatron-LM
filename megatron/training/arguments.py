@@ -2466,6 +2466,22 @@ def _add_experimental_args(parser):
     group.add_argument('--attn-lora-router-dtype', type=str, default='fp32',
                        choices=['fp32', 'bf16'],
                        help='Router dtype for attention LoRA experts.')
+    group.add_argument('--attn-lora-expand-from-num-experts', type=int, default=None,
+                       help='Load a smaller attention-LoRA checkpoint, copy its experts/router into '
+                            'the first slots of the current larger attention-LoRA model, and leave '
+                            'newly added experts available for continual-learning updates.')
+    group.add_argument('--attn-lora-freeze-existing-experts', action='store_true',
+                       help='Freeze the attention LoRA experts copied from the smaller checkpoint '
+                            'when --attn-lora-expand-from-num-experts is used.')
+    group.add_argument('--attn-lora-freeze-existing-router', action='store_true',
+                       help='Freeze the copied attention LoRA router rows when '
+                            '--attn-lora-expand-from-num-experts is used.')
+    group.add_argument('--attn-lora-train-new-experts-and-router-only', action='store_true',
+                       help='When expanding attention LoRA experts, freeze every parameter except '
+                            'the newly added experts and the trainable portion of the expanded router.')
+    group.add_argument('--attn-lora-resume-from-num-experts', type=int, default=None,
+                       help='When resuming from an already-expanded attention-LoRA checkpoint, '
+                            're-apply continual-learning freezing using this many original experts.')
     group.add_argument('--attn-lora-train-router-and-experts-only', action='store_true',
                        help='Freeze all backbone parameters after loading and train only '
                             'attention LoRA experts plus their routers.')

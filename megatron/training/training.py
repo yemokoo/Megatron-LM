@@ -119,6 +119,23 @@ def set_old_moe_distill_teacher(model):
     _OLD_MOE_DISTILL_TEACHER = model
 
 
+def _load_attn_lora_source_model(
+    model_provider_func, model_type, checkpointing_context, num_existing_experts
+):
+    args = get_args()
+    target_num_experts = args.attn_lora_num_experts
+    args.attn_lora_num_experts = num_existing_experts
+    source_model = get_model(model_provider_func, model_type, wrap_with_ddp=False)
+    args.attn_lora_num_experts = target_num_experts
+    _, args.num_floating_point_operations_so_far = load_checkpoint(
+        source_model,
+        None,
+        None,
+        checkpointing_context=checkpointing_context,
+    )
+    return source_model
+
+
 def get_old_moe_distill_teacher():
     return _OLD_MOE_DISTILL_TEACHER
 
@@ -894,8 +911,79 @@ def setup_model_and_optimizer(model_provider_func,
         print_rank_0(
             f'Expanded MoE checkpoint from {args.moe_expand_from_num_experts} to {target_num_experts} experts.'
         )
+    elif args.attn_lora_expand_from_num_experts is not None:
+        torch.distributed.barrier()
+        assert args.load is not None, "--attn-lora-expand-from-num-experts requires --load."
+        assert (
+            args.attn_lora_num_experts is not None and args.attn_lora_num_experts > 0
+        ), "--attn-lora-expand-from-num-experts requires --attn-lora-num-experts."
+        assert (
+            args.attn_lora_expand_from_num_experts < args.attn_lora_num_experts
+        ), "--attn-lora-expand-from-num-experts must be smaller than --attn-lora-num-experts."
 
-    if args.moe_use_upcycling or args.moe_expand_from_num_experts is not None:
+        target_num_experts = args.attn_lora_num_experts
+        source_model = _load_attn_lora_source_model(
+            model_provider_func,
+            model_type,
+            checkpointing_context,
+            args.attn_lora_expand_from_num_experts,
+        )
+        source_unwrapped_model = unwrap_model(source_model)
+
+        for target_shard, source_shard in zip(unwrapped_model, source_unwrapped_model):
+            expand_moe_model(target_shard, source_shard, args.attn_lora_expand_from_num_experts)
+            if args.attn_lora_train_new_experts_and_router_only:
+                freeze_all_but_new_moe_params(
+                    target_shard,
+                    args.attn_lora_expand_from_num_experts,
+                    freeze_existing_experts=True,
+                    freeze_existing_router=True,
+                )
+            else:
+                freeze_preexisting_moe_params(
+                    target_shard,
+                    args.attn_lora_expand_from_num_experts,
+                    args.attn_lora_freeze_existing_experts,
+                    args.attn_lora_freeze_existing_router,
+                )
+            if torch.distributed.get_rank() == 0:
+                audit_dir = os.path.join(args.save, "expansion_audit")
+                os.makedirs(audit_dir, exist_ok=True)
+                audit_path = os.path.join(
+                    audit_dir,
+                    f"attn_lora_expand_{args.attn_lora_expand_from_num_experts}_to_{target_num_experts}.json",
+                )
+                with open(audit_path, "w", encoding="utf-8") as f:
+                    json.dump(
+                        inspect_moe_expansion(
+                            target_shard, source_shard, args.attn_lora_expand_from_num_experts
+                        ),
+                        f,
+                        indent=2,
+                    )
+
+        if args.moe_old_model_kl_coeff > 0:
+            for teacher_shard in source_model:
+                teacher_shard.eval()
+                for param in teacher_shard.parameters():
+                    param.requires_grad = False
+            set_old_moe_distill_teacher(source_model)
+        else:
+            del source_model
+            set_old_moe_distill_teacher(None)
+        args.iteration = 0 if args.finetune else 1
+        if (args.fp16 or args.bf16) and optimizer is not None:
+            optimizer.reload_model_params()
+        print_rank_0(
+            f'Expanded attention LoRA checkpoint from {args.attn_lora_expand_from_num_experts} '
+            f'to {target_num_experts} experts.'
+        )
+
+    if (
+        args.moe_use_upcycling
+        or args.moe_expand_from_num_experts is not None
+        or args.attn_lora_expand_from_num_experts is not None
+    ):
         pass
     elif (args.load is not None or args.pretrained_checkpoint is not None):
         one_logger and one_logger.log_metrics({
@@ -973,6 +1061,65 @@ def setup_model_and_optimizer(model_provider_func,
 
             print_rank_0(
                 f'Resumed expanded MoE checkpoint at iteration {args.iteration} with continual-learning freeze reapplied.'
+            )
+        if args.attn_lora_resume_from_num_experts is not None:
+            assert args.attn_lora_resume_from_num_experts < args.attn_lora_num_experts, (
+                '--attn-lora-resume-from-num-experts must be smaller than '
+                '--attn-lora-num-experts.'
+            )
+            for target_shard in unwrapped_model:
+                if args.attn_lora_train_new_experts_and_router_only:
+                    freeze_all_but_new_moe_params(
+                        target_shard,
+                        args.attn_lora_resume_from_num_experts,
+                        freeze_existing_experts=True,
+                        freeze_existing_router=True,
+                    )
+                else:
+                    freeze_preexisting_moe_params(
+                        target_shard,
+                        args.attn_lora_resume_from_num_experts,
+                        args.attn_lora_freeze_existing_experts,
+                        args.attn_lora_freeze_existing_router,
+                    )
+
+            if args.moe_old_model_kl_coeff > 0 and args.moe_old_model_kl_load:
+                teacher_load_dir = args.moe_old_model_kl_load
+                original_load = args.load
+                original_finetune = args.finetune
+                original_no_load_optim = args.no_load_optim
+                original_no_load_rng = args.no_load_rng
+                original_consumed_train_samples = args.consumed_train_samples
+                original_consumed_valid_samples = args.consumed_valid_samples
+                args.load = teacher_load_dir
+                args.finetune = True
+                args.no_load_optim = True
+                args.no_load_rng = True
+                args.consumed_train_samples = 0
+                args.consumed_valid_samples = 0
+                source_model = _load_attn_lora_source_model(
+                    model_provider_func,
+                    model_type,
+                    checkpointing_context,
+                    args.attn_lora_resume_from_num_experts,
+                )
+                args.load = original_load
+                args.finetune = original_finetune
+                args.no_load_optim = original_no_load_optim
+                args.no_load_rng = original_no_load_rng
+                args.consumed_train_samples = original_consumed_train_samples
+                args.consumed_valid_samples = original_consumed_valid_samples
+                for teacher_shard in source_model:
+                    teacher_shard.eval()
+                    for param in teacher_shard.parameters():
+                        param.requires_grad = False
+                set_old_moe_distill_teacher(source_model)
+            else:
+                set_old_moe_distill_teacher(None)
+
+            print_rank_0(
+                'Resumed expanded attention LoRA checkpoint at iteration '
+                f'{args.iteration} with continual-learning freeze reapplied.'
             )
     else:
         args.iteration = 0
