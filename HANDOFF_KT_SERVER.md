@@ -91,6 +91,10 @@ Training:
 - `scripts/experiment/stage_B_local_fp32.sh`
 - `scripts/experiment/stage_A_7experts_resume_local_fp32.sh`
 - `scripts/experiment/stage_B_after_A_7experts_no_freeze_local_fp32.sh`
+- `scripts/experiment/pretrain_wiki_dense_local_bf16.sh`
+- `scripts/experiment/continual_code_from_wiki_dense_local_bf16.sh`
+- `scripts/experiment/pretrain_wiki_qv_lora_local_bf16.sh`
+- `scripts/experiment/continual_code_from_wiki_qv_lora_expand_local_bf16.sh`
 
 Eval / analysis:
 - `eval/task_a_compare/run_compare_pair_fp32.sh`
@@ -150,6 +154,154 @@ Recommended next step on the KT server:
 - verify PyTorch + CUDA + Apex + TransformerEngine imports
 - do a tiny 1-step or 10-step Megatron smoke run
 - only then decide whether to keep `fp32` or switch to `bf16`/`fp16`
+
+## Current Sequential Experiment Design
+
+The current requested setup is sequential, not mixed-data training.
+
+Dense-only path:
+- stage 1: wiki only
+- stage 2: continue on code from the wiki checkpoint
+- scripts:
+  - `scripts/experiment/pretrain_wiki_dense_local_bf16.sh`
+  - `scripts/experiment/continual_code_from_wiki_dense_local_bf16.sh`
+
+Attention-LoRA path:
+- stage 1: wiki only with routed attention Q/V LoRA experts
+- stage 2: continue on code with attention LoRA expert expansion
+- scripts:
+  - `scripts/experiment/pretrain_wiki_qv_lora_local_bf16.sh`
+  - `scripts/experiment/continual_code_from_wiki_qv_lora_expand_local_bf16.sh`
+
+Important model constraints:
+- base backbone is a standard dense transformer
+- FFN is not expanded during the attention-LoRA continual experiment
+- hidden size and FFN size should match `scripts/experiment/stage_A_local_fp32.sh`
+- canonical values:
+  - `NUM_LAYERS=9`
+  - `HIDDEN_SIZE=1024`
+  - `FFN_HIDDEN_SIZE=5472`
+
+Attention-LoRA continual specifics:
+- wiki stage uses `4` attention LoRA experts
+- code stage expands to `7` experts
+- when moving to code:
+  - old `4` experts are copied into the new checkpoint
+  - old router rows and old experts are frozen
+  - new experts are initialized by copying existing trained experts/router rows
+  - shared backbone params remain trainable
+  - output-level KL regularization is enabled with `lambda=1.0` by default
+
+## KT Smoke Test Order
+
+Do not start with full training. Use this order:
+
+1. environment import smoke
+2. dense wiki 1-10 step smoke
+3. dense wiki->code resume 1-10 step smoke
+4. q/v LoRA wiki 1-10 step smoke
+5. q/v LoRA wiki->code expansion 1-10 step smoke
+6. only after all four pass, launch the full run
+
+Recommended smoke-test overrides:
+- `CUDA_VISIBLE_DEVICES=0`
+- `NPROC_PER_NODE=1`
+- `MICRO_BATCH_SIZE=1`
+- `GLOBAL_BATCH_SIZE=8`
+- `TRAIN_ITERS=10`
+- `SAVE_INTERVAL=10`
+- `EVAL_INTERVAL=10`
+- `SEQ_LENGTH=512`
+
+## KT Smoke Commands
+
+Assume:
+- repo root is the current working directory
+- KT environment is already activated
+- dataset paths are edited to match the KT server
+
+Dense wiki smoke:
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+NPROC_PER_NODE=1 \
+MICRO_BATCH_SIZE=1 \
+GLOBAL_BATCH_SIZE=8 \
+TRAIN_ITERS=10 \
+SAVE_INTERVAL=10 \
+EVAL_INTERVAL=10 \
+SEQ_LENGTH=512 \
+TRAIN_DATASET=/path/to/wiki-train-exact \
+PROBE_DATASET=/path/to/wiki-test-exact \
+bash scripts/experiment/pretrain_wiki_dense_local_bf16.sh
+```
+
+Dense wiki -> code smoke:
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+NPROC_PER_NODE=1 \
+MICRO_BATCH_SIZE=1 \
+GLOBAL_BATCH_SIZE=8 \
+TRAIN_ITERS=10 \
+SAVE_INTERVAL=10 \
+EVAL_INTERVAL=10 \
+SEQ_LENGTH=512 \
+STAGE1_WEIGHTS_DIR=/path/to/wiki-dense-checkpoint \
+TRAIN_DATASET=/path/to/code-train-exact \
+PROBE_DATASET=/path/to/code-test-exact \
+SECONDARY_PROBE_DATASET=/path/to/wiki-test-exact \
+bash scripts/experiment/continual_code_from_wiki_dense_local_bf16.sh
+```
+
+Q/V LoRA wiki smoke:
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+NPROC_PER_NODE=1 \
+MICRO_BATCH_SIZE=1 \
+GLOBAL_BATCH_SIZE=8 \
+TRAIN_ITERS=10 \
+SAVE_INTERVAL=10 \
+EVAL_INTERVAL=10 \
+SEQ_LENGTH=512 \
+ATTN_LORA_NUM_EXPERTS=4 \
+TRAIN_DATASET=/path/to/wiki-train-exact \
+PROBE_DATASET=/path/to/wiki-test-exact \
+bash scripts/experiment/pretrain_wiki_qv_lora_local_bf16.sh
+```
+
+Q/V LoRA wiki -> code expansion smoke:
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+NPROC_PER_NODE=1 \
+MICRO_BATCH_SIZE=1 \
+GLOBAL_BATCH_SIZE=8 \
+TRAIN_ITERS=10 \
+SAVE_INTERVAL=10 \
+EVAL_INTERVAL=10 \
+SEQ_LENGTH=512 \
+ATTN_LORA_SOURCE_NUM_EXPERTS=4 \
+ATTN_LORA_NUM_EXPERTS=7 \
+OLD_MODEL_KL_COEFF=1.0 \
+STAGE1_WEIGHTS_DIR=/path/to/wiki-qv-lora-checkpoint \
+TRAIN_DATASET=/path/to/code-train-exact \
+PROBE_DATASET=/path/to/code-test-exact \
+SECONDARY_PROBE_DATASET=/path/to/wiki-test-exact \
+bash scripts/experiment/continual_code_from_wiki_qv_lora_expand_local_bf16.sh
+```
+
+## What To Check During Smoke Tests
+
+Each smoke run should confirm:
+- script starts without import/build errors
+- dataset copy succeeds
+- checkpoint load or resume succeeds
+- at least one optimizer step completes
+- checkpoint save succeeds
+- no immediate NaN or shape mismatch appears
+
+For the Q/V LoRA expansion smoke, also confirm:
+- expansion audit JSON is produced under `expansion_audit/`
+- the run log prints the attention LoRA expansion message
+- old checkpoint loads as the teacher/source checkpoint without failure
 
 ## Short Prompt For The Next Assistant
 
