@@ -145,8 +145,8 @@ class TransformerConfig(ModelParallelConfig):
     attn_lora_alpha: float = 1.0
     """Scaling factor applied to attention LoRA expert outputs."""
 
-    attn_lora_router_dtype: str = "fp32"
-    """Router dtype for attention LoRA experts."""
+    attn_lora_router_dtype: str = "bf16"
+    """Deprecated compatibility field. Attention LoRA router now follows params_dtype."""
 
     attn_lora_train_router_and_experts_only: bool = False
     """Freeze all non-LoRA/router params after checkpoint load."""

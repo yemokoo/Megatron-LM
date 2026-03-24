@@ -2463,9 +2463,9 @@ def _add_experimental_args(parser):
                        help='Number of attention LoRA experts selected per token.')
     group.add_argument('--attn-lora-alpha', type=float, default=1.0,
                        help='Scaling factor for attention LoRA expert outputs.')
-    group.add_argument('--attn-lora-router-dtype', type=str, default='fp32',
+    group.add_argument('--attn-lora-router-dtype', type=str, default='bf16',
                        choices=['fp32', 'bf16'],
-                       help='Router dtype for attention LoRA experts.')
+                       help='Deprecated compatibility flag. Attention LoRA router now follows params dtype.')
     group.add_argument('--attn-lora-expand-from-num-experts', type=int, default=None,
                        help='Load a smaller attention-LoRA checkpoint, copy its experts/router into '
                             'the first slots of the current larger attention-LoRA model, and leave '
