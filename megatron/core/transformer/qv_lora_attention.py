@@ -76,39 +76,25 @@ class QVLoraExpertRouter(torch.nn.Module): #lora expert routing class
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         hidden_states = hidden_states.to(self.q_lora_a.dtype)
         num_tokens = hidden_states.shape[0]
+        q_delta = hidden_states.new_zeros((num_tokens, self.query_output_size))
+        v_delta = hidden_states.new_zeros((num_tokens, self.value_output_size))
+        scale = hidden_states.new_tensor(self.scale)
 
-        # Group tokens by expert once so Q/V reuse the same routing work.
-        sort_order = torch.argsort(expert_idx)
-        sorted_expert_idx = expert_idx.index_select(0, sort_order)
-        sorted_hidden_states = hidden_states.index_select(0, sort_order)
-        sorted_scores = expert_scores.index_select(0, sort_order).to(hidden_states.dtype)
-
-        q_delta_sorted = hidden_states.new_zeros((num_tokens, self.query_output_size))
-        v_delta_sorted = hidden_states.new_zeros((num_tokens, self.value_output_size))
-        scale = sorted_scores.new_tensor(self.scale)
-
-        counts = torch.bincount(sorted_expert_idx, minlength=self.num_experts)
-        start = 0
         for expert_id in range(self.num_experts):
-            count = int(counts[expert_id].item())
-            if count == 0:
+            token_indices = torch.nonzero(expert_idx == expert_id, as_tuple=False).flatten()
+            if token_indices.numel() == 0:
                 continue
 
-            end = start + count
-            expert_hidden = sorted_hidden_states[start:end]
-            expert_scale = sorted_scores[start:end].unsqueeze(-1) * scale
+            expert_hidden = hidden_states.index_select(0, token_indices)
+            expert_scale = (
+                expert_scores.index_select(0, token_indices).to(hidden_states.dtype).unsqueeze(-1) * scale
+            )
 
             q_low_rank = expert_hidden @ self.q_lora_a[expert_id]
             v_low_rank = expert_hidden @ self.v_lora_a[expert_id]
 
-            q_delta_sorted[start:end] = (q_low_rank @ self.q_lora_b[expert_id]) * expert_scale
-            v_delta_sorted[start:end] = (v_low_rank @ self.v_lora_b[expert_id]) * expert_scale
-            start = end
-
-        q_delta = hidden_states.new_empty((num_tokens, self.query_output_size))
-        v_delta = hidden_states.new_empty((num_tokens, self.value_output_size))
-        q_delta.index_copy_(0, sort_order, q_delta_sorted)
-        v_delta.index_copy_(0, sort_order, v_delta_sorted)
+            q_delta.index_copy_(0, token_indices, (q_low_rank @ self.q_lora_b[expert_id]) * expert_scale)
+            v_delta.index_copy_(0, token_indices, (v_low_rank @ self.v_lora_b[expert_id]) * expert_scale)
         return (
             q_delta.reshape(*original_shape, self.query_output_size),
             v_delta.reshape(*original_shape, self.value_output_size),
