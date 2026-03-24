@@ -10,7 +10,7 @@ from .attention import SelfAttention, SelfAttentionSubmodules
 from .transformer_config import TransformerConfig
 
 
-class QVLoraExpertRouter(torch.nn.Module):
+class QVLoraExpertRouter(torch.nn.Module): #lora expert routing class
     """Top-1 routed LoRA experts for attention Q/V projections."""
 
     def __init__(

@@ -139,7 +139,7 @@ class DotProductAttention(MegatronModule):
         # simple strides to extract the queries.
         query = query.reshape(output_size[2], output_size[0] * output_size[1], -1)
         # [sk, b, np, hn] -> [sk, b * np, hn]
-        key = key.view(output_size[3], output_size[0] * output_size[1], -1)
+        key = key.reshape(output_size[3], output_size[0] * output_size[1], -1)
 
         # preallocting input tensor: [b * np, sq, sk]
         matmul_input_buffer = parallel_state.get_global_memory_buffer().get_tensor(
@@ -156,7 +156,7 @@ class DotProductAttention(MegatronModule):
         )
 
         # change view to [b, np, sq, sk]
-        attention_scores = matmul_result.view(*output_size)
+        attention_scores = matmul_result.reshape(*output_size)
 
         # ===========================
         # Attention probs and dropout
@@ -185,22 +185,24 @@ class DotProductAttention(MegatronModule):
         output_size = (value.size(1), value.size(2), query.size(0), value.size(3))
 
         # change view [sk, b * np, hn]
-        value = value.view(value.size(0), output_size[0] * output_size[1], -1)
+        value = value.reshape(value.size(0), output_size[0] * output_size[1], -1)
 
         # change view [b * np, sq, sk]
-        attention_probs = attention_probs.view(output_size[0] * output_size[1], output_size[2], -1)
+        attention_probs = attention_probs.reshape(
+            output_size[0] * output_size[1], output_size[2], -1
+        )
 
         # matmul: [b * np, sq, hn]
         context = torch.bmm(attention_probs, value.transpose(0, 1))
 
         # change view [b, np, sq, hn]
-        context = context.view(*output_size)
+        context = context.reshape(*output_size)
 
         # [b, np, sq, hn] --> [sq, b, np, hn]
         context = context.permute(2, 0, 1, 3).contiguous()
 
         # [sq, b, np, hn] --> [sq, b, hp]
         new_context_shape = context.size()[:-2] + (self.hidden_size_per_partition,)
-        context = context.view(*new_context_shape)
+        context = context.reshape(*new_context_shape)
 
         return context
