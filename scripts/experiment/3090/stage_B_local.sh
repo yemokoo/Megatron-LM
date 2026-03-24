@@ -8,7 +8,7 @@ set -euo pipefail
 #   LOCAL_SSD_ROOT=/local_scratch/flame-moe \
 #   STAGE_A_RUN_ID=stage-a-local-20260306-120000 \
 #   NPROC_PER_NODE=8 \
-#   bash scripts/experiment/stage_B_local.sh
+#   bash scripts/experiment/3090/stage_B_local.sh
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$PROJECT_ROOT"

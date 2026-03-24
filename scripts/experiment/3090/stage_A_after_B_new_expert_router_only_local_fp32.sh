@@ -22,4 +22,4 @@ export WANDB_EXP_NAME="${WANDB_EXP_NAME:-$RUN_ID}"
 export WANDB_SAVE_DIR="${WANDB_SAVE_DIR:-$TRAIN_WEIGHTS/wandb}"
 export CONTINUAL_PLOT_PREFIX="${CONTINUAL_PLOT_PREFIX:-$LOG_DIR/task_b_probe_continual}"
 
-exec bash "$PROJECT_ROOT/scripts/experiment/stage_A_after_B_local_fp32.sh"
+exec bash "$PROJECT_ROOT/scripts/experiment/3090/stage_A_after_B_local_fp32.sh"

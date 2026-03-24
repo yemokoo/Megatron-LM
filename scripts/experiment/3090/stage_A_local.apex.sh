@@ -128,4 +128,4 @@ rsync -rlptD "$SSD_WEIGHTS/" "$TRAIN_WEIGHTS/"
 
 echo "Stage A local complete. Checkpoint at: $TRAIN_WEIGHTS"
 echo "To run Stage B locally:"
-echo "  STAGE_A_RUN_ID=$RUN_ID bash scripts/experiment/stage_B_local.sh"
+echo "  STAGE_A_RUN_ID=$RUN_ID bash scripts/experiment/3090/stage_B_local.sh"

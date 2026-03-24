@@ -1,8 +1,15 @@
 #!/bin/bash
-# Stage A: Pretrain FLAME-MoE-290M on Wikipedia.
-# After this job, run stage_B_train.sh using STAGE_A_JOB_ID=<this job id>.
+# Stage B: Expand a Stage A FLAME-MoE-290M checkpoint from 4 to 7 experts per layer,
+# freeze the original experts/router rows, and continue training on Python code.
+#
+# Usage:
+#   sbatch --export=STAGE_A_JOB_ID=<job_id_from_stage_A> scripts/experiment/3090/stage_B_train.sh
+#
+# This loads the final Stage A weights, copies the original 4 experts per layer
+# into the first 4 slots of a 7-expert model, initializes 3 new experts per layer,
+# freezes the copied experts/router rows, and trains only the newly added capacity.
 
-#SBATCH --job-name=continual-stage-A
+#SBATCH --job-name=continual-stage-B
 #SBATCH --output=logs/%x/%j.log
 
 #SBATCH --partition=gpu
@@ -18,37 +25,53 @@
 
 source scripts/config.sh
 
+if [ -z "$STAGE_A_JOB_ID" ]; then
+    echo "ERROR: STAGE_A_JOB_ID is not set."
+    echo "Usage: sbatch --export=STAGE_A_JOB_ID=<job_id> $0"
+    exit 1
+fi
+
 # FLAME-MoE-290M architecture
 export NUM_LAYERS=9
 export HIDDEN_SIZE=1024
 export FFN_HIDDEN_SIZE=5472
 export MOE_FFN_HIDDEN_SIZE=704
 export MOE_LAYER_FREQ="[0]*1+[1]*8"
-export NUM_EXPERTS=4
+export NUM_EXPERTS=7
 export MOE_ROUTER_TOPK=2
 export MICRO_BATCH_SIZE=4
 export PIPELINE_MODEL_PARALLEL_SIZE=1
 export EXPERT_MODEL_PARALLEL_SIZE=1
 
-# ~500 iters × 1024 global batch × 2048 tokens = ~1B tokens from Wikipedia
+# ~500 iters on Python code
 export TRAIN_ITERS=500
-export SAVE_INTERVAL=100
-export EVAL_INTERVAL=100
+export SAVE_INTERVAL=50
+export EVAL_INTERVAL=50
+export OLD_MODEL_KL_COEFF="${OLD_MODEL_KL_COEFF:-0.01}"
+export OLD_MODEL_KL_TEMPERATURE="${OLD_MODEL_KL_TEMPERATURE:-1.0}"
 
 export RDZV_BACKEND="c10d"
 export RDZV_ENDPOINT="${RDZV_ENDPOINT:-$(hostname):8000}"
 
-# Dataset: tokenized Wikipedia
-export TRAIN_DATASET="$LOCAL_DATASET/wikipedia/tokenized/EleutherAI/pythia-12b"
+# Dataset: tokenized Python code
+export TRAIN_DATASET="$LOCAL_DATASET/python-code/tokenized/EleutherAI/pythia-12b"
 
-# Weights saved under job name/id for stage B to pick up
-export TRAIN_WEIGHTS="$LOCAL_WEIGHTS/continual-stage-A/$SLURM_JOB_ID"
+# Load Stage A weights, save Stage B weights separately
+STAGE_A_WEIGHTS="$LOCAL_WEIGHTS/continual-stage-A/$STAGE_A_JOB_ID"
+export TRAIN_WEIGHTS="$LOCAL_WEIGHTS/continual-stage-B/$SLURM_JOB_ID"
+
+echo "Loading Stage A weights from: $STAGE_A_WEIGHTS"
+echo "Saving Stage B weights to:    $TRAIN_WEIGHTS"
+
+# Copy Stage A checkpoint to SSD (as starting point)
+mkdir -p $SSD_WEIGHTS
+rsync -a "$STAGE_A_WEIGHTS/" "$SSD_WEIGHTS/"
 
 # Copy dataset to local SSD
 mkdir -p $SSD_DATASET
 rsync -a --info=progress2 "$TRAIN_DATASET/" "$SSD_DATASET/"
 
-# Run training
+# Run training (continues from the loaded checkpoint)
 source configs/model/flame-moe.sh
 source configs/train/flame-moe.sh
 
@@ -66,6 +89,14 @@ SAVE_ARGS=(
     --load $SSD_WEIGHTS
     --eval-interval $EVAL_INTERVAL
     --tensorboard-dir $SSD_WEIGHTS
+    --no-load-optim
+    --no-load-rng
+    --finetune
+    --moe-expand-from-num-experts 4
+    --moe-freeze-existing-experts
+    --moe-freeze-existing-router
+    --moe-old-model-kl-coeff $OLD_MODEL_KL_COEFF
+    --moe-old-model-kl-temperature $OLD_MODEL_KL_TEMPERATURE
 )
 
 mkdir -p $SSD_WEIGHTS $TRAIN_WEIGHTS
@@ -82,7 +113,6 @@ cd Megatron-LM && torchrun \
     "${DATA_ARGS[@]}" "${SAVE_ARGS[@]}" &
 TORCHRUN_PID=$!
 
-# Sync weights to scratch every 15 minutes
 (
     while kill -0 $TORCHRUN_PID 2>/dev/null; do
         rsync -a "$SSD_WEIGHTS/" "$TRAIN_WEIGHTS/"
@@ -93,5 +123,4 @@ TORCHRUN_PID=$!
 wait $TORCHRUN_PID
 rsync -a "$SSD_WEIGHTS/" "$TRAIN_WEIGHTS/"
 
-echo "Stage A complete. Checkpoint at: $TRAIN_WEIGHTS"
-echo "To run Stage B: sbatch --export=STAGE_A_JOB_ID=$SLURM_JOB_ID scripts/experiment/stage_B_train.sh"
+echo "Stage B complete. Checkpoint at: $TRAIN_WEIGHTS"

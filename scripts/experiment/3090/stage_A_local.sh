@@ -6,7 +6,7 @@ set -euo pipefail
 #   LOCAL_BASE=/mnt/nas/flame-moe \
 #   LOCAL_SSD_ROOT=/local_scratch/flame-moe \
 #   NPROC_PER_NODE=8 \
-#   bash scripts/experiment/stage_A_local.sh
+#   bash scripts/experiment/3090/stage_A_local.sh
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$PROJECT_ROOT"
@@ -319,4 +319,4 @@ echo "Stage A run log saved at: $RUN_LOG"
 echo "Stage A GPU log saved at: $GPU_LOG"
 echo "Stage A metadata saved at: $RUN_METADATA"
 echo "To run Stage B locally:"
-echo "  STAGE_A_RUN_ID=$RUN_ID bash scripts/experiment/stage_B_local.sh"
+echo "  STAGE_A_RUN_ID=$RUN_ID bash scripts/experiment/3090/stage_B_local.sh"

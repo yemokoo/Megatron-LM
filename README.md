@@ -11,18 +11,22 @@ The current codebase is centered around:
 
 ## Current Focus
 
-We are currently using the local `fp32` experiment entrypoints in [scripts/experiment](./scripts/experiment), not the older SLURM/DCLM release path described in earlier docs.
+We currently keep two experiment families side by side under [scripts/experiment](./scripts/experiment):
+- [scripts/experiment/3090](./scripts/experiment/3090): the older local `fp32` MoE continual-learning path used for 3090-era runs
+- [scripts/experiment/a100](./scripts/experiment/a100): the current A100-oriented `bf16` path for MoE continual-learning plus dense / attention-LoRA work
+
+The older SLURM/DCLM release path described in earlier docs is no longer the primary workflow.
 
 Canonical top-level entrypoints:
-- [a_local_fp32.sh](./scripts/experiment/a_local_fp32.sh)
-- [b_local_fp32.sh](./scripts/experiment/b_local_fp32.sh)
-- [a_to_b_local_fp32.sh](./scripts/experiment/a_to_b_local_fp32.sh)
-- [b_to_a_local_fp32.sh](./scripts/experiment/b_to_a_local_fp32.sh)
-- [a_to_b_new_only_local_fp32.sh](./scripts/experiment/a_to_b_new_only_local_fp32.sh)
-- [b_to_a_new_only_local_fp32.sh](./scripts/experiment/b_to_a_new_only_local_fp32.sh)
-- [stage_A_7experts_local_fp32.sh](./scripts/experiment/stage_A_7experts_local_fp32.sh)
-- [stage_A_7experts_resume_local_fp32.sh](./scripts/experiment/stage_A_7experts_resume_local_fp32.sh)
-- [stage_B_after_A_7experts_no_freeze_local_fp32.sh](./scripts/experiment/stage_B_after_A_7experts_no_freeze_local_fp32.sh)
+- [a_local_fp32.sh](./scripts/experiment/3090/a_local_fp32.sh)
+- [b_local_fp32.sh](./scripts/experiment/3090/b_local_fp32.sh)
+- [a_to_b_local_fp32.sh](./scripts/experiment/3090/a_to_b_local_fp32.sh)
+- [b_to_a_local_fp32.sh](./scripts/experiment/3090/b_to_a_local_fp32.sh)
+- [a_to_b_new_only_local_fp32.sh](./scripts/experiment/3090/a_to_b_new_only_local_fp32.sh)
+- [b_to_a_new_only_local_fp32.sh](./scripts/experiment/3090/b_to_a_new_only_local_fp32.sh)
+- [stage_A_7experts_local_fp32.sh](./scripts/experiment/3090/stage_A_7experts_local_fp32.sh)
+- [stage_A_7experts_resume_local_fp32.sh](./scripts/experiment/3090/stage_A_7experts_resume_local_fp32.sh)
+- [stage_B_after_A_7experts_no_freeze_local_fp32.sh](./scripts/experiment/3090/stage_B_after_A_7experts_no_freeze_local_fp32.sh)
 - [pretrain_mixed_dense_local_bf16.sh](./scripts/experiment/pretrain_mixed_dense_local_bf16.sh)
 - [train_mixed_qv_lora_experts_local_bf16.sh](./scripts/experiment/train_mixed_qv_lora_experts_local_bf16.sh)
 
@@ -34,6 +38,7 @@ A100-specific bf16 MoE continual-learning entrypoints:
 - [a_to_b_freeze_a100_bf16.sh](./scripts/experiment/a100/a_to_b_freeze_a100_bf16.sh)
 - [b_to_a_a100_bf16.sh](./scripts/experiment/a100/b_to_a_a100_bf16.sh)
 - [b_to_a_freeze_a100_bf16.sh](./scripts/experiment/a100/b_to_a_freeze_a100_bf16.sh)
+- [run_all_moe_a100_bf16_sequential.sh](./scripts/experiment/a100/run_all_moe_a100_bf16_sequential.sh)
 
 The implementation-detail scripts under `stage_*` are still the real workers. The short aliases above are the preferred entrypoints when possible.
 
@@ -121,6 +126,43 @@ Note:
 - the vendored Megatron MoE stack also includes a per-MoE-layer shared expert branch
 - routed expert count and shared expert are different concepts
 
+## A100 MoE BF16 Path
+
+The A100 MoE path under [scripts/experiment/a100](./scripts/experiment/a100) is the current clean bf16 continual-learning workflow.
+
+Key properties:
+- it uses a dedicated model config: [flame-moe-bf16-no-shared.sh](./scripts/experiment/a100/flame-moe-bf16-no-shared.sh)
+- shared experts are disabled by omission of `--moe-shared-expert-intermediate-size`
+- routed experts are the only MoE expert path kept active
+- base runs use `4` experts, continual runs expand `4 -> 7`
+- old routed experts and old router slices are frozen during expansion
+- `shared unfreeze` runs keep the shared trunk trainable and apply output-level KL with `lambda=1.0`
+- `shared freeze` runs train only new experts and router slices and skip teacher-model loading entirely
+
+Main A100 MoE entrypoints:
+- base wiki model: [wiki_a_a100_bf16.sh](./scripts/experiment/a100/wiki_a_a100_bf16.sh)
+- base code model: [code_b_a100_bf16.sh](./scripts/experiment/a100/code_b_a100_bf16.sh)
+- wiki to code unfreeze: [a_to_b_a100_bf16.sh](./scripts/experiment/a100/a_to_b_a100_bf16.sh)
+- wiki to code freeze: [a_to_b_freeze_a100_bf16.sh](./scripts/experiment/a100/a_to_b_freeze_a100_bf16.sh)
+- code to wiki unfreeze: [b_to_a_a100_bf16.sh](./scripts/experiment/a100/b_to_a_a100_bf16.sh)
+- code to wiki freeze: [b_to_a_freeze_a100_bf16.sh](./scripts/experiment/a100/b_to_a_freeze_a100_bf16.sh)
+
+Sequential launcher:
+- [run_all_moe_a100_bf16_sequential.sh](./scripts/experiment/a100/run_all_moe_a100_bf16_sequential.sh) runs all six MoE experiments in order
+- default order: `wiki A -> code B -> A to B -> A to B freeze -> B to A -> B to A freeze`
+- default continual-friendly settings:
+  - `MICRO_BATCH_SIZE=32`
+  - `GLOBAL_BATCH_SIZE=2304`
+  - `TRAIN_ITERS=1800`
+  - `SAVE_INTERVAL=300`
+  - `EVAL_INTERVAL=100`
+  - dual probes every `40` steps on both wiki and code test sets
+  - a `300` second pause between runs
+
+W&B / probe continuity:
+- continual runs read the source checkpoint metadata and set `WANDB_STEP_OFFSET`, `PROBE_STEP_OFFSET`, and `SECONDARY_PROBE_STEP_OFFSET`
+- this keeps probe curves and W&B step axes aligned when a continual stage starts after the base stage ends at step `1800`
+
 ## Evaluation Suites
 
 Main evaluation/analysis entrypoints:
@@ -197,6 +239,8 @@ For vendored third-party code such as [Megatron-LM](./Megatron-LM), keep upstrea
 Important directories:
 - [configs](./configs): model and train config fragments
 - [scripts/experiment](./scripts/experiment): local training entrypoints
+- [scripts/experiment/3090](./scripts/experiment/3090): older fp32 MoE continual-learning path
+- [scripts/experiment/a100](./scripts/experiment/a100): current bf16 A100 MoE runners and sequential launcher
 - [eval](./eval): evaluation runners
 - [analysis](./analysis): analysis and plotting scripts
 - [Megatron-LM](./Megatron-LM): vendored training engine, including the new attention LoRA experiment path
@@ -234,4 +278,4 @@ Each subfolder is exported as a minimal Megatron load directory with a single re
 ## Notes
 
 - The old top-level README described the earlier release/SLURM workflow. This file now reflects the current local continual-learning workflow.
-- If a script or doc conflicts with this README, prefer the current local experiment scripts under `scripts/experiment/`, including both the fp32 continual-learning path and the newer mixed dense / attention-LoRA bf16 path.
+- If a script or doc conflicts with this README, prefer the current local experiment scripts under `scripts/experiment/`, including the `scripts/experiment/3090/` fp32 continual-learning path and the newer bf16 paths.

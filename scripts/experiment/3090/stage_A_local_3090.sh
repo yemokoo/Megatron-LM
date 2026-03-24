@@ -11,4 +11,4 @@ export WANDB_EXP_NAME="${WANDB_EXP_NAME:-$RUN_ID}"
 export LOCAL_SSD_ROOT="${LOCAL_SSD_ROOT:-/tmp/flame-moe}"
 export SAVE_INTERVAL="${SAVE_INTERVAL:-300}"
 
-exec bash scripts/experiment/stage_A_local.sh
+exec bash scripts/experiment/3090/stage_A_local.sh
