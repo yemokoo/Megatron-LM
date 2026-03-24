@@ -26,6 +26,15 @@ Canonical top-level entrypoints:
 - [pretrain_mixed_dense_local_bf16.sh](./scripts/experiment/pretrain_mixed_dense_local_bf16.sh)
 - [train_mixed_qv_lora_experts_local_bf16.sh](./scripts/experiment/train_mixed_qv_lora_experts_local_bf16.sh)
 
+A100-specific bf16 MoE continual-learning entrypoints:
+- [scripts/experiment/a100/README.md](./scripts/experiment/a100/README.md)
+- [wiki_a_a100_bf16.sh](./scripts/experiment/a100/wiki_a_a100_bf16.sh)
+- [code_b_a100_bf16.sh](./scripts/experiment/a100/code_b_a100_bf16.sh)
+- [a_to_b_a100_bf16.sh](./scripts/experiment/a100/a_to_b_a100_bf16.sh)
+- [a_to_b_freeze_a100_bf16.sh](./scripts/experiment/a100/a_to_b_freeze_a100_bf16.sh)
+- [b_to_a_a100_bf16.sh](./scripts/experiment/a100/b_to_a_a100_bf16.sh)
+- [b_to_a_freeze_a100_bf16.sh](./scripts/experiment/a100/b_to_a_freeze_a100_bf16.sh)
+
 The implementation-detail scripts under `stage_*` are still the real workers. The short aliases above are the preferred entrypoints when possible.
 
 ## Dataset Policy
