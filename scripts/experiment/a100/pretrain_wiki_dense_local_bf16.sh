@@ -58,6 +58,7 @@ export PRECISION="bf16"
 export TRAIN_ITERS="${TRAIN_ITERS:-}"
 export SAVE_INTERVAL="${SAVE_INTERVAL:-300}"
 export EVAL_INTERVAL="${EVAL_INTERVAL:-1000}"
+export LOG_INTERVAL="${LOG_INTERVAL:-10}"
 export GPU_LOG_INTERVAL_SECONDS="${GPU_LOG_INTERVAL_SECONDS:-30}"
 export LR="${LR:-3e-4}"
 export MIN_LR="${MIN_LR:-3e-5}"
@@ -217,7 +218,7 @@ DATA_ARGS=(
 )
 
 SAVE_ARGS=(
-    --log-interval 10
+    --log-interval "$LOG_INTERVAL"
     --log-throughput
     --log-progress
     --save "$SSD_WEIGHTS"
