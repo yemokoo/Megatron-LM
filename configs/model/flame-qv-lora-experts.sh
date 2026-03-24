@@ -23,5 +23,4 @@ MODEL_ARGS=(
     --attn-lora-rank ${ATTN_LORA_RANK:-16}
     --attn-lora-topk ${ATTN_LORA_TOPK:-1}
     --attn-lora-alpha ${ATTN_LORA_ALPHA:-16}
-    --attn-lora-router-dtype ${ATTN_LORA_ROUTER_DTYPE:-fp32}
 )
