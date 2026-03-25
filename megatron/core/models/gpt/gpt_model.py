@@ -205,6 +205,7 @@ class GPTModel(LanguageModule):
         packed_seq_params: PackedSeqParams = None,
         extra_block_kwargs: dict = None,
         runtime_gather_output: Optional[bool] = None,
+        return_loss_and_logits: bool = False,
     ) -> Tensor:
 
         # capture the token ids
@@ -314,6 +315,12 @@ class GPTModel(LanguageModule):
             return logits.transpose(0, 1).contiguous()
 
         loss = self.compute_language_model_loss(labels, logits)
+
+        if return_loss_and_logits:
+            return {
+                "losses": loss,
+                "logits": logits.transpose(0, 1).contiguous(),
+            }
 
         return loss
 

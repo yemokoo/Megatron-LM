@@ -11,7 +11,7 @@ from .transformer_config import TransformerConfig
 
 
 class QVLoraExpertRouter(torch.nn.Module): #lora expert routing class
-    """Top-1 routed LoRA experts for attention Q/V projections."""
+    """Top-k routed LoRA experts for attention Q/V projections."""
 
     def __init__(
         self,
@@ -25,8 +25,10 @@ class QVLoraExpertRouter(torch.nn.Module): #lora expert routing class
             raise ValueError('attn_lora_num_experts must be > 0')
         if config.attn_lora_rank <= 0:
             raise ValueError('attn_lora_rank must be > 0')
-        if config.attn_lora_topk != 1:
-            raise NotImplementedError('Only top-1 attention LoRA routing is currently supported.')
+        if config.attn_lora_topk <= 0:
+            raise ValueError('attn_lora_topk must be > 0')
+        if config.attn_lora_topk > config.attn_lora_num_experts:
+            raise ValueError('attn_lora_topk must be <= attn_lora_num_experts')
 
         self.config = config
         self.input_size = input_size
@@ -34,6 +36,7 @@ class QVLoraExpertRouter(torch.nn.Module): #lora expert routing class
         self.value_output_size = value_output_size
         self.num_experts = config.attn_lora_num_experts
         self.rank = config.attn_lora_rank
+        self.topk = config.attn_lora_topk
         self.scale = float(config.attn_lora_alpha) / float(max(self.rank, 1))
 
         device = None if config.use_cpu_initialization else torch.cuda.current_device()
@@ -75,26 +78,25 @@ class QVLoraExpertRouter(torch.nn.Module): #lora expert routing class
         expert_scores: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         hidden_states = hidden_states.to(self.q_lora_a.dtype)
-        num_tokens = hidden_states.shape[0]
-        q_delta = hidden_states.new_zeros((num_tokens, self.query_output_size))
-        v_delta = hidden_states.new_zeros((num_tokens, self.value_output_size))
-        scale = hidden_states.new_tensor(self.scale)
+        scale = self.scale
 
-        for expert_id in range(self.num_experts):
-            token_indices = torch.nonzero(expert_idx == expert_id, as_tuple=False).flatten()
-            if token_indices.numel() == 0:
-                continue
+        if expert_idx.dim() == 1:
+            expert_idx = expert_idx.unsqueeze(1)
+            expert_scores = expert_scores.unsqueeze(1)
 
-            expert_hidden = hidden_states.index_select(0, token_indices)
-            expert_scale = (
-                expert_scores.index_select(0, token_indices).to(hidden_states.dtype).unsqueeze(-1) * scale
-            )
+        num_tokens, k = expert_idx.shape
+        scores = (expert_scores.to(hidden_states.dtype) * scale).unsqueeze(-1)
+        arange = torch.arange(num_tokens, device=expert_idx.device).unsqueeze(1).expand(-1, k)
 
-            q_low_rank = expert_hidden @ self.q_lora_a[expert_id]
-            v_low_rank = expert_hidden @ self.v_lora_a[expert_id]
+        all_q_low = torch.einsum('nd,edr->ner', hidden_states, self.q_lora_a)
+        all_v_low = torch.einsum('nd,edr->ner', hidden_states, self.v_lora_a)
 
-            q_delta.index_copy_(0, token_indices, (q_low_rank @ self.q_lora_b[expert_id]) * expert_scale)
-            v_delta.index_copy_(0, token_indices, (v_low_rank @ self.v_lora_b[expert_id]) * expert_scale)
+        all_q_out = torch.einsum('ner,erq->neq', all_q_low, self.q_lora_b)
+        all_v_out = torch.einsum('ner,erv->nev', all_v_low, self.v_lora_b)
+
+        q_delta = (all_q_out[arange, expert_idx] * scores).sum(dim=1)
+        v_delta = (all_v_out[arange, expert_idx] * scores).sum(dim=1)
+
         return (
             q_delta.reshape(*original_shape, self.query_output_size),
             v_delta.reshape(*original_shape, self.value_output_size),
@@ -106,7 +108,11 @@ class QVLoraExpertRouter(torch.nn.Module): #lora expert routing class
         router_input = hidden_flat.to(self.router_weight.dtype)
         router_logits = F.linear(router_input, self.router_weight)
         router_probs = torch.softmax(router_logits, dim=-1)
-        expert_scores, expert_idx = torch.max(router_probs, dim=-1)
+        if self.topk == 1:
+            expert_scores, expert_idx = torch.max(router_probs, dim=-1)
+        else:
+            expert_scores, expert_idx = torch.topk(router_probs, k=self.topk, dim=-1)
+            expert_scores = expert_scores / (expert_scores.sum(dim=-1, keepdim=True) + 1e-20)
         return self._compute_grouped_qv_deltas(
             hidden_flat, original_shape, expert_idx, expert_scores
         )

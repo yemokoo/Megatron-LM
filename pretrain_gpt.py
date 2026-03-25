@@ -80,7 +80,7 @@ def model_provider(pre_process=True, post_process=True) -> Union[GPTModel, megat
 
         torch._C._cuda_attach_out_of_memory_observer(oom_observer)
 
-    print_rank_0('building GPT model ...')
+    print_rank_0('building GPT model ...') #make gpt model from config and spec.
     # Experimental loading arguments from yaml
     if args.yaml_cfg is not None:
         config = core_transformer_config_from_yaml(args, "language_model")
@@ -276,23 +276,20 @@ def forward_step(data_iterator, model: GPTModel):
             data_iterator)
     timers('batch-generator').stop()
 
-    with stimer:
-        output_tensor = model(tokens, position_ids, attention_mask, labels=labels)
-
     teacher_model = get_old_moe_distill_teacher()
     if teacher_model is not None and args.moe_old_model_kl_coeff > 0:
         with stimer:
-            student_logits = model(
+            student_output = model(
                 tokens,
                 position_ids,
                 attention_mask,
-                labels=None,
+                labels=labels,
                 runtime_gather_output=True,
+                return_loss_and_logits=True,
             )
+        output_tensor = student_output["losses"]
+        student_logits = student_output["logits"]
         with torch.no_grad():
-            teacher_model_was_training = teacher_model[0].training
-            for teacher_shard in teacher_model:
-                teacher_shard.eval()
             teacher_logits = teacher_model[0](
                 tokens,
                 position_ids,
@@ -300,14 +297,14 @@ def forward_step(data_iterator, model: GPTModel):
                 labels=None,
                 runtime_gather_output=True,
             )
-            if teacher_model_was_training:
-                for teacher_shard in teacher_model:
-                    teacher_shard.train()
         output_tensor = {
             "losses": output_tensor,
             "student_logits": student_logits,
             "teacher_logits": teacher_logits,
         }
+    else:
+        with stimer:
+            output_tensor = model(tokens, position_ids, attention_mask, labels=labels)
 
     return output_tensor, partial(loss_func, loss_mask)
 
