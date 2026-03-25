@@ -136,11 +136,11 @@ export DATASET_SOURCE="${DATASET_SOURCE:-Wikipedia exact train + Code exact trai
 export PROBE_DATASET="${PROBE_DATASET:-$LOCAL_DATASET/wikipedia-full/tokenized/EleutherAI/pythia-12b-step1800-test-fullremainder-exact}"
 export PROBE_NAME="${PROBE_NAME:-wiki_probe}"
 export PROBE_EVAL_ITERS="${PROBE_EVAL_ITERS:-25}"
-export PROBE_EVAL_INTERVAL="${PROBE_EVAL_INTERVAL:-40}"
+export PROBE_EVAL_INTERVAL="${PROBE_EVAL_INTERVAL:-100}"
 export SECONDARY_PROBE_DATASET="${SECONDARY_PROBE_DATASET:-$LOCAL_DATASET/python-code-full/tokenized/EleutherAI/pythia-12b-step1800-test-matchwiki-exact}"
 export SECONDARY_PROBE_NAME="${SECONDARY_PROBE_NAME:-code_probe}"
 export SECONDARY_PROBE_EVAL_ITERS="${SECONDARY_PROBE_EVAL_ITERS:-25}"
-export SECONDARY_PROBE_EVAL_INTERVAL="${SECONDARY_PROBE_EVAL_INTERVAL:-40}"
+export SECONDARY_PROBE_EVAL_INTERVAL="${SECONDARY_PROBE_EVAL_INTERVAL:-100}"
 export PROBE_STEP_OFFSET="${PROBE_STEP_OFFSET:-}"
 export SECONDARY_PROBE_STEP_OFFSET="${SECONDARY_PROBE_STEP_OFFSET:-}"
 export WANDB_STEP_OFFSET="${WANDB_STEP_OFFSET:-}"
@@ -260,8 +260,6 @@ INFRA_ARGS=(
     --expert-model-parallel-size "$EXPERT_MODEL_PARALLEL_SIZE"
     --distributed-timeout-minutes 30
     --no-persist-layer-norm
-    --no-masked-softmax-fusion
-    --attention-softmax-in-fp32
     --dist-ckpt-strictness assume_ok_unexpected
     --finetune
     --no-load-optim

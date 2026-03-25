@@ -58,7 +58,7 @@ export DATASET_SOURCE="${DATASET_SOURCE:-$(dataset_source_for_task "$TASK_NAME")
 export PROBE_DATASET="${PROBE_DATASET:-$(probe_dir_for_task "$TASK_NAME")}"
 export PROBE_NAME="${PROBE_NAME:-${TASK_LABEL}_probe}"
 export PROBE_EVAL_ITERS="${PROBE_EVAL_ITERS:-25}"
-export PROBE_EVAL_INTERVAL="${PROBE_EVAL_INTERVAL:-40}"
+export PROBE_EVAL_INTERVAL="${PROBE_EVAL_INTERVAL:-100}"
 
 if [ "$TASK_NAME" = "wiki" ]; then
     export SECONDARY_PROBE_DATASET="${SECONDARY_PROBE_DATASET:-$(probe_dir_for_task code)}"
@@ -68,7 +68,7 @@ else
     export SECONDARY_PROBE_NAME="${SECONDARY_PROBE_NAME:-wiki_probe}"
 fi
 export SECONDARY_PROBE_EVAL_ITERS="${SECONDARY_PROBE_EVAL_ITERS:-25}"
-export SECONDARY_PROBE_EVAL_INTERVAL="${SECONDARY_PROBE_EVAL_INTERVAL:-40}"
+export SECONDARY_PROBE_EVAL_INTERVAL="${SECONDARY_PROBE_EVAL_INTERVAL:-100}"
 export SECONDARY_PROBE_STEP_OFFSET="${SECONDARY_PROBE_STEP_OFFSET:-0}"
 export WANDB_STEP_OFFSET="${WANDB_STEP_OFFSET:-0}"
 export WANDB_PROJECT="${WANDB_PROJECT:-}"
@@ -121,8 +121,6 @@ INFRA_ARGS=(
     --moe-token-dispatcher-type alltoall
     --distributed-timeout-minutes 30
     --no-persist-layer-norm
-    --no-masked-softmax-fusion
-    --attention-softmax-in-fp32
 )
 
 TRAIN_ARGS=(
