@@ -21,7 +21,6 @@ from megatron.training.initialize import initialize_megatron
 from megatron.legacy.data.data_samplers import build_pretraining_data_loader
 
 from pretrain_gpt import get_batch, is_dataset_built_on_rank, model_provider
-from megatron.core.transformer.qv_lora_attention import QVLoraSelfAttention
 
 
 def add_args(parser):
@@ -77,6 +76,7 @@ def build_eval_dataloader():
 
 def register_qv_router_hooks(model, routing_state):
     hooks = []
+    hooked_layers = []
 
     def make_hook(layer_number, router_module):
         def _hook(_module, inputs, _outputs):
@@ -127,14 +127,19 @@ def register_qv_router_hooks(model, routing_state):
         return _hook
 
     for _name, module in model.named_modules():
-        if not isinstance(module, QVLoraSelfAttention):
-            continue
-        if module.qv_lora_experts is None:
+        router_module = getattr(module, "qv_lora_experts", None)
+        layer_number = getattr(module, "layer_number", None)
+        if router_module is None or layer_number is None:
             continue
         hooks.append(
-            module.qv_lora_experts.register_forward_hook(
-                make_hook(module.layer_number, module.qv_lora_experts)
-            )
+            router_module.register_forward_hook(make_hook(layer_number, router_module))
+        )
+        hooked_layers.append(int(layer_number))
+
+    if torch.distributed.get_rank() == 0:
+        print(
+            f"[routing-eval] registered router hooks for {len(hooked_layers)} layers: "
+            f"{sorted(hooked_layers)}"
         )
     return hooks
 
