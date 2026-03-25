@@ -18,6 +18,52 @@ resolve_python() {
 
 export PYTHON_BIN="${PYTHON_BIN:-$(resolve_python)}"
 
+default_train_dir_for_task() {
+    case "$1" in
+        wiki)
+            if [ -d "$PROJECT_ROOT/data/wiki/train" ]; then
+                echo "$PROJECT_ROOT/data/wiki/train"
+            else
+                echo "$LOCAL_DATASET/wikipedia-full/tokenized/EleutherAI/pythia-12b-step1800-train-exact"
+            fi
+            ;;
+        code)
+            if [ -d "$PROJECT_ROOT/data/code/train" ]; then
+                echo "$PROJECT_ROOT/data/code/train"
+            else
+                echo "$LOCAL_DATASET/python-code-full/tokenized/EleutherAI/pythia-12b-step1800-train-exact"
+            fi
+            ;;
+        *)
+            echo "ERROR: unknown task '$1'" >&2
+            return 1
+            ;;
+    esac
+}
+
+default_probe_dir_for_task() {
+    case "$1" in
+        wiki)
+            if [ -d "$PROJECT_ROOT/data/wiki/test" ]; then
+                echo "$PROJECT_ROOT/data/wiki/test"
+            else
+                echo "$LOCAL_DATASET/wikipedia-full/tokenized/EleutherAI/pythia-12b-step1800-test-fullremainder-exact"
+            fi
+            ;;
+        code)
+            if [ -d "$PROJECT_ROOT/data/code/test" ]; then
+                echo "$PROJECT_ROOT/data/code/test"
+            else
+                echo "$LOCAL_DATASET/python-code-full/tokenized/EleutherAI/pythia-12b-step1800-test-matchwiki-exact"
+            fi
+            ;;
+        *)
+            echo "ERROR: unknown task '$1'" >&2
+            return 1
+            ;;
+    esac
+}
+
 build_data_path() {
     "$PYTHON_BIN" - "$@" <<'PY'
 import sys
@@ -32,33 +78,11 @@ PY
 }
 
 dataset_dir_for_task() {
-    case "$1" in
-        wiki)
-            echo "$LOCAL_DATASET/wikipedia-full/tokenized/EleutherAI/pythia-12b-step1800-train-exact"
-            ;;
-        code)
-            echo "$LOCAL_DATASET/python-code-full/tokenized/EleutherAI/pythia-12b-step1800-train-exact"
-            ;;
-        *)
-            echo "ERROR: unknown task '$1'" >&2
-            return 1
-            ;;
-    esac
+    default_train_dir_for_task "$1"
 }
 
 probe_dir_for_task() {
-    case "$1" in
-        wiki)
-            echo "$LOCAL_DATASET/wikipedia-full/tokenized/EleutherAI/pythia-12b-step1800-test-fullremainder-exact"
-            ;;
-        code)
-            echo "$LOCAL_DATASET/python-code-full/tokenized/EleutherAI/pythia-12b-step1800-test-matchwiki-exact"
-            ;;
-        *)
-            echo "ERROR: unknown task '$1'" >&2
-            return 1
-            ;;
-    esac
+    default_probe_dir_for_task "$1"
 }
 
 weights_subdir_for_task() {
