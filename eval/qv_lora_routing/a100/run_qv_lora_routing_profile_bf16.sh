@@ -93,8 +93,16 @@ PY
 MODEL_WEIGHTS_DIR="$(resolve_model_weights_dir)"
 SOURCE_NUM_EXPERTS="${SOURCE_NUM_EXPERTS:-$(read_run_metadata_value 'attn_lora_source_num_experts')}"
 TARGET_NUM_EXPERTS="${TARGET_NUM_EXPERTS:-$(read_run_metadata_value 'attn_lora_target_num_experts')}"
+ATTN_LORA_NUM_EXPERTS="${ATTN_LORA_NUM_EXPERTS:-$(read_run_metadata_value 'attn_lora_num_experts')}"
+ATTN_LORA_TOPK="${ATTN_LORA_TOPK:-$(read_run_metadata_value 'attn_lora_topk')}"
+ATTN_LORA_RANK="${ATTN_LORA_RANK:-$(read_run_metadata_value 'attn_lora_rank')}"
+ATTN_LORA_ALPHA="${ATTN_LORA_ALPHA:-$(read_run_metadata_value 'attn_lora_alpha')}"
 SOURCE_NUM_EXPERTS="${SOURCE_NUM_EXPERTS:-4}"
 TARGET_NUM_EXPERTS="${TARGET_NUM_EXPERTS:-7}"
+ATTN_LORA_NUM_EXPERTS="${ATTN_LORA_NUM_EXPERTS:-$TARGET_NUM_EXPERTS}"
+ATTN_LORA_TOPK="${ATTN_LORA_TOPK:-1}"
+ATTN_LORA_RANK="${ATTN_LORA_RANK:-16}"
+ATTN_LORA_ALPHA="${ATTN_LORA_ALPHA:-16}"
 
 if [ "$TARGET_EVAL_SAMPLES" -gt 0 ]; then
     export EVAL_ITERS=$(((TARGET_EVAL_SAMPLES + GLOBAL_BATCH_SIZE - 1) / GLOBAL_BATCH_SIZE))
@@ -130,6 +138,10 @@ run_dump() {
             --output-json "$output_json" \
             --compare-label "$label" \
             --source-num-experts "$SOURCE_NUM_EXPERTS" \
+            --attn-lora-num-experts "$ATTN_LORA_NUM_EXPERTS" \
+            --attn-lora-topk "$ATTN_LORA_TOPK" \
+            --attn-lora-rank "$ATTN_LORA_RANK" \
+            --attn-lora-alpha "$ATTN_LORA_ALPHA" \
             --data-path "${data_path_args[@]}" \
             --dataset-split "$DATASET_SPLIT" \
             --dataset-split-name "$DATASET_SPLIT_NAME" \
@@ -164,6 +176,10 @@ run_dump() {
             --output-json "$output_json" \
             --compare-label "$label" \
             --source-num-experts "$SOURCE_NUM_EXPERTS" \
+            --attn-lora-num-experts "$ATTN_LORA_NUM_EXPERTS" \
+            --attn-lora-topk "$ATTN_LORA_TOPK" \
+            --attn-lora-rank "$ATTN_LORA_RANK" \
+            --attn-lora-alpha "$ATTN_LORA_ALPHA" \
             --data-path "${data_path_args[@]}" \
             --dataset-split "$DATASET_SPLIT" \
             --dataset-split-name "$DATASET_SPLIT_NAME" \
