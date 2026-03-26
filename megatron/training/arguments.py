@@ -1284,6 +1284,8 @@ def _add_logging_args(parser):
                        help='Run probe evaluation every N training iterations.')
     group.add_argument('--probe-step-offset', type=int, default=0,
                        help='Constant offset added to probe iteration indices when logging metrics.')
+    group.add_argument('--run-initial-probe-eval', action='store_true',
+                       help='Run probe evaluation once before the first training step.')
     group.add_argument('--secondary-probe-data-path', nargs='*', default=None,
                        help='Optional second probe dataset blend used for periodic evaluation. '
                        'Format matches --data-path.')
@@ -1295,6 +1297,8 @@ def _add_logging_args(parser):
                        help='Run second probe evaluation every N training iterations.')
     group.add_argument('--secondary-probe-step-offset', type=int, default=0,
                        help='Constant offset added to second probe iteration indices when logging metrics.')
+    group.add_argument('--run-initial-valid-eval', action='store_true',
+                       help='Run validation evaluation once before the first training step.')
     group.add_argument('--logging-level', type=int, default=None,
                        help='Set default logging level')
     return parser

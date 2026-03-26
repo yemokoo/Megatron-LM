@@ -1913,6 +1913,23 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
         torch.distributed.barrier()
         print_rank_0(f">>> Weight hashes match after {iteration} iterations...")
 
+    if iteration == 0:
+        if args.run_initial_probe_eval and probe_eval_func is not None:
+            probe_eval_func(model, iteration)
+
+        if args.run_initial_valid_eval and args.eval_interval and args.do_valid:
+            prefix = f'iteration {iteration}'
+            timers('eval-time', log_level=0).start(barrier=True)
+            evaluate_and_print_results(prefix, forward_step_func,
+                                       valid_data_iterator, model,
+                                       iteration, process_non_loss_data_func,
+                                       config, verbose=False, write_to_tensorboard=True,
+                                       non_loss_data_func=non_loss_data_func)
+            eval_duration += timers('eval-time').elapsed()
+            eval_iterations += args.eval_iters
+            timers('eval-time').stop()
+            one_logger_utils.track_e2e_metrics()
+
     # Run training iterations till done.
     while iteration < args.train_iters:
         if args.profile and torch.distributed.get_rank() in args.profile_ranks:
