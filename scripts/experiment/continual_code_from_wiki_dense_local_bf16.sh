@@ -133,10 +133,12 @@ export PROBE_DATASET="${PROBE_DATASET:-$LOCAL_DATASET/python-code-full/tokenized
 export PROBE_NAME="${PROBE_NAME:-code_probe}"
 export PROBE_EVAL_ITERS="${PROBE_EVAL_ITERS:-25}"
 export PROBE_EVAL_INTERVAL="${PROBE_EVAL_INTERVAL:-100}"
+export RUN_INITIAL_PROBE_EVAL="${RUN_INITIAL_PROBE_EVAL:-1}"
 export SECONDARY_PROBE_DATASET="${SECONDARY_PROBE_DATASET:-$LOCAL_DATASET/wikipedia-full/tokenized/EleutherAI/pythia-12b-step1800-test-fullremainder-exact}"
 export SECONDARY_PROBE_NAME="${SECONDARY_PROBE_NAME:-wiki_probe}"
 export SECONDARY_PROBE_EVAL_ITERS="${SECONDARY_PROBE_EVAL_ITERS:-25}"
 export SECONDARY_PROBE_EVAL_INTERVAL="${SECONDARY_PROBE_EVAL_INTERVAL:-100}"
+export RUN_INITIAL_VALID_EVAL="${RUN_INITIAL_VALID_EVAL:-1}"
 export PROBE_STEP_OFFSET="${PROBE_STEP_OFFSET:-}"
 export SECONDARY_PROBE_STEP_OFFSET="${SECONDARY_PROBE_STEP_OFFSET:-}"
 export WANDB_STEP_OFFSET="${WANDB_STEP_OFFSET:-}"
@@ -227,6 +229,8 @@ metadata = {
     'old_model_kl_coeff': float(os.environ['OLD_MODEL_KL_COEFF']),
     'old_model_kl_temperature': float(os.environ['OLD_MODEL_KL_TEMPERATURE']),
     'probe_step_offset': int(os.environ['PROBE_STEP_OFFSET']),
+    'run_initial_probe_eval': bool(int(os.environ['RUN_INITIAL_PROBE_EVAL'])),
+    'run_initial_valid_eval': bool(int(os.environ['RUN_INITIAL_VALID_EVAL'])),
     'precision': os.environ['PRECISION'],
 }
 with open(os.environ['RUN_METADATA'], 'w', encoding='utf-8') as f:
@@ -279,6 +283,10 @@ SAVE_ARGS=(
     --moe-old-model-kl-load "$SSD_SOURCE_WEIGHTS"
 )
 
+if [ "$RUN_INITIAL_VALID_EVAL" = "1" ]; then
+    SAVE_ARGS+=(--run-initial-valid-eval)
+fi
+
 PROBE_ARGS=(
     --probe-name "$PROBE_NAME"
     --probe-eval-iters "$PROBE_EVAL_ITERS"
@@ -286,6 +294,10 @@ PROBE_ARGS=(
     --probe-step-offset "$PROBE_STEP_OFFSET"
     --probe-data-path $(build_data_path "$PROBE_DATASET")
 )
+
+if [ "$RUN_INITIAL_PROBE_EVAL" = "1" ]; then
+    PROBE_ARGS+=(--run-initial-probe-eval)
+fi
 
 if [ -n "$SECONDARY_PROBE_DATASET" ]; then
     PROBE_ARGS+=(
