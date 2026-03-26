@@ -86,16 +86,29 @@ class QVLoraExpertRouter(torch.nn.Module): #lora expert routing class
 
         num_tokens, k = expert_idx.shape
         scores = (expert_scores.to(hidden_states.dtype) * scale).unsqueeze(-1)
-        arange = torch.arange(num_tokens, device=expert_idx.device).unsqueeze(1).expand(-1, k)
+        flat_expert_idx = expert_idx.reshape(-1)
 
-        all_q_low = torch.einsum('nd,edr->ner', hidden_states, self.q_lora_a)
-        all_v_low = torch.einsum('nd,edr->ner', hidden_states, self.v_lora_a)
+        selected_q_lora_a = self.q_lora_a.index_select(0, flat_expert_idx).reshape(
+            num_tokens, k, self.input_size, self.rank
+        )
+        selected_q_lora_b = self.q_lora_b.index_select(0, flat_expert_idx).reshape(
+            num_tokens, k, self.rank, self.query_output_size
+        )
+        selected_v_lora_a = self.v_lora_a.index_select(0, flat_expert_idx).reshape(
+            num_tokens, k, self.input_size, self.rank
+        )
+        selected_v_lora_b = self.v_lora_b.index_select(0, flat_expert_idx).reshape(
+            num_tokens, k, self.rank, self.value_output_size
+        )
 
-        all_q_out = torch.einsum('ner,erq->neq', all_q_low, self.q_lora_b)
-        all_v_out = torch.einsum('ner,erv->nev', all_v_low, self.v_lora_b)
+        q_low = torch.einsum('nd,nkdr->nkr', hidden_states, selected_q_lora_a)
+        v_low = torch.einsum('nd,nkdr->nkr', hidden_states, selected_v_lora_a)
 
-        q_delta = (all_q_out[arange, expert_idx] * scores).sum(dim=1)
-        v_delta = (all_v_out[arange, expert_idx] * scores).sum(dim=1)
+        q_out = torch.einsum('nkr,nkrq->nkq', q_low, selected_q_lora_b)
+        v_out = torch.einsum('nkr,nkrv->nkv', v_low, selected_v_lora_b)
+
+        q_delta = (q_out * scores).sum(dim=1)
+        v_delta = (v_out * scores).sum(dim=1)
 
         return (
             q_delta.reshape(*original_shape, self.query_output_size),
