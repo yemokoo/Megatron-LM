@@ -246,7 +246,7 @@ def test_freeze_hook_compatibility():
 
 
 def test_empty_expert():
-    """Test that the einsum approach handles the case where some experts
+    """Test that the selected-expert approach handles the case where some experts
     receive zero tokens (which the original loop skipped)."""
     N, D, R, Q, V, E = 8, 16, 4, 16, 16, 10  # many experts, few tokens
     hidden, _, _, qa, qb, va, vb, scale = make_test_data(N, D, R, Q, V, E, topk=1)
@@ -256,7 +256,7 @@ def test_empty_expert():
     scores = torch.ones(N)
 
     q_ref, v_ref = _ref_top1(hidden, idx, scores, qa, qb, va, vb, scale, Q, V, E)
-    q_new, v_new = _einsum_impl(hidden, idx, scores, qa, qb, va, vb, scale)
+    q_new, v_new = _selected_impl(hidden, idx, scores, qa, qb, va, vb, scale)
 
     q_err = (q_ref - q_new).abs().max().item()
     v_err = (v_ref - v_new).abs().max().item()
@@ -271,7 +271,7 @@ def test_production_scale():
     hidden, idx, scores, qa, qb, va, vb, scale = make_test_data(N, D, R, Q, V, E, topk=1)
 
     q_ref, v_ref = _ref_top1(hidden, idx, scores, qa, qb, va, vb, scale, Q, V, E)
-    q_new, v_new = _einsum_impl(hidden, idx, scores, qa, qb, va, vb, scale)
+    q_new, v_new = _selected_impl(hidden, idx, scores, qa, qb, va, vb, scale)
 
     q_err = (q_ref - q_new).abs().max().item()
     v_err = (v_ref - v_new).abs().max().item()
