@@ -188,10 +188,10 @@ def finalize_summary(routing_state):
         counts_tensor = record["expert_assignment_counts"]
         router_logit_sum_tensor = record["router_logit_sum"]
         counts = [int(v) for v in counts_tensor.tolist()]
+        token_count = int(record["token_count"])
         router_logit_means = [
             float(v) for v in (router_logit_sum_tensor / max(token_count, 1)).tolist()
         ]
-        token_count = int(record["token_count"])
         source_num_experts = int(args.source_num_experts)
         summary[layer_key] = {
             "token_count": token_count,
