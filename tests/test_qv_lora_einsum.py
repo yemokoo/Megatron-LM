@@ -1,4 +1,4 @@
-"""Verify that the selected-expert QVLoraExpertRouter produces identical results
+"""Verify that the grouped selected-expert QVLoraExpertRouter produces identical results
 to the original sequential loop implementation, for both top-1 and top-k routing,
 and that backward passes compute correct gradients including freeze hooks."""
 
@@ -50,7 +50,7 @@ def _ref_topk(hidden_states, expert_idx, expert_scores, q_lora_a, q_lora_b, v_lo
 
 
 # ---------------------------------------------------------------------------
-# New: selected-expert implementation (matches qv_lora_attention.py)
+# New: grouped selected-expert implementation (matches qv_lora_attention.py)
 # ---------------------------------------------------------------------------
 
 def _selected_impl(hidden_states, expert_idx, expert_scores, q_lora_a, q_lora_b, v_lora_a, v_lora_b, scale):
@@ -58,23 +58,22 @@ def _selected_impl(hidden_states, expert_idx, expert_scores, q_lora_a, q_lora_b,
         expert_idx = expert_idx.unsqueeze(1)
         expert_scores = expert_scores.unsqueeze(1)
 
-    num_tokens, k = expert_idx.shape
-    scores = (expert_scores.to(hidden_states.dtype) * scale).unsqueeze(-1)
-    flat_idx = expert_idx.reshape(-1)
+    num_tokens = hidden_states.shape[0]
+    num_experts = q_lora_a.shape[0]
+    q_delta = hidden_states.new_zeros((num_tokens, q_lora_b.shape[-1]))
+    v_delta = hidden_states.new_zeros((num_tokens, v_lora_b.shape[-1]))
 
-    selected_qa = q_lora_a.index_select(0, flat_idx).reshape(num_tokens, k, q_lora_a.shape[1], q_lora_a.shape[2])
-    selected_qb = q_lora_b.index_select(0, flat_idx).reshape(num_tokens, k, q_lora_b.shape[1], q_lora_b.shape[2])
-    selected_va = v_lora_a.index_select(0, flat_idx).reshape(num_tokens, k, v_lora_a.shape[1], v_lora_a.shape[2])
-    selected_vb = v_lora_b.index_select(0, flat_idx).reshape(num_tokens, k, v_lora_b.shape[1], v_lora_b.shape[2])
-
-    q_low = torch.einsum('nd,nkdr->nkr', hidden_states, selected_qa)
-    v_low = torch.einsum('nd,nkdr->nkr', hidden_states, selected_va)
-
-    q_out = torch.einsum('nkr,nkrq->nkq', q_low, selected_qb)
-    v_out = torch.einsum('nkr,nkrv->nkv', v_low, selected_vb)
-
-    q_delta = (q_out * scores).sum(dim=1)
-    v_delta = (v_out * scores).sum(dim=1)
+    for expert_id in range(num_experts):
+        matched = torch.nonzero(expert_idx == expert_id, as_tuple=False)
+        if matched.numel() == 0:
+            continue
+        token_indices = matched[:, 0]
+        expert_hidden = hidden_states.index_select(0, token_indices)
+        expert_scale = expert_scores[matched[:, 0], matched[:, 1]].to(hidden_states.dtype).unsqueeze(-1) * scale
+        q_low_rank = expert_hidden @ q_lora_a[expert_id]
+        v_low_rank = expert_hidden @ v_lora_a[expert_id]
+        q_delta.index_add_(0, token_indices, (q_low_rank @ q_lora_b[expert_id]) * expert_scale)
+        v_delta.index_add_(0, token_indices, (v_low_rank @ v_lora_b[expert_id]) * expert_scale)
     return q_delta, v_delta
 
 
