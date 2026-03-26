@@ -102,6 +102,7 @@ export ATTN_LORA_RANK="${ATTN_LORA_RANK:-16}"
 export ATTN_LORA_TOPK="${ATTN_LORA_TOPK:-1}"
 export ATTN_LORA_ALPHA="${ATTN_LORA_ALPHA:-16}"
 export ATTN_LORA_ROUTER_DTYPE="${ATTN_LORA_ROUTER_DTYPE:-fp32}"
+export ATTN_LORA_TRAIN_NEW_EXPERTS_AND_ROUTER_ONLY="${ATTN_LORA_TRAIN_NEW_EXPERTS_AND_ROUTER_ONLY:-1}"
 export MICRO_BATCH_SIZE="${MICRO_BATCH_SIZE:-8}"
 export GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-1024}"
 export PIPELINE_MODEL_PARALLEL_SIZE=1
@@ -133,16 +134,18 @@ export GPU_LOG="${GPU_LOG:-$LOG_DIR/gpu_usage.csv}"
 export RUN_METADATA="${RUN_METADATA:-$LOG_DIR/run_metadata.json}"
 export DATASET_NAME="${DATASET_NAME:-code_exact}"
 export DATASET_SOURCE="${DATASET_SOURCE:-Python code exact train}"
-export OLD_MODEL_KL_COEFF="${OLD_MODEL_KL_COEFF:-1.0}"
+export OLD_MODEL_KL_COEFF="${OLD_MODEL_KL_COEFF:-0.0}"
 export OLD_MODEL_KL_TEMPERATURE="${OLD_MODEL_KL_TEMPERATURE:-1.0}"
 export PROBE_DATASET="${PROBE_DATASET:-$LOCAL_DATASET/python-code-full/tokenized/EleutherAI/pythia-12b-step1800-test-matchwiki-exact}"
 export PROBE_NAME="${PROBE_NAME:-code_probe}"
 export PROBE_EVAL_ITERS="${PROBE_EVAL_ITERS:-25}"
 export PROBE_EVAL_INTERVAL="${PROBE_EVAL_INTERVAL:-100}"
+export RUN_INITIAL_PROBE_EVAL="${RUN_INITIAL_PROBE_EVAL:-1}"
 export SECONDARY_PROBE_DATASET="${SECONDARY_PROBE_DATASET:-$LOCAL_DATASET/wikipedia-full/tokenized/EleutherAI/pythia-12b-step1800-test-fullremainder-exact}"
 export SECONDARY_PROBE_NAME="${SECONDARY_PROBE_NAME:-wiki_probe}"
 export SECONDARY_PROBE_EVAL_ITERS="${SECONDARY_PROBE_EVAL_ITERS:-25}"
 export SECONDARY_PROBE_EVAL_INTERVAL="${SECONDARY_PROBE_EVAL_INTERVAL:-100}"
+export RUN_INITIAL_VALID_EVAL="${RUN_INITIAL_VALID_EVAL:-1}"
 export PROBE_STEP_OFFSET="${PROBE_STEP_OFFSET:-}"
 export SECONDARY_PROBE_STEP_OFFSET="${SECONDARY_PROBE_STEP_OFFSET:-}"
 export WANDB_STEP_OFFSET="${WANDB_STEP_OFFSET:-}"
@@ -235,9 +238,12 @@ metadata = {
     'attn_lora_rank': int(os.environ['ATTN_LORA_RANK']),
     'attn_lora_topk': int(os.environ['ATTN_LORA_TOPK']),
     'attn_lora_alpha': float(os.environ['ATTN_LORA_ALPHA']),
+    'attn_lora_train_new_experts_and_router_only': bool(int(os.environ['ATTN_LORA_TRAIN_NEW_EXPERTS_AND_ROUTER_ONLY'])),
     'old_model_kl_coeff': float(os.environ['OLD_MODEL_KL_COEFF']),
     'old_model_kl_temperature': float(os.environ['OLD_MODEL_KL_TEMPERATURE']),
     'probe_step_offset': int(os.environ['PROBE_STEP_OFFSET']),
+    'run_initial_probe_eval': bool(int(os.environ['RUN_INITIAL_PROBE_EVAL'])),
+    'run_initial_valid_eval': bool(int(os.environ['RUN_INITIAL_VALID_EVAL'])),
     'precision': os.environ['PRECISION'],
 }
 with open(os.environ['RUN_METADATA'], 'w', encoding='utf-8') as f:
@@ -286,11 +292,27 @@ SAVE_ARGS=(
     --eval-interval "$EVAL_INTERVAL"
     --tensorboard-dir "$SSD_TARGET_WEIGHTS"
     --attn-lora-expand-from-num-experts "$ATTN_LORA_SOURCE_NUM_EXPERTS"
-    --attn-lora-freeze-existing-experts
-    --attn-lora-freeze-existing-router
-    --moe-old-model-kl-coeff "$OLD_MODEL_KL_COEFF"
-    --moe-old-model-kl-temperature "$OLD_MODEL_KL_TEMPERATURE"
 )
+
+if [ "$RUN_INITIAL_VALID_EVAL" = "1" ]; then
+    SAVE_ARGS+=(--run-initial-valid-eval)
+fi
+
+if [ "$ATTN_LORA_TRAIN_NEW_EXPERTS_AND_ROUTER_ONLY" = "1" ]; then
+    SAVE_ARGS+=(--attn-lora-train-new-experts-and-router-only)
+else
+    SAVE_ARGS+=(
+        --attn-lora-freeze-existing-experts
+        --attn-lora-freeze-existing-router
+    )
+fi
+
+if [ "${OLD_MODEL_KL_COEFF}" != "0" ] && [ "${OLD_MODEL_KL_COEFF}" != "0.0" ]; then
+    SAVE_ARGS+=(
+        --moe-old-model-kl-coeff "$OLD_MODEL_KL_COEFF"
+        --moe-old-model-kl-temperature "$OLD_MODEL_KL_TEMPERATURE"
+    )
+fi
 
 PROBE_ARGS=(
     --probe-name "$PROBE_NAME"
@@ -299,6 +321,10 @@ PROBE_ARGS=(
     --probe-step-offset "$PROBE_STEP_OFFSET"
     --probe-data-path $(build_data_path "$PROBE_DATASET")
 )
+
+if [ "$RUN_INITIAL_PROBE_EVAL" = "1" ]; then
+    PROBE_ARGS+=(--run-initial-probe-eval)
+fi
 
 if [ -n "$SECONDARY_PROBE_DATASET" ]; then
     PROBE_ARGS+=(
