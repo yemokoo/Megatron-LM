@@ -103,6 +103,10 @@ def register_qv_router_hooks(model, routing_state):
                     "all_old_count": 0,
                     "mixed_count": 0,
                     "all_new_count": 0,
+                    "router_logit_sum": torch.zeros(
+                        router_module.num_experts,
+                        dtype=torch.float64,
+                    ),
                     "expert_assignment_counts": torch.zeros(
                         router_module.num_experts,
                         dtype=torch.int64,
@@ -120,6 +124,7 @@ def register_qv_router_hooks(model, routing_state):
             record["mixed_count"] += int(mixed_mask.sum().item())
             record["all_new_count"] += int(all_new_mask.sum().item())
             record["new_slot_fraction_sum"] += float(is_new.float().mean(dim=-1).sum().item())
+            record["router_logit_sum"] += router_logits.detach().float().sum(dim=0).cpu().to(torch.float64)
             record["expert_assignment_counts"] += torch.bincount(
                 expert_idx.reshape(-1).cpu(), minlength=router_module.num_experts
             ).to(torch.int64)
@@ -181,11 +186,13 @@ def finalize_summary(routing_state):
     summary = {}
     for layer_key, record in sorted(routing_state.items()):
         counts_tensor = record["expert_assignment_counts"]
+        router_logit_sum_tensor = record["router_logit_sum"]
         counts = [int(v) for v in counts_tensor.tolist()]
+        router_logit_means = [
+            float(v) for v in (router_logit_sum_tensor / max(token_count, 1)).tolist()
+        ]
         token_count = int(record["token_count"])
         source_num_experts = int(args.source_num_experts)
-        old_count = int(sum(counts[:source_num_experts]))
-        new_count = int(sum(counts[source_num_experts:]))
         summary[layer_key] = {
             "token_count": token_count,
             "topk": int(record.get("topk", 1)),
@@ -202,6 +209,7 @@ def finalize_summary(routing_state):
             ),
             "mean_new_group_slot_fraction": record["new_slot_fraction_sum"] / max(token_count, 1),
             "mean_selected_router_score": record["selected_score_sum"] / max(token_count, 1),
+            "mean_router_logits_per_expert": router_logit_means,
         }
     return summary
 

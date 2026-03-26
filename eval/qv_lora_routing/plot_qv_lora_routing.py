@@ -21,6 +21,10 @@ def plot_single_dataset(summary, output_dir: Path, stem: str):
     mixed = [summary["routing_summary"][layer]["fraction_mixed_old_new_group"] for layer in layers]
     all_new = [summary["routing_summary"][layer]["fraction_all_new_group"] for layer in layers]
     new_usage = [summary["routing_summary"][layer]["fraction_using_new_expert"] for layer in layers]
+    router_logits = np.array(
+        [summary["routing_summary"][layer]["mean_router_logits_per_expert"] for layer in layers],
+        dtype=np.float32,
+    )
 
     plt.figure(figsize=(10, 5))
     plt.bar(layers, all_old, label="old4 only")
@@ -44,6 +48,18 @@ def plot_single_dataset(summary, output_dir: Path, stem: str):
     plt.title(f"New expert usage: {summary['label']}")
     plt.tight_layout()
     plt.savefig(output_dir / f"{stem}_new_expert_usage.png", dpi=200)
+    plt.close()
+
+    plt.figure(figsize=(8, 6))
+    im = plt.imshow(router_logits, aspect="auto", cmap="viridis")
+    plt.yticks(np.arange(len(layers)), layers)
+    plt.xticks(np.arange(router_logits.shape[1]), np.arange(router_logits.shape[1]))
+    plt.xlabel("Expert index")
+    plt.ylabel("Layer")
+    plt.title(f"Mean router logits: {summary['label']}")
+    plt.colorbar(im, label="Mean router logit")
+    plt.tight_layout()
+    plt.savefig(output_dir / f"{stem}_router_logit_heatmap.png", dpi=200)
     plt.close()
 
 
