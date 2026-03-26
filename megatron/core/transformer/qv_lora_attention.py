@@ -84,31 +84,28 @@ class QVLoraExpertRouter(torch.nn.Module): #lora expert routing class
             expert_idx = expert_idx.unsqueeze(1)
             expert_scores = expert_scores.unsqueeze(1)
 
-        num_tokens, k = expert_idx.shape
-        scores = (expert_scores.to(hidden_states.dtype) * scale).unsqueeze(-1)
-        flat_expert_idx = expert_idx.reshape(-1)
+        num_tokens = hidden_states.shape[0]
+        q_delta = hidden_states.new_zeros((num_tokens, self.query_output_size))
+        v_delta = hidden_states.new_zeros((num_tokens, self.value_output_size))
 
-        selected_q_lora_a = self.q_lora_a.index_select(0, flat_expert_idx).reshape(
-            num_tokens, k, self.input_size, self.rank
-        )
-        selected_q_lora_b = self.q_lora_b.index_select(0, flat_expert_idx).reshape(
-            num_tokens, k, self.rank, self.query_output_size
-        )
-        selected_v_lora_a = self.v_lora_a.index_select(0, flat_expert_idx).reshape(
-            num_tokens, k, self.input_size, self.rank
-        )
-        selected_v_lora_b = self.v_lora_b.index_select(0, flat_expert_idx).reshape(
-            num_tokens, k, self.rank, self.value_output_size
-        )
+        for expert_id in range(self.num_experts):
+            matched = torch.nonzero(expert_idx == expert_id, as_tuple=False)
+            if matched.numel() == 0:
+                continue
 
-        q_low = torch.einsum('nd,nkdr->nkr', hidden_states, selected_q_lora_a)
-        v_low = torch.einsum('nd,nkdr->nkr', hidden_states, selected_v_lora_a)
+            token_indices = matched[:, 0]
+            expert_hidden = hidden_states.index_select(0, token_indices)
+            expert_scale = (
+                expert_scores[matched[:, 0], matched[:, 1]].to(hidden_states.dtype).unsqueeze(-1) * scale
+            )
 
-        q_out = torch.einsum('nkr,nkrq->nkq', q_low, selected_q_lora_b)
-        v_out = torch.einsum('nkr,nkrv->nkv', v_low, selected_v_lora_b)
+            q_low_rank = expert_hidden @ self.q_lora_a[expert_id]
+            v_low_rank = expert_hidden @ self.v_lora_a[expert_id]
+            q_out = (q_low_rank @ self.q_lora_b[expert_id]) * expert_scale
+            v_out = (v_low_rank @ self.v_lora_b[expert_id]) * expert_scale
 
-        q_delta = (q_out * scores).sum(dim=1)
-        v_delta = (v_out * scores).sum(dim=1)
+            q_delta.index_add_(0, token_indices, q_out)
+            v_delta.index_add_(0, token_indices, v_out)
 
         return (
             q_delta.reshape(*original_shape, self.query_output_size),
