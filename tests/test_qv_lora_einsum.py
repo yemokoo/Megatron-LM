@@ -1,4 +1,4 @@
-"""Verify that the einsum-based QVLoraExpertRouter produces identical results
+"""Verify that the selected-expert QVLoraExpertRouter produces identical results
 to the original sequential loop implementation, for both top-1 and top-k routing,
 and that backward passes compute correct gradients including freeze hooks."""
 
@@ -50,26 +50,31 @@ def _ref_topk(hidden_states, expert_idx, expert_scores, q_lora_a, q_lora_b, v_lo
 
 
 # ---------------------------------------------------------------------------
-# New: einsum implementation (matches qv_lora_attention.py)
+# New: selected-expert implementation (matches qv_lora_attention.py)
 # ---------------------------------------------------------------------------
 
-def _einsum_impl(hidden_states, expert_idx, expert_scores, q_lora_a, q_lora_b, v_lora_a, v_lora_b, scale):
+def _selected_impl(hidden_states, expert_idx, expert_scores, q_lora_a, q_lora_b, v_lora_a, v_lora_b, scale):
     if expert_idx.dim() == 1:
         expert_idx = expert_idx.unsqueeze(1)
         expert_scores = expert_scores.unsqueeze(1)
 
     num_tokens, k = expert_idx.shape
     scores = (expert_scores.to(hidden_states.dtype) * scale).unsqueeze(-1)
-    arange = torch.arange(num_tokens, device=expert_idx.device).unsqueeze(1).expand(-1, k)
+    flat_idx = expert_idx.reshape(-1)
 
-    all_q_low = torch.einsum('nd,edr->ner', hidden_states, q_lora_a)
-    all_v_low = torch.einsum('nd,edr->ner', hidden_states, v_lora_a)
+    selected_qa = q_lora_a.index_select(0, flat_idx).reshape(num_tokens, k, q_lora_a.shape[1], q_lora_a.shape[2])
+    selected_qb = q_lora_b.index_select(0, flat_idx).reshape(num_tokens, k, q_lora_b.shape[1], q_lora_b.shape[2])
+    selected_va = v_lora_a.index_select(0, flat_idx).reshape(num_tokens, k, v_lora_a.shape[1], v_lora_a.shape[2])
+    selected_vb = v_lora_b.index_select(0, flat_idx).reshape(num_tokens, k, v_lora_b.shape[1], v_lora_b.shape[2])
 
-    all_q_out = torch.einsum('ner,erq->neq', all_q_low, q_lora_b)
-    all_v_out = torch.einsum('ner,erv->nev', all_v_low, v_lora_b)
+    q_low = torch.einsum('nd,nkdr->nkr', hidden_states, selected_qa)
+    v_low = torch.einsum('nd,nkdr->nkr', hidden_states, selected_va)
 
-    q_delta = (all_q_out[arange, expert_idx] * scores).sum(dim=1)
-    v_delta = (all_v_out[arange, expert_idx] * scores).sum(dim=1)
+    q_out = torch.einsum('nkr,nkrq->nkq', q_low, selected_qb)
+    v_out = torch.einsum('nkr,nkrv->nkv', v_low, selected_vb)
+
+    q_delta = (q_out * scores).sum(dim=1)
+    v_delta = (v_out * scores).sum(dim=1)
     return q_delta, v_delta
 
 
@@ -103,7 +108,7 @@ def test_top1_equivalence():
     hidden, idx, scores, qa, qb, va, vb, scale = make_test_data(N, D, R, Q, V, E, topk=1)
 
     q_ref, v_ref = _ref_top1(hidden, idx, scores, qa, qb, va, vb, scale, Q, V, E)
-    q_new, v_new = _einsum_impl(hidden, idx, scores, qa, qb, va, vb, scale)
+    q_new, v_new = _selected_impl(hidden, idx, scores, qa, qb, va, vb, scale)
 
     q_err = (q_ref - q_new).abs().max().item()
     v_err = (v_ref - v_new).abs().max().item()
@@ -118,7 +123,7 @@ def test_topk_equivalence():
     hidden, idx, scores, qa, qb, va, vb, scale = make_test_data(N, D, R, Q, V, E, topk=K)
 
     q_ref, v_ref = _ref_topk(hidden, idx, scores, qa, qb, va, vb, scale, Q, V, E)
-    q_new, v_new = _einsum_impl(hidden, idx, scores, qa, qb, va, vb, scale)
+    q_new, v_new = _selected_impl(hidden, idx, scores, qa, qb, va, vb, scale)
 
     q_err = (q_ref - q_new).abs().max().item()
     v_err = (v_ref - v_new).abs().max().item()
@@ -133,7 +138,7 @@ def test_bf16_equivalence():
     hidden, idx, scores, qa, qb, va, vb, scale = make_test_data(N, D, R, Q, V, E, topk=1, dtype=torch.bfloat16)
 
     q_ref, v_ref = _ref_top1(hidden, idx, scores, qa, qb, va, vb, scale, Q, V, E)
-    q_new, v_new = _einsum_impl(hidden, idx, scores, qa, qb, va, vb, scale)
+    q_new, v_new = _selected_impl(hidden, idx, scores, qa, qb, va, vb, scale)
 
     q_err = (q_ref.float() - q_new.float()).abs().max().item()
     v_err = (v_ref.float() - v_new.float()).abs().max().item()
@@ -149,7 +154,7 @@ def test_bf16_topk_equivalence():
     hidden, idx, scores, qa, qb, va, vb, scale = make_test_data(N, D, R, Q, V, E, topk=K, dtype=torch.bfloat16)
 
     q_ref, v_ref = _ref_topk(hidden, idx, scores, qa, qb, va, vb, scale, Q, V, E)
-    q_new, v_new = _einsum_impl(hidden, idx, scores, qa, qb, va, vb, scale)
+    q_new, v_new = _selected_impl(hidden, idx, scores, qa, qb, va, vb, scale)
 
     q_err = (q_ref.float() - q_new.float()).abs().max().item()
     v_err = (v_ref.float() - v_new.float()).abs().max().item()
@@ -171,7 +176,7 @@ def test_backward_gradients():
     vb = vb.clone().requires_grad_(True)
     hidden = hidden.clone().requires_grad_(True)
 
-    q_delta, v_delta = _einsum_impl(hidden, idx, scores, qa, qb, va, vb, scale)
+    q_delta, v_delta = _selected_impl(hidden, idx, scores, qa, qb, va, vb, scale)
     loss = q_delta.sum() + v_delta.sum()
     loss.backward()
 
@@ -192,7 +197,7 @@ def test_backward_topk_gradients():
     vb = vb.clone().requires_grad_(True)
     hidden = hidden.clone().requires_grad_(True)
 
-    q_delta, v_delta = _einsum_impl(hidden, idx, scores, qa, qb, va, vb, scale)
+    q_delta, v_delta = _selected_impl(hidden, idx, scores, qa, qb, va, vb, scale)
     loss = q_delta.sum() + v_delta.sum()
     loss.backward()
 
@@ -227,7 +232,7 @@ def test_freeze_hook_compatibility():
     va.register_hook(_zero_existing_expert_grads)
     vb.register_hook(_zero_existing_expert_grads)
 
-    q_delta, v_delta = _einsum_impl(hidden, idx, scores, qa, qb, va, vb, scale)
+    q_delta, v_delta = _selected_impl(hidden, idx, scores, qa, qb, va, vb, scale)
     loss = q_delta.sum() + v_delta.sum()
     loss.backward()
 
