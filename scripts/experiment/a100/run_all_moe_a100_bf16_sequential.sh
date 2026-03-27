@@ -20,7 +20,8 @@ export PROBE_EVAL_ITERS="${PROBE_EVAL_ITERS:-25}"
 export SECONDARY_PROBE_EVAL_INTERVAL="${SECONDARY_PROBE_EVAL_INTERVAL:-100}"
 export SECONDARY_PROBE_EVAL_ITERS="${SECONDARY_PROBE_EVAL_ITERS:-25}"
 export SOURCE_REQUIRED_ITERS="${SOURCE_REQUIRED_ITERS:-$TRAIN_ITERS}"
-export WANDB_PROJECT="${WANDB_PROJECT:-flame-continual}"
+export WANDB_PROJECT="${WANDB_PROJECT:-flame-continual-top2-qv-lora}"
+export WANDB_ENTITY="${WANDB_ENTITY:-yemoyemo010831-korea-university}"
 export SLEEP_BETWEEN_RUNS_SECONDS="${SLEEP_BETWEEN_RUNS_SECONDS:-300}"
 export LOCAL_BASE="${LOCAL_BASE:-$PROJECT_ROOT/.local}"
 export LOCAL_DATASET="${LOCAL_DATASET:-$LOCAL_BASE/dataset}"
@@ -44,7 +45,7 @@ run_step() {
 run_step \
     "wiki_a_a100_bf16" \
     env \
-        WANDB_EXP_NAME="${WANDB_EXP_NAME_WIKI_A:-wiki-a-moe-bf16-a100}" \
+        WANDB_EXP_NAME="${WANDB_EXP_NAME_WIKI_A:-A-moe-wiki-full-top2-mb64-1800}" \
         TRAIN_DATASET="${TRAIN_DATASET_WIKI:-$LOCAL_DATASET/wikipedia-full/tokenized/EleutherAI/pythia-12b-step1800-train-exact}" \
         PROBE_DATASET="${PROBE_DATASET_WIKI:-$LOCAL_DATASET/wikipedia-full/tokenized/EleutherAI/pythia-12b-step1800-test-fullremainder-exact}" \
         SECONDARY_PROBE_DATASET="${SECONDARY_PROBE_DATASET_WIKI:-$LOCAL_DATASET/python-code-full/tokenized/EleutherAI/pythia-12b-step1800-test-matchwiki-exact}" \
@@ -53,7 +54,7 @@ run_step \
 run_step \
     "code_b_a100_bf16" \
     env \
-        WANDB_EXP_NAME="${WANDB_EXP_NAME_CODE_B:-code-b-moe-bf16-a100}" \
+        WANDB_EXP_NAME="${WANDB_EXP_NAME_CODE_B:-B-moe-code-full-top2-mb64-1800}" \
         TRAIN_DATASET="${TRAIN_DATASET_CODE:-$LOCAL_DATASET/python-code-full/tokenized/EleutherAI/pythia-12b-step1800-train-exact}" \
         PROBE_DATASET="${PROBE_DATASET_CODE:-$LOCAL_DATASET/python-code-full/tokenized/EleutherAI/pythia-12b-step1800-test-matchwiki-exact}" \
         SECONDARY_PROBE_DATASET="${SECONDARY_PROBE_DATASET_CODE:-$LOCAL_DATASET/wikipedia-full/tokenized/EleutherAI/pythia-12b-step1800-test-fullremainder-exact}" \
@@ -62,7 +63,7 @@ run_step \
 run_step \
     "a_to_b_a100_bf16" \
     env \
-        WANDB_EXP_NAME="${WANDB_EXP_NAME_A_TO_B:-a-to-b-moe-bf16-a100}" \
+        WANDB_EXP_NAME="${WANDB_EXP_NAME_A_TO_B:-A2B-moe-code-continual-unfreeze-top2-mb64-1800}" \
         TRAIN_DATASET="${TRAIN_DATASET_CODE:-$LOCAL_DATASET/python-code-full/tokenized/EleutherAI/pythia-12b-step1800-train-exact}" \
         PROBE_DATASET="${PROBE_DATASET_CODE:-$LOCAL_DATASET/python-code-full/tokenized/EleutherAI/pythia-12b-step1800-test-matchwiki-exact}" \
         SECONDARY_PROBE_DATASET="${SECONDARY_PROBE_DATASET_A_TO_B:-$LOCAL_DATASET/wikipedia-full/tokenized/EleutherAI/pythia-12b-step1800-test-fullremainder-exact}" \
@@ -72,7 +73,7 @@ run_step \
 run_step \
     "a_to_b_freeze_a100_bf16" \
     env \
-        WANDB_EXP_NAME="${WANDB_EXP_NAME_A_TO_B_FREEZE:-a-to-b-freeze-moe-bf16-a100}" \
+        WANDB_EXP_NAME="${WANDB_EXP_NAME_A_TO_B_FREEZE:-A2B-moe-code-continual-freeze-top2-mb64-1800}" \
         TRAIN_DATASET="${TRAIN_DATASET_CODE:-$LOCAL_DATASET/python-code-full/tokenized/EleutherAI/pythia-12b-step1800-train-exact}" \
         PROBE_DATASET="${PROBE_DATASET_CODE:-$LOCAL_DATASET/python-code-full/tokenized/EleutherAI/pythia-12b-step1800-test-matchwiki-exact}" \
         SECONDARY_PROBE_DATASET="${SECONDARY_PROBE_DATASET_A_TO_B_FREEZE:-$LOCAL_DATASET/wikipedia-full/tokenized/EleutherAI/pythia-12b-step1800-test-fullremainder-exact}" \
@@ -82,7 +83,7 @@ run_step \
 run_step \
     "b_to_a_a100_bf16" \
     env \
-        WANDB_EXP_NAME="${WANDB_EXP_NAME_B_TO_A:-b-to-a-moe-bf16-a100}" \
+        WANDB_EXP_NAME="${WANDB_EXP_NAME_B_TO_A:-B2A-moe-wiki-continual-unfreeze-top2-mb64-1800}" \
         TRAIN_DATASET="${TRAIN_DATASET_WIKI:-$LOCAL_DATASET/wikipedia-full/tokenized/EleutherAI/pythia-12b-step1800-train-exact}" \
         PROBE_DATASET="${PROBE_DATASET_WIKI:-$LOCAL_DATASET/wikipedia-full/tokenized/EleutherAI/pythia-12b-step1800-test-fullremainder-exact}" \
         SECONDARY_PROBE_DATASET="${SECONDARY_PROBE_DATASET_B_TO_A:-$LOCAL_DATASET/python-code-full/tokenized/EleutherAI/pythia-12b-step1800-test-matchwiki-exact}" \
@@ -92,7 +93,7 @@ run_step \
 run_step \
     "b_to_a_freeze_a100_bf16" \
     env \
-        WANDB_EXP_NAME="${WANDB_EXP_NAME_B_TO_A_FREEZE:-b-to-a-freeze-moe-bf16-a100}" \
+        WANDB_EXP_NAME="${WANDB_EXP_NAME_B_TO_A_FREEZE:-B2A-moe-wiki-continual-freeze-top2-mb64-1800}" \
         TRAIN_DATASET="${TRAIN_DATASET_WIKI:-$LOCAL_DATASET/wikipedia-full/tokenized/EleutherAI/pythia-12b-step1800-train-exact}" \
         PROBE_DATASET="${PROBE_DATASET_WIKI:-$LOCAL_DATASET/wikipedia-full/tokenized/EleutherAI/pythia-12b-step1800-test-fullremainder-exact}" \
         SECONDARY_PROBE_DATASET="${SECONDARY_PROBE_DATASET_B_TO_A_FREEZE:-$LOCAL_DATASET/python-code-full/tokenized/EleutherAI/pythia-12b-step1800-test-matchwiki-exact}" \

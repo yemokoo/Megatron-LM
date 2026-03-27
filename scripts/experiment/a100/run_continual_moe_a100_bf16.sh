@@ -61,6 +61,7 @@ export TRAIN_NEW_EXPERTS_AND_ROUTER_ONLY="${TRAIN_NEW_EXPERTS_AND_ROUTER_ONLY:-$
 export TRAIN_ITERS="${TRAIN_ITERS:-1800}"
 export SAVE_INTERVAL="${SAVE_INTERVAL:-300}"
 export EVAL_INTERVAL="${EVAL_INTERVAL:-100}"
+export LOG_INTERVAL="${LOG_INTERVAL:-10}"
 export OLD_MODEL_KL_COEFF="${OLD_MODEL_KL_COEFF:-1.0}"
 export OLD_MODEL_KL_TEMPERATURE="${OLD_MODEL_KL_TEMPERATURE:-1.0}"
 export GPU_LOG_INTERVAL_SECONDS="${GPU_LOG_INTERVAL_SECONDS:-30}"
@@ -95,6 +96,8 @@ export SECONDARY_PROBE_EVAL_ITERS="${SECONDARY_PROBE_EVAL_ITERS:-25}"
 export SECONDARY_PROBE_EVAL_INTERVAL="${SECONDARY_PROBE_EVAL_INTERVAL:-100}"
 export PROBE_STEP_OFFSET="${PROBE_STEP_OFFSET:-}"
 export SECONDARY_PROBE_STEP_OFFSET="${SECONDARY_PROBE_STEP_OFFSET:-}"
+export RUN_INITIAL_PROBE_EVAL="${RUN_INITIAL_PROBE_EVAL:-1}"
+export RUN_INITIAL_VALID_EVAL="${RUN_INITIAL_VALID_EVAL:-1}"
 export WANDB_STEP_OFFSET="${WANDB_STEP_OFFSET:-}"
 export WANDB_PROJECT="${WANDB_PROJECT:-}"
 export WANDB_EXP_NAME="${WANDB_EXP_NAME:-$RUN_ID}"
@@ -109,6 +112,22 @@ export SECONDARY_PROBE_STEP_OFFSET="${SECONDARY_PROBE_STEP_OFFSET:-$PROBE_STEP_O
 export WANDB_STEP_OFFSET="${WANDB_STEP_OFFSET:-$PROBE_STEP_OFFSET}"
 
 mkdir -p "$SSD_TRAIN_DATASET" "$SSD_SOURCE_WEIGHTS" "$SSD_TARGET_WEIGHTS" "$TRAIN_WEIGHTS" "$LOG_DIR"
+
+GPU_LOG_PID=""
+SYNC_DONE=0
+cleanup() {
+    local exit_code=$?
+    if [ -n "${GPU_LOG_PID:-}" ]; then
+        kill "$GPU_LOG_PID" 2>/dev/null || true
+    fi
+    if [ "${SYNC_DONE:-0}" != "1" ] && [ -d "$SSD_TARGET_WEIGHTS" ]; then
+        rsync -rlptD "$SSD_TARGET_WEIGHTS/" "$TRAIN_WEIGHTS/" || true
+        SYNC_DONE=1
+    fi
+    return "$exit_code"
+}
+trap cleanup EXIT INT TERM
+
 exec > >(
     tee -a "$RUN_LOG" | "$PYTHON_BIN" -u -c '
 import re, sys
@@ -180,7 +199,7 @@ DATA_ARGS=(
 )
 
 SAVE_ARGS=(
-    --log-interval 10
+    --log-interval "$LOG_INTERVAL"
     --log-throughput
     --log-progress
     --save "$SSD_TARGET_WEIGHTS"
@@ -195,6 +214,10 @@ SAVE_ARGS=(
     --moe-freeze-existing-experts
     --moe-freeze-existing-router
 )
+
+if [ "$RUN_INITIAL_VALID_EVAL" = "1" ]; then
+    SAVE_ARGS+=(--run-initial-valid-eval)
+fi
 
 if [ "$TRAIN_NEW_EXPERTS_AND_ROUTER_ONLY" = "1" ]; then
     SAVE_ARGS+=(--moe-train-new-experts-and-router-only)
@@ -212,6 +235,10 @@ PROBE_ARGS=(
     --probe-step-offset "$PROBE_STEP_OFFSET"
     --probe-data-path $(build_data_path "$PROBE_DATASET")
 )
+
+if [ "$RUN_INITIAL_PROBE_EVAL" = "1" ]; then
+    PROBE_ARGS+=(--run-initial-probe-eval)
+fi
 
 if [ -n "$SECONDARY_PROBE_DATASET" ]; then
     PROBE_ARGS+=(
@@ -254,5 +281,6 @@ GPU_LOG_PID=$!
 
 kill "$GPU_LOG_PID" 2>/dev/null || true
 rsync -rlptD "$SSD_TARGET_WEIGHTS/" "$TRAIN_WEIGHTS/"
+SYNC_DONE=1
 
 echo "a100 bf16 continual training complete. checkpoint at: $TRAIN_WEIGHTS"

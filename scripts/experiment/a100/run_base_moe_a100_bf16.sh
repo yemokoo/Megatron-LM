@@ -37,6 +37,7 @@ export PRECISION="bf16"
 export TRAIN_ITERS="${TRAIN_ITERS:-1800}"
 export SAVE_INTERVAL="${SAVE_INTERVAL:-300}"
 export EVAL_INTERVAL="${EVAL_INTERVAL:-100}"
+export LOG_INTERVAL="${LOG_INTERVAL:-10}"
 export GPU_LOG_INTERVAL_SECONDS="${GPU_LOG_INTERVAL_SECONDS:-30}"
 export LR="${LR:-3e-4}"
 export MIN_LR="${MIN_LR:-3e-5}"
@@ -70,6 +71,8 @@ fi
 export SECONDARY_PROBE_EVAL_ITERS="${SECONDARY_PROBE_EVAL_ITERS:-25}"
 export SECONDARY_PROBE_EVAL_INTERVAL="${SECONDARY_PROBE_EVAL_INTERVAL:-100}"
 export SECONDARY_PROBE_STEP_OFFSET="${SECONDARY_PROBE_STEP_OFFSET:-0}"
+export RUN_INITIAL_PROBE_EVAL="${RUN_INITIAL_PROBE_EVAL:-0}"
+export RUN_INITIAL_VALID_EVAL="${RUN_INITIAL_VALID_EVAL:-0}"
 export WANDB_STEP_OFFSET="${WANDB_STEP_OFFSET:-0}"
 export WANDB_PROJECT="${WANDB_PROJECT:-}"
 export WANDB_EXP_NAME="${WANDB_EXP_NAME:-$RUN_ID}"
@@ -80,6 +83,22 @@ export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
 export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=true
 
 mkdir -p "$SSD_TRAIN_DATASET" "$SSD_WEIGHTS" "$TRAIN_WEIGHTS" "$LOG_DIR"
+
+GPU_LOG_PID=""
+SYNC_DONE=0
+cleanup() {
+    local exit_code=$?
+    if [ -n "${GPU_LOG_PID:-}" ]; then
+        kill "$GPU_LOG_PID" 2>/dev/null || true
+    fi
+    if [ "${SYNC_DONE:-0}" != "1" ] && [ -d "$SSD_WEIGHTS" ]; then
+        rsync -rlptD "$SSD_WEIGHTS/" "$TRAIN_WEIGHTS/" || true
+        SYNC_DONE=1
+    fi
+    return "$exit_code"
+}
+trap cleanup EXIT INT TERM
+
 exec > >(
     tee -a "$RUN_LOG" | "$PYTHON_BIN" -u -c '
 import re, sys
@@ -143,7 +162,7 @@ DATA_ARGS=(
 )
 
 SAVE_ARGS=(
-    --log-interval 10
+    --log-interval "$LOG_INTERVAL"
     --log-throughput
     --log-progress
     --save "$SSD_WEIGHTS"
@@ -153,12 +172,20 @@ SAVE_ARGS=(
     --tensorboard-dir "$SSD_WEIGHTS"
 )
 
+if [ "$RUN_INITIAL_VALID_EVAL" = "1" ]; then
+    SAVE_ARGS+=(--run-initial-valid-eval)
+fi
+
 PROBE_ARGS=(
     --probe-name "$PROBE_NAME"
     --probe-eval-iters "$PROBE_EVAL_ITERS"
     --probe-eval-interval "$PROBE_EVAL_INTERVAL"
     --probe-data-path $(build_data_path "$PROBE_DATASET")
 )
+
+if [ "$RUN_INITIAL_PROBE_EVAL" = "1" ]; then
+    PROBE_ARGS+=(--run-initial-probe-eval)
+fi
 
 if [ -n "$SECONDARY_PROBE_DATASET" ]; then
     PROBE_ARGS+=(
@@ -201,5 +228,6 @@ GPU_LOG_PID=$!
 
 kill "$GPU_LOG_PID" 2>/dev/null || true
 rsync -rlptD "$SSD_WEIGHTS/" "$TRAIN_WEIGHTS/"
+SYNC_DONE=1
 
 echo "a100 bf16 base training complete. checkpoint at: $TRAIN_WEIGHTS"
