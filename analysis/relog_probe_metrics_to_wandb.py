@@ -76,6 +76,7 @@ def main():
     parser.add_argument("--entity")
     parser.add_argument("--run-name", required=True)
     parser.add_argument("--run-id")
+    parser.add_argument("--resume", default="never", choices=["never", "allow", "must", "auto"])
     parser.add_argument(
         "--map",
         dest="mappings",
@@ -101,7 +102,7 @@ def main():
         entity=args.entity,
         name=args.run_name,
         id=args.run_id,
-        resume="never",
+        resume=args.resume,
         tags=args.tags,
         config={
             "source_log_path": str(log_path),
