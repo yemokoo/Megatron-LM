@@ -15,6 +15,7 @@ export LOCAL_BASE="${LOCAL_BASE:-$PROJECT_ROOT/.local}"
 export LOCAL_DATASET="${LOCAL_DATASET:-$LOCAL_BASE/dataset}"
 export LOCAL_WEIGHTS="${LOCAL_WEIGHTS:-$LOCAL_BASE/weights}"
 export LOCAL_SSD_ROOT="${LOCAL_SSD_ROOT:-/tmp/flame-moe}"
+export DIRECT_LOCAL_SAVE="${DIRECT_LOCAL_SAVE:-0}"
 
 export SSD_MOUNT="${LOCAL_SSD_ROOT}/${RUN_ID}"
 export SSD_TRAIN_DATASET="${SSD_MOUNT}/dataset/train"
@@ -57,7 +58,7 @@ export RUN_METADATA="${RUN_METADATA:-$LOG_DIR/run_metadata.json}"
 export DATASET_NAME="${DATASET_NAME:-$(dataset_name_for_task "$TASK_NAME")}"
 export DATASET_SOURCE="${DATASET_SOURCE:-$(dataset_source_for_task "$TASK_NAME")}"
 export PROBE_DATASET="${PROBE_DATASET:-$(probe_dir_for_task "$TASK_NAME")}"
-export PROBE_NAME="${PROBE_NAME:-${TASK_LABEL}_probe}"
+export PROBE_NAME="${PROBE_NAME:-${TASK_NAME}_probe}"
 export PROBE_EVAL_ITERS="${PROBE_EVAL_ITERS:-25}"
 export PROBE_EVAL_INTERVAL="${PROBE_EVAL_INTERVAL:-100}"
 
@@ -82,6 +83,10 @@ export STAGE_NAME="${STAGE_NAME:-$TASK_LABEL}"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
 export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=true
 
+if [ "$DIRECT_LOCAL_SAVE" = "1" ]; then
+    export SSD_WEIGHTS="$TRAIN_WEIGHTS"
+fi
+
 mkdir -p "$SSD_TRAIN_DATASET" "$SSD_WEIGHTS" "$TRAIN_WEIGHTS" "$LOG_DIR"
 
 GPU_LOG_PID=""
@@ -91,7 +96,7 @@ cleanup() {
     if [ -n "${GPU_LOG_PID:-}" ]; then
         kill "$GPU_LOG_PID" 2>/dev/null || true
     fi
-    if [ "${SYNC_DONE:-0}" != "1" ] && [ -d "$SSD_WEIGHTS" ]; then
+    if [ "${SYNC_DONE:-0}" != "1" ] && [ -d "$SSD_WEIGHTS" ] && [ "$SSD_WEIGHTS" != "$TRAIN_WEIGHTS" ]; then
         rsync -rlptD "$SSD_WEIGHTS/" "$TRAIN_WEIGHTS/" || true
         SYNC_DONE=1
     fi
@@ -227,7 +232,9 @@ GPU_LOG_PID=$!
     "${DATA_ARGS[@]}" "${SAVE_ARGS[@]}" "${PROBE_ARGS[@]}" "${WANDB_ARGS[@]}"
 
 kill "$GPU_LOG_PID" 2>/dev/null || true
-rsync -rlptD "$SSD_WEIGHTS/" "$TRAIN_WEIGHTS/"
+if [ "$SSD_WEIGHTS" != "$TRAIN_WEIGHTS" ]; then
+    rsync -rlptD "$SSD_WEIGHTS/" "$TRAIN_WEIGHTS/"
+fi
 SYNC_DONE=1
 
 echo "a100 bf16 base training complete. checkpoint at: $TRAIN_WEIGHTS"
