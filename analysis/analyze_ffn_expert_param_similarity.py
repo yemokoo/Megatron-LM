@@ -31,6 +31,14 @@ def parse_args():
     parser.add_argument("--run-dir", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--old-expert-count", type=int, default=4)
+    parser.add_argument("--run-id")
+    parser.add_argument("--stage", default="ffn_param_similarity")
+    parser.add_argument("--num-layers", type=int)
+    parser.add_argument("--hidden-size", type=int)
+    parser.add_argument("--ffn-hidden-size", type=int)
+    parser.add_argument("--moe-ffn-hidden-size", type=int)
+    parser.add_argument("--num-experts", type=int)
+    parser.add_argument("--moe-router-topk", type=int, default=2)
     parser.add_argument("--seq-length", type=int, default=512)
     parser.add_argument("--num-attention-heads", type=int, default=16)
     parser.add_argument("--moe-layer-freq", default="[0]*1+[1]*8")
@@ -44,8 +52,34 @@ def parse_args():
 def read_metadata(run_dir: Path):
     metadata_path = run_dir / "logs" / "run_metadata.json"
     if not metadata_path.exists():
-        raise FileNotFoundError(f"run_metadata.json not found: {metadata_path}")
+        return None
     return json.loads(metadata_path.read_text(encoding="utf-8"))
+
+
+def build_metadata_fallback(args):
+    required = {
+        "num_layers": args.num_layers,
+        "hidden_size": args.hidden_size,
+        "ffn_hidden_size": args.ffn_hidden_size,
+        "moe_ffn_hidden_size": args.moe_ffn_hidden_size,
+        "num_experts": args.num_experts,
+    }
+    missing = [name for name, value in required.items() if value is None]
+    if missing:
+        raise ValueError(
+            "run_metadata.json is missing, so you must pass: "
+            + ", ".join(f"--{name.replace('_', '-')}" for name in missing)
+        )
+    return {
+        "run_id": args.run_id or args.run_dir.name,
+        "stage": args.stage,
+        "num_layers": args.num_layers,
+        "hidden_size": args.hidden_size,
+        "ffn_hidden_size": args.ffn_hidden_size,
+        "moe_ffn_hidden_size": args.moe_ffn_hidden_size,
+        "num_experts": args.num_experts,
+        "moe_router_topk": args.moe_router_topk,
+    }
 
 
 def detect_num_experts(metadata: dict):
@@ -233,6 +267,8 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
 
     metadata = read_metadata(run_dir)
+    if metadata is None:
+        metadata = build_metadata_fallback(args)
     checkpoint_dir = run_dir
 
     sys.argv = synthesize_megatron_argv(args, metadata, checkpoint_dir)
