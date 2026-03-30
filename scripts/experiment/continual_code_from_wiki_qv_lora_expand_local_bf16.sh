@@ -152,6 +152,9 @@ export WANDB_STEP_OFFSET="${WANDB_STEP_OFFSET:-}"
 export WANDB_PROJECT="${WANDB_PROJECT:-}"
 export WANDB_EXP_NAME="${WANDB_EXP_NAME:-$RUN_ID}"
 export WANDB_SAVE_DIR="${WANDB_SAVE_DIR:-$TRAIN_WEIGHTS/wandb}"
+export WANDB_RUN_ID="${WANDB_RUN_ID:-$RUN_ID}"
+export WANDB_RESUME="${WANDB_RESUME:-allow}"
+export LOG_SOURCE_PROBE_BASELINE_BEFORE_EXPAND="${LOG_SOURCE_PROBE_BASELINE_BEFORE_EXPAND:-1}"
 
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
 export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=true
@@ -160,6 +163,12 @@ export STAGE1_WEIGHTS_DIR="$(resolve_stage1_dir)"
 export PROBE_STEP_OFFSET="${PROBE_STEP_OFFSET:-$(read_stage1_train_iters)}"
 export SECONDARY_PROBE_STEP_OFFSET="${SECONDARY_PROBE_STEP_OFFSET:-$PROBE_STEP_OFFSET}"
 export WANDB_STEP_OFFSET="${WANDB_STEP_OFFSET:-$PROBE_STEP_OFFSET}"
+export SOURCE_PRIMARY_PROBE_CANDIDATES="${SOURCE_PRIMARY_PROBE_CANDIDATES:-wiki_probe,wiki_a_probe}"
+export SOURCE_SECONDARY_PROBE_CANDIDATES="${SOURCE_SECONDARY_PROBE_CANDIDATES:-code_probe,code_b_probe}"
+
+if [ "$LOG_SOURCE_PROBE_BASELINE_BEFORE_EXPAND" = "1" ] && [ -n "$WANDB_PROJECT" ]; then
+    export RUN_INITIAL_PROBE_EVAL=0
+fi
 
 mkdir -p "$SSD_CODE_TRAIN" "$SSD_SOURCE_WEIGHTS" "$SSD_TARGET_WEIGHTS" "$TRAIN_WEIGHTS" "$LOG_DIR"
 exec > >(
@@ -343,7 +352,25 @@ if [ -n "$WANDB_PROJECT" ]; then
         --wandb-exp-name "$WANDB_EXP_NAME"
         --wandb-save-dir "$WANDB_SAVE_DIR"
         --wandb-step-offset "$WANDB_STEP_OFFSET"
+        --wandb-run-id "$WANDB_RUN_ID"
+        --wandb-resume "$WANDB_RESUME"
     )
+fi
+
+if [ "$LOG_SOURCE_PROBE_BASELINE_BEFORE_EXPAND" = "1" ] && [ -n "$WANDB_PROJECT" ]; then
+    echo "logging source-model probe baseline at step $PROBE_STEP_OFFSET before attention LoRA expansion"
+    "$PYTHON_BIN" analysis/log_source_probe_baseline_to_wandb.py \
+        --source-run-dir "$STAGE1_WEIGHTS_DIR" \
+        --project "$WANDB_PROJECT" \
+        --run-name "$WANDB_EXP_NAME" \
+        --run-id "$WANDB_RUN_ID" \
+        --resume "$WANDB_RESUME" \
+        --save-dir "$WANDB_SAVE_DIR" \
+        --step "$PROBE_STEP_OFFSET" \
+        --primary-source-candidates "$SOURCE_SECONDARY_PROBE_CANDIDATES" \
+        --primary-target-name "$PROBE_NAME" \
+        --secondary-source-candidates "$SOURCE_PRIMARY_PROBE_CANDIDATES" \
+        --secondary-target-name "$SECONDARY_PROBE_NAME"
 fi
 
 cd Megatron-LM
