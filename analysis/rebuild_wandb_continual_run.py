@@ -76,6 +76,24 @@ def load_baseline_values(event_file: Path, mapping: dict[str, str], step: int):
     return baseline
 
 
+def load_scalars_up_to_step(event_file: Path, mapping: dict[str, str], max_step: int):
+    acc = event_accumulator.EventAccumulator(
+        str(event_file),
+        size_guidance={event_accumulator.SCALARS: 0},
+    )
+    acc.Reload()
+    tags = acc.Tags().get("scalars", [])
+    by_step = defaultdict(dict)
+    for tag in tags:
+        out_tag = remap_tag(tag, mapping)
+        for scalar_event in acc.Scalars(tag):
+            step = int(scalar_event.step)
+            if step > max_step:
+                break
+            by_step[step][out_tag] = float(scalar_event.value)
+    return by_step
+
+
 def should_replace(tag: str, replace_prefixes: list[str]) -> bool:
     for prefix in replace_prefixes:
         if tag == prefix or tag.startswith(prefix + "/"):
@@ -98,6 +116,14 @@ def main():
     parser.add_argument("--run-id")
     parser.add_argument("--resume", default="never", choices=["never", "allow", "must", "auto"])
     parser.add_argument("--baseline-step", type=int, default=1800)
+    parser.add_argument(
+        "--include-source-history-through-step",
+        action="store_true",
+        help=(
+            "Include the full source-run history up to --baseline-step, then append "
+            "continual-run history after that step."
+        ),
+    )
     parser.add_argument(
         "--source-map",
         dest="source_mappings",
@@ -137,17 +163,22 @@ def main():
     source_event = find_event_file(args.source_run_dir)
     continual_event = find_event_file(args.continual_run_dir)
 
-    source_baseline = load_baseline_values(source_event, source_mapping, args.baseline_step)
-    continual_by_step = load_scalars(continual_event, continual_mapping)
-
     rebuilt = defaultdict(dict)
 
+    if args.include_source_history_through_step:
+        source_by_step = load_scalars_up_to_step(source_event, source_mapping, args.baseline_step)
+        for step, payload in source_by_step.items():
+            rebuilt[step].update(payload)
+    else:
+        source_baseline = load_baseline_values(source_event, source_mapping, args.baseline_step)
+
+    continual_by_step = load_scalars(continual_event, continual_mapping)
     for step, payload in continual_by_step.items():
         if step < args.baseline_step:
             continue
         rebuilt[step].update(payload)
 
-    if args.replace_prefixes:
+    if args.replace_prefixes and not args.include_source_history_through_step:
         baseline_payload = {}
         for tag, value in source_baseline.items():
             if should_replace(tag, args.replace_prefixes):
@@ -174,6 +205,7 @@ def main():
             "source_event_file": str(source_event),
             "continual_event_file": str(continual_event),
             "baseline_step": args.baseline_step,
+            "include_source_history_through_step": args.include_source_history_through_step,
             "source_mapping": source_mapping,
             "continual_mapping": continual_mapping,
             "replace_prefixes": args.replace_prefixes,
