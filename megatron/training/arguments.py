@@ -1273,6 +1273,11 @@ def _add_logging_args(parser):
                        help='Path to save the wandb results locally.')
     group.add_argument('--wandb-step-offset', type=int, default=0,
                        help='Constant offset added to W&B metric step indices.')
+    group.add_argument('--wandb-run-id', type=str, default='',
+                       help='Optional W&B run id used to resume or append to a specific run.')
+    group.add_argument('--wandb-resume', type=str, default='never',
+                       choices=['never', 'allow', 'must', 'auto'],
+                       help='Resume policy passed to wandb.init when --wandb-run-id is set.')
     group.add_argument('--probe-data-path', nargs='*', default=None,
                        help='Optional probe dataset blend used for periodic evaluation. '
                        'Format matches --data-path.')

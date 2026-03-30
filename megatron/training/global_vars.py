@@ -188,6 +188,9 @@ def _set_wandb_writer(args):
             'name': args.wandb_exp_name,
             'project': args.wandb_project,
             'config': vars(args)}
+        if getattr(args, 'wandb_run_id', ''):
+            wandb_kwargs['id'] = args.wandb_run_id
+            wandb_kwargs['resume'] = getattr(args, 'wandb_resume', 'allow')
         os.makedirs(wandb_kwargs['dir'], exist_ok=True)
         wandb.init(**wandb_kwargs)
         _GLOBAL_WANDB_WRITER = wandb
