@@ -79,6 +79,14 @@ run_one() {
     --dataset-split 100,0,0
     --dataset-split-name train
     --consumed-samples 0
+    --transformer-impl local
+    --no-persist-layer-norm
+    --no-gradient-accumulation-fusion
+    --no-masked-softmax-fusion
+    --attention-softmax-in-fp32
+    --no-load-optim
+    --no-load-rng
+    --exit-on-missing-checkpoint
     --data-path
   )
   CUDA_VISIBLE_DEVICES="$GPU_DEVICE" torchrun --nproc_per_node 1 "${args[@]}" $data_path ${allowed:+--allowed-experts "$allowed"}

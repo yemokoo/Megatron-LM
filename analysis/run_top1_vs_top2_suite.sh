@@ -75,7 +75,15 @@ run_one() {
     --data-path $data_path \
     --dataset-split 100,0,0 \
     --dataset-split-name train \
-    --consumed-samples 0
+    --consumed-samples 0 \
+    --transformer-impl local \
+    --no-persist-layer-norm \
+    --no-gradient-accumulation-fusion \
+    --no-masked-softmax-fusion \
+    --attention-softmax-in-fp32 \
+    --no-load-optim \
+    --no-load-rng \
+    --exit-on-missing-checkpoint
 }
 
 run_one wiki "$WIKI_DATA_PATH" 2
