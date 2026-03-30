@@ -100,9 +100,18 @@ def plot_grouped_bars(parsed, datasets, modes, metric_key, ylabel, title, output
                 bar.set_label(legend_map.get(mode, mode))
                 legend_handles.append(bar)
     fig.suptitle(title)
-    if legend_handles:
-        fig.legend(handles=legend_handles, loc="upper center", ncol=min(len(legend_handles), 3), frameon=False)
-    fig.tight_layout()
+    show_legend = not (set(modes) == {"top1", "top2"} or set(modes) == {"top2", "top1"})
+    if legend_handles and show_legend:
+        fig.legend(
+            handles=legend_handles,
+            loc="upper center",
+            bbox_to_anchor=(0.5, 0.98),
+            ncol=min(len(legend_handles), 3),
+            frameon=False,
+        )
+        fig.tight_layout(rect=[0, 0, 1, 0.92])
+    else:
+        fig.tight_layout(rect=[0, 0, 1, 0.95])
     fig.savefig(output_path, dpi=200)
     plt.close(fig)
 
