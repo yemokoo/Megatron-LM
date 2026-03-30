@@ -95,15 +95,28 @@ def plot_grouped_bars(parsed, datasets, modes, metric_key, ylabel, title, output
         ax.set_title(f"{dataset} dataset")
         ax.set_ylabel(ylabel)
         ax.tick_params(axis="x", rotation=20)
-        value_offset = max(values) * 0.01 if values else 0.0
         for bar, value in zip(bars, values):
+            bar_height = bar.get_height()
+            y_min, y_max = ax.get_ylim()
+            axis_span = max(y_max - y_min, 1e-8)
+            inside_margin = axis_span * 0.02
+            if bar_height > axis_span * 0.08:
+                y_pos = max(bar_height - inside_margin, y_min + inside_margin)
+                va = "top"
+                color = "white"
+            else:
+                y_pos = bar_height + inside_margin
+                va = "bottom"
+                color = "black"
             ax.text(
                 bar.get_x() + bar.get_width() / 2,
-                bar.get_height() + value_offset,
+                y_pos,
                 f"{value:.4f}",
                 ha="center",
-                va="bottom",
+                va=va,
                 fontsize=10,
+                color=color,
+                fontweight="bold",
             )
         for bar, mode in zip(bars, labels):
             if all(existing.get_label() != legend_map.get(mode, mode) for existing in legend_handles):
