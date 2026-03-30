@@ -144,10 +144,12 @@ def collect_hidden_states(model):
     return hidden_store
 
 
-def cosine_similarity_matrix(vectors):
-    stacked = torch.stack(vectors, dim=0)
-    normalized = F.normalize(stacked, dim=1)
-    return normalized @ normalized.t()
+def mean_tokenwise_cosine_similarity_matrix(outputs: torch.Tensor):
+    if outputs.dim() != 3:
+        raise ValueError(f"Expected [num_experts, num_tokens, output_dim], got {tuple(outputs.shape)}")
+    normalized = F.normalize(outputs, dim=-1)
+    per_token = torch.einsum("etd,ftd->eft", normalized, normalized)
+    return per_token.mean(dim=-1)
 
 
 def masked_mean(matrix: torch.Tensor, row_slice: slice, col_slice: slice, diagonal: bool):
@@ -204,14 +206,14 @@ def compute_ffn_outputs(experts_module, hidden_cpu):
             fc1 = hidden @ w1[expert_id]
             act = experts_module.activation_func(fc1)
             fc2 = act @ w2[expert_id]
-            outputs.append(fc2.reshape(-1).detach().cpu())
+            outputs.append(fc2.detach().cpu())
     elif isinstance(experts_module, SequentialMLP):
         for expert in experts_module.local_experts:
             out, _bias = expert(hidden)
-            outputs.append(out.reshape(-1).detach().cpu())
+            outputs.append(out.detach().cpu())
     else:
         raise TypeError(f"Unsupported FFN experts module: {type(experts_module)}")
-    return outputs
+    return torch.stack(outputs, dim=0)
 
 
 def collect_lora_modules(model):
@@ -233,8 +235,8 @@ def compute_lora_outputs(router_module, hidden_cpu):
         v_low_rank = hidden @ router_module.v_lora_a[expert_id].float()
         q_out = (q_low_rank @ router_module.q_lora_b[expert_id].float()) * router_module.scale
         v_out = (v_low_rank @ router_module.v_lora_b[expert_id].float()) * router_module.scale
-        outputs.append(torch.cat([q_out.reshape(-1), v_out.reshape(-1)], dim=0).detach().cpu())
-    return outputs
+        outputs.append(torch.cat([q_out, v_out], dim=-1).detach().cpu())
+    return torch.stack(outputs, dim=0)
 
 
 def save_heatmaps(layer_results, output_dir: Path, title_prefix: str, plot_layers):
@@ -253,7 +255,7 @@ def save_heatmaps(layer_results, output_dir: Path, title_prefix: str, plot_layer
             ax.axis("off")
             continue
         item = selected[ax_idx]
-        matrix = torch.tensor(item["cosine_similarity"])
+        matrix = torch.tensor(item["mean_tokenwise_cosine_similarity"])
         im = ax.imshow(matrix, vmin=-1.0, vmax=1.0, cmap="viridis")
         ax.set_title(item["layer"])
         ax.set_xlabel("Expert")
@@ -304,13 +306,14 @@ def main():
             if experts_module is None:
                 continue
             outputs = compute_ffn_outputs(experts_module, hidden)
-            cosine = cosine_similarity_matrix(outputs).cpu()
+            cosine = mean_tokenwise_cosine_similarity_matrix(outputs).cpu()
             layer_results.append(
                 {
                     "layer": layer_key,
                     "num_tokens": int(hidden.shape[0]),
-                    "num_experts": len(outputs),
-                    "cosine_similarity": [[float(v) for v in row] for row in cosine.tolist()],
+                    "num_experts": int(outputs.shape[0]),
+                    "output_dim": int(outputs.shape[-1]),
+                    "mean_tokenwise_cosine_similarity": [[float(v) for v in row] for row in cosine.tolist()],
                     "summary": summarize_similarity(cosine, args.source_num_experts),
                 }
             )
@@ -321,13 +324,14 @@ def main():
             if router_module is None:
                 continue
             outputs = compute_lora_outputs(router_module, hidden)
-            cosine = cosine_similarity_matrix(outputs).cpu()
+            cosine = mean_tokenwise_cosine_similarity_matrix(outputs).cpu()
             layer_results.append(
                 {
                     "layer": layer_key,
                     "num_tokens": int(hidden.shape[0]),
-                    "num_experts": len(outputs),
-                    "cosine_similarity": [[float(v) for v in row] for row in cosine.tolist()],
+                    "num_experts": int(outputs.shape[0]),
+                    "output_dim": int(outputs.shape[-1]),
+                    "mean_tokenwise_cosine_similarity": [[float(v) for v in row] for row in cosine.tolist()],
                     "summary": summarize_similarity(cosine, args.source_num_experts),
                 }
             )
@@ -341,6 +345,7 @@ def main():
         "source_num_experts": args.source_num_experts,
         "max_batches": args.max_batches,
         "max_tokens_per_layer": args.max_tokens_per_layer,
+        "similarity_type": "mean_tokenwise_cosine",
         "plot_layers": plot_layers,
         "layer_results": layer_results,
     }
