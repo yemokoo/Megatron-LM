@@ -95,6 +95,16 @@ def plot_grouped_bars(parsed, datasets, modes, metric_key, ylabel, title, output
         ax.set_title(f"{dataset} dataset")
         ax.set_ylabel(ylabel)
         ax.tick_params(axis="x", rotation=20)
+        value_offset = max(values) * 0.01 if values else 0.0
+        for bar, value in zip(bars, values):
+            ax.text(
+                bar.get_x() + bar.get_width() / 2,
+                bar.get_height() + value_offset,
+                f"{value:.4f}",
+                ha="center",
+                va="bottom",
+                fontsize=10,
+            )
         for bar, mode in zip(bars, labels):
             if all(existing.get_label() != legend_map.get(mode, mode) for existing in legend_handles):
                 bar.set_label(legend_map.get(mode, mode))
