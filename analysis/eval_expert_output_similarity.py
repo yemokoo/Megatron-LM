@@ -96,18 +96,15 @@ def store_hidden(hidden_store, layer_number, hidden_states, max_tokens):
         hidden_store[layer_key] = torch.cat([hidden_store[layer_key], chunk], dim=0)
 
 
-def collect_hidden_states(model):
-    args = get_args()
-    hidden_store = {}
+def install_hidden_collection_hooks(model, model_kind, hidden_store, max_tokens):
     hooks = []
-
-    if args.model_kind == "ffn":
+    if model_kind == "ffn":
         for module in model.modules():
             if isinstance(module, Router):
                 hooks.append(
                     module.register_forward_pre_hook(
                         lambda mod, inputs, layer=module.layer_number: store_hidden(
-                            hidden_store, layer, inputs[0], args.max_tokens_per_layer
+                            hidden_store, layer, inputs[0], max_tokens
                         )
                     )
                 )
@@ -120,10 +117,22 @@ def collect_hidden_states(model):
             hooks.append(
                 router_module.register_forward_pre_hook(
                     lambda mod, inputs, layer=layer_number: store_hidden(
-                        hidden_store, layer, inputs[0], args.max_tokens_per_layer
+                        hidden_store, layer, inputs[0], max_tokens
                     )
                 )
             )
+    return hooks
+
+
+def remove_hooks(hooks):
+    for hook in hooks:
+        hook.remove()
+
+
+def collect_hidden_states(model):
+    args = get_args()
+    hidden_store = {}
+    hooks = install_hidden_collection_hooks(model, args.model_kind, hidden_store, args.max_tokens_per_layer)
 
     dataloader = build_eval_dataloader()
     iterator = iter(dataloader)
@@ -139,8 +148,7 @@ def collect_hidden_states(model):
             tokens, _labels, _loss_mask, attention_mask, position_ids = get_batch(iterator)
             _ = model(tokens, position_ids, attention_mask, labels=None, runtime_gather_output=False)
 
-    for hook in hooks:
-        hook.remove()
+    remove_hooks(hooks)
     return hidden_store
 
 

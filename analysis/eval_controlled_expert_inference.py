@@ -121,7 +121,19 @@ def install_ffn_router_controls(model, allowed_experts, requested_topk, debug_st
     for module in model.modules():
         if not isinstance(module, Router):
             continue
-        original_gating = module.gating
+        if not hasattr(module, "_analysis_original_gating"):
+            module._analysis_original_gating = module.gating
+        if not hasattr(module, "_analysis_original_topk"):
+            module._analysis_original_topk = int(getattr(module, "topk", 1))
+        if hasattr(module, "config") and hasattr(module.config, "moe_router_topk") and not hasattr(
+            module, "_analysis_original_config_topk"
+        ):
+            module._analysis_original_config_topk = int(module.config.moe_router_topk)
+        if getattr(module, "_analysis_debug_hook_handle", None) is not None:
+            module._analysis_debug_hook_handle.remove()
+            module._analysis_debug_hook_handle = None
+
+        original_gating = module._analysis_original_gating
         num_experts = int(module.num_experts)
         allowed = allowed_experts if allowed_experts is not None else list(range(num_experts))
         effective_topk = min(requested_topk or int(getattr(module, "topk", 1)), len(allowed))
@@ -186,7 +198,7 @@ def install_ffn_router_controls(model, allowed_experts, requested_topk, debug_st
 
                 return _hook
 
-            module.register_forward_hook(make_hook(module.layer_number))
+            module._analysis_debug_hook_handle = module.register_forward_hook(make_hook(module.layer_number))
 
 
 def install_lora_router_controls(model, allowed_experts, requested_topk, debug_state):
@@ -196,6 +208,8 @@ def install_lora_router_controls(model, allowed_experts, requested_topk, debug_s
         layer_number = getattr(module, "layer_number", None)
         if router_module is None or layer_number is None:
             continue
+        if not hasattr(router_module, "_analysis_original_forward"):
+            router_module._analysis_original_forward = router_module.forward
         num_experts = int(router_module.num_experts)
         allowed = allowed_experts if allowed_experts is not None else list(range(num_experts))
         effective_topk = min(requested_topk or int(router_module.topk), len(allowed))
@@ -250,6 +264,39 @@ def install_lora_router_controls(model, allowed_experts, requested_topk, debug_s
             )
 
         router_module.forward = controlled_forward
+
+
+def reset_ffn_router_controls(model):
+    for module in model.modules():
+        if not isinstance(module, Router):
+            continue
+        if hasattr(module, "_analysis_original_gating"):
+            module.gating = module._analysis_original_gating
+        if hasattr(module, "_analysis_original_topk") and hasattr(module, "topk"):
+            module.topk = module._analysis_original_topk
+        if hasattr(module, "_analysis_original_config_topk") and hasattr(module, "config") and hasattr(
+            module.config, "moe_router_topk"
+        ):
+            module.config.moe_router_topk = module._analysis_original_config_topk
+        if getattr(module, "_analysis_debug_hook_handle", None) is not None:
+            module._analysis_debug_hook_handle.remove()
+            module._analysis_debug_hook_handle = None
+
+
+def reset_lora_router_controls(model):
+    for module in model.modules():
+        router_module = getattr(module, "qv_lora_experts", None)
+        if router_module is None:
+            continue
+        if hasattr(router_module, "_analysis_original_forward"):
+            router_module.forward = router_module._analysis_original_forward
+
+
+def reset_router_controls(model, model_kind):
+    if model_kind == "ffn":
+        reset_ffn_router_controls(model)
+    else:
+        reset_lora_router_controls(model)
 
 
 def finalize_debug(debug_state):
@@ -338,12 +385,14 @@ def main():
     allowed_experts = parse_allowed_experts(args.allowed_experts)
     debug_state = {} if args.debug_router_json else None
 
+    reset_router_controls(model, args.model_kind)
     if args.model_kind == "ffn":
         install_ffn_router_controls(model, allowed_experts, args.topk_override, debug_state)
     else:
         install_lora_router_controls(model, allowed_experts, args.topk_override, debug_state)
 
     metrics = evaluate(model)
+    reset_router_controls(model, args.model_kind)
     result = {
         "label": args.compare_label,
         "model_kind": args.model_kind,
