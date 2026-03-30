@@ -92,4 +92,8 @@ run_one wiki "$WIKI_DATA_PATH" 1
 run_one code "$CODE_DATA_PATH" 2
 run_one code "$CODE_DATA_PATH" 1
 
+"$PYTHON_BIN" analysis/plot_controlled_expert_inference.py \
+  --input-dir "$OUTPUT_ROOT" \
+  --mode top1_vs_top2
+
 echo "Saved outputs under: $OUTPUT_ROOT"

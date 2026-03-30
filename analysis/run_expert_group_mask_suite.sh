@@ -100,4 +100,8 @@ run_one code "$CODE_DATA_PATH" unrestricted ""
 run_one code "$CODE_DATA_PATH" wiki_only "$wiki_group"
 run_one code "$CODE_DATA_PATH" code_only "$code_group"
 
+"$PYTHON_BIN" analysis/plot_controlled_expert_inference.py \
+  --input-dir "$OUTPUT_ROOT" \
+  --mode group_masks
+
 echo "Saved outputs under: $OUTPUT_ROOT"
