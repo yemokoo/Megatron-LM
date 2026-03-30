@@ -271,9 +271,7 @@ def choose_plot_layers(layer_results, spec):
     if spec.strip():
         return [f"layer_{int(x):02d}" for x in spec.split(",") if x.strip()]
     layers = [item["layer"] for item in layer_results]
-    if len(layers) <= 3:
-        return layers
-    return [layers[0], layers[len(layers) // 2], layers[-1]]
+    return layers
 
 
 def main():
