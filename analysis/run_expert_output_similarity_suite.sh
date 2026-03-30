@@ -32,9 +32,10 @@ export GPU_DEVICE="${GPU_DEVICE:-0}"
 export MICRO_BATCH_SIZE="${MICRO_BATCH_SIZE:-2}"
 export GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-2}"
 export SEQ_LENGTH="${SEQ_LENGTH:-512}"
-export MAX_BATCHES="${MAX_BATCHES:-2}"
-export MAX_TOKENS_PER_LAYER="${MAX_TOKENS_PER_LAYER:-2048}"
+export MAX_BATCHES="${MAX_BATCHES:-16}"
+export MAX_TOKENS_PER_LAYER="${MAX_TOKENS_PER_LAYER:-16384}"
 export PLOT_LAYERS="${PLOT_LAYERS:-}"
+export MASTER_PORT_BASE="${MASTER_PORT_BASE:-29500}"
 export WIKI_EVAL_DATASET="${WIKI_EVAL_DATASET:-$PROJECT_ROOT/data/wiki/test}"
 export CODE_EVAL_DATASET="${CODE_EVAL_DATASET:-$PROJECT_ROOT/data/code/test}"
 export OUTPUT_ROOT="${OUTPUT_ROOT:-$PROJECT_ROOT/analysis_outputs/expert_output_similarity/${MODEL_KIND}}"
@@ -51,8 +52,9 @@ CODE_DATA_PATH="$(build_data_path "$CODE_EVAL_DATASET")"
 run_one() {
   local dataset_name="$1"
   local data_path="$2"
+  local master_port="$3"
   local out_dir="$OUTPUT_ROOT/${dataset_name}"
-  CUDA_VISIBLE_DEVICES="$GPU_DEVICE" torchrun --nproc_per_node 1 \
+  CUDA_VISIBLE_DEVICES="$GPU_DEVICE" torchrun --nproc_per_node 1 --master_port "$master_port" \
     analysis/eval_expert_output_similarity.py \
     --model-kind "$MODEL_KIND" \
     --load "$MODEL_RUN_DIR" \
@@ -79,7 +81,7 @@ run_one() {
     --exit-on-missing-checkpoint
 }
 
-run_one wiki "$WIKI_DATA_PATH"
-run_one code "$CODE_DATA_PATH"
+run_one wiki "$WIKI_DATA_PATH" "$MASTER_PORT_BASE"
+run_one code "$CODE_DATA_PATH" "$((MASTER_PORT_BASE + 1))"
 
 echo "Saved outputs under: $OUTPUT_ROOT"
