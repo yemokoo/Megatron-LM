@@ -37,6 +37,7 @@ export MODEL_RUN_DIR="${MODEL_RUN_DIR:-}"
 export SOURCE_NUM_EXPERTS="${SOURCE_NUM_EXPERTS:-4}"
 export TOTAL_NUM_EXPERTS="${TOTAL_NUM_EXPERTS:-7}"
 export GPU_DEVICE="${GPU_DEVICE:-0}"
+export MASTER_PORT="${MASTER_PORT:-29500}"
 export MICRO_BATCH_SIZE="${MICRO_BATCH_SIZE:-8}"
 export GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-8}"
 export SEQ_LENGTH="${SEQ_LENGTH:-512}"
@@ -89,7 +90,7 @@ run_one() {
     --exit-on-missing-checkpoint
     --data-path
   )
-  CUDA_VISIBLE_DEVICES="$GPU_DEVICE" torchrun --nproc_per_node 1 "${args[@]}" $data_path ${allowed:+--allowed-experts "$allowed"}
+  CUDA_VISIBLE_DEVICES="$GPU_DEVICE" torchrun --nproc_per_node 1 --master_port "$MASTER_PORT" "${args[@]}" $data_path ${allowed:+--allowed-experts "$allowed"}
 }
 
 run_one wiki "$WIKI_DATA_PATH" unrestricted ""
