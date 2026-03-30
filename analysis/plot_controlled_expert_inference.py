@@ -6,16 +6,29 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 
 
+def infer_label_from_filename(path: Path):
+    stem = path.stem
+    parts = stem.split("_")
+    if len(parts) >= 3:
+        return "_".join(parts[-3:]) if parts[-2] in ("wiki", "code") else "_".join(parts[-2:])
+    return stem
+
+
 def load_results(input_dir: Path):
     rows = []
     for path in sorted(input_dir.glob("*.json")):
         data = json.loads(path.read_text(encoding="utf-8"))
+        label = data.get("label", infer_label_from_filename(path))
+        acc = data.get("next_token_acc", data.get("acc"))
+        ppl = data.get("ppl")
+        if acc is None or ppl is None:
+            continue
         rows.append(
             {
                 "path": path,
-                "label": data["label"],
-                "acc": data["next_token_acc"],
-                "ppl": data["ppl"],
+                "label": label,
+                "acc": acc,
+                "ppl": ppl,
             }
         )
     return rows
@@ -25,8 +38,10 @@ def parse_top1_vs_top2(rows):
     parsed = {}
     for row in rows:
         parts = row["label"].split("_")
-        dataset = parts[-2]
-        mode = parts[-1]
+        dataset = next((part for part in parts if part in ("wiki", "code")), None)
+        mode = next((part for part in parts if part in ("top1", "top2")), None)
+        if dataset is None or mode is None:
+            continue
         parsed.setdefault(dataset, {})[mode] = row
     ordered_datasets = [d for d in ("wiki", "code") if d in parsed]
     ordered_modes = ["top2", "top1"]
@@ -37,8 +52,10 @@ def parse_group_masks(rows):
     parsed = {}
     for row in rows:
         parts = row["label"].split("_")
-        dataset = parts[1]
-        mode = "_".join(parts[2:])
+        dataset = next((part for part in parts if part in ("wiki", "code")), None)
+        mode = next((candidate for candidate in ("unrestricted", "wiki_only", "code_only") if candidate in row["label"]), None)
+        if dataset is None or mode is None:
+            continue
         parsed.setdefault(dataset, {})[mode] = row
     ordered_datasets = [d for d in ("wiki", "code") if d in parsed]
     ordered_modes = ["unrestricted", "wiki_only", "code_only"]
@@ -46,22 +63,45 @@ def parse_group_masks(rows):
 
 
 def plot_grouped_bars(parsed, datasets, modes, metric_key, ylabel, title, output_path: Path):
+    color_map = {
+        "top2": "#4C78A8",
+        "top1": "#F58518",
+        "unrestricted": "#4C78A8",
+        "wiki_only": "#54A24B",
+        "code_only": "#E45756",
+    }
+    legend_map = {
+        "top2": "Top-2 routing",
+        "top1": "Top-1 routing",
+        "unrestricted": "Unrestricted",
+        "wiki_only": "Wiki experts only",
+        "code_only": "Code experts only",
+    }
     fig, axes = plt.subplots(1, len(datasets), figsize=(5 * len(datasets), 4), squeeze=False)
     axes = axes[0]
+    legend_handles = []
     for ax, dataset in zip(axes, datasets):
         values = []
         labels = []
+        colors = []
         for mode in modes:
             row = parsed.get(dataset, {}).get(mode)
             if row is None:
                 continue
             values.append(row[metric_key])
             labels.append(mode)
-        ax.bar(labels, values)
-        ax.set_title(dataset)
+            colors.append(color_map.get(mode, "#888888"))
+        bars = ax.bar(labels, values, color=colors)
+        ax.set_title(f"{dataset} dataset")
         ax.set_ylabel(ylabel)
         ax.tick_params(axis="x", rotation=20)
+        for bar, mode in zip(bars, labels):
+            if all(existing.get_label() != legend_map.get(mode, mode) for existing in legend_handles):
+                bar.set_label(legend_map.get(mode, mode))
+                legend_handles.append(bar)
     fig.suptitle(title)
+    if legend_handles:
+        fig.legend(handles=legend_handles, loc="upper center", ncol=min(len(legend_handles), 3), frameon=False)
     fig.tight_layout()
     fig.savefig(output_path, dpi=200)
     plt.close(fig)
