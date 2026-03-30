@@ -53,7 +53,7 @@ fi
 
 wiki_group="$(seq 0 $((SOURCE_NUM_EXPERTS - 1)) | paste -sd, -)"
 code_group="$(seq "$SOURCE_NUM_EXPERTS" $((TOTAL_NUM_EXPERTS - 1)) | paste -sd, -)"
-export EVAL_ITERS="$(ceil_div "$TARGET_EVAL_TOKENS" "$((MICRO_BATCH_SIZE * SEQ_LENGTH))")"
+export EVAL_ITERS="$(ceil_div "$TARGET_EVAL_TOKENS" "$((GLOBAL_BATCH_SIZE * SEQ_LENGTH))")"
 mkdir -p "$OUTPUT_ROOT"
 WIKI_DATA_PATH="$(build_data_path "$WIKI_EVAL_DATASET")"
 CODE_DATA_PATH="$(build_data_path "$CODE_EVAL_DATASET")"
