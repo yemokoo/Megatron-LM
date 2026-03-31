@@ -187,7 +187,9 @@ def _set_wandb_writer(args):
             'dir': save_dir,
             'name': args.wandb_exp_name,
             'project': args.wandb_project,
-            'config': vars(args)}
+        }
+        if os.getenv('WANDB_DISABLE_CONFIG', '0') != '1':
+            wandb_kwargs['config'] = vars(args)
         if getattr(args, 'wandb_run_id', ''):
             wandb_kwargs['id'] = args.wandb_run_id
             wandb_kwargs['resume'] = getattr(args, 'wandb_resume', 'allow')
