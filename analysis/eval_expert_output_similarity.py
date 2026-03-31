@@ -57,6 +57,11 @@ def add_args(parser):
     )
     group.add_argument("--heatmap-vmin", type=float, default=-0.25)
     group.add_argument("--heatmap-vmax", type=float, default=0.75)
+    group.add_argument("--tsne-sample-per-expert", type=int, default=256)
+    group.add_argument("--tsne-perplexity", type=float, default=30.0)
+    group.add_argument("--tsne-iterations", type=int, default=500)
+    group.add_argument("--tsne-learning-rate", type=float, default=200.0)
+    group.add_argument("--tsne-early-exaggeration", type=float, default=12.0)
     return parser
 
 
@@ -228,6 +233,134 @@ def project_expert_vectors_2d(vectors: torch.Tensor):
     return coords[:, :2].cpu()
 
 
+def reduce_features_for_tsne(vectors: torch.Tensor, max_components: int = 50):
+    vectors = vectors.float()
+    if vectors.shape[0] <= 1:
+        return vectors
+    centered = vectors - vectors.mean(dim=0, keepdim=True)
+    target_dims = min(max_components, centered.shape[0] - 1, centered.shape[1])
+    if target_dims <= 0:
+        return centered
+    if target_dims >= centered.shape[1]:
+        return centered
+    _u, _s, v = torch.pca_lowrank(centered, q=target_dims, center=False)
+    return centered @ v[:, :target_dims]
+
+
+def _shannon_entropy_and_probs(dist_row: torch.Tensor, beta: float):
+    probs = torch.exp(-dist_row * beta)
+    prob_sum = probs.sum()
+    if float(prob_sum.item()) <= 1e-12:
+        normalized = torch.full_like(probs, 1.0 / max(probs.numel(), 1))
+        return torch.tensor(0.0, dtype=dist_row.dtype), normalized
+    probs = probs / prob_sum
+    entropy = -torch.sum(probs * torch.log(probs.clamp_min(1e-12)))
+    return entropy, probs
+
+
+def compute_joint_probabilities(features: torch.Tensor, perplexity: float):
+    num_points = features.shape[0]
+    if num_points <= 1:
+        return torch.zeros((num_points, num_points), dtype=torch.float32)
+
+    sq_norms = (features**2).sum(dim=1, keepdim=True)
+    distances = (sq_norms + sq_norms.transpose(0, 1) - 2.0 * (features @ features.transpose(0, 1))).clamp_min(0.0)
+    conditional = torch.zeros((num_points, num_points), dtype=torch.float32)
+    target_entropy = math.log(max(min(perplexity, num_points - 1), 1.0))
+
+    for row_idx in range(num_points):
+        row_dist = torch.cat([distances[row_idx, :row_idx], distances[row_idx, row_idx + 1 :]], dim=0).float()
+        beta = 1.0
+        beta_min = None
+        beta_max = None
+        probs = None
+        for _ in range(50):
+            entropy, probs = _shannon_entropy_and_probs(row_dist, beta)
+            diff = float(entropy.item() - target_entropy)
+            if abs(diff) < 1e-4:
+                break
+            if diff > 0.0:
+                beta_min = beta
+                beta = beta * 2.0 if beta_max is None else 0.5 * (beta + beta_max)
+            else:
+                beta_max = beta
+                beta = beta / 2.0 if beta_min is None else 0.5 * (beta + beta_min)
+
+        if probs is None:
+            _, probs = _shannon_entropy_and_probs(row_dist, beta)
+
+        full_row = torch.zeros(num_points, dtype=torch.float32)
+        if row_idx > 0:
+            full_row[:row_idx] = probs[:row_idx]
+        if row_idx + 1 < num_points:
+            full_row[row_idx + 1 :] = probs[row_idx:]
+        conditional[row_idx] = full_row
+
+    joint = (conditional + conditional.transpose(0, 1)) / (2.0 * num_points)
+    return joint.clamp_min(1e-12)
+
+
+def exact_tsne(
+    features: torch.Tensor,
+    perplexity: float,
+    iterations: int,
+    learning_rate: float,
+    early_exaggeration: float,
+    seed: int,
+):
+    num_points = features.shape[0]
+    if num_points == 0:
+        return torch.zeros((0, 2), dtype=torch.float32)
+    if num_points == 1:
+        return torch.zeros((1, 2), dtype=torch.float32)
+
+    effective_perplexity = min(perplexity, max(1.0, float(num_points - 1)))
+    reduced = reduce_features_for_tsne(features)
+    joint = compute_joint_probabilities(reduced, effective_perplexity)
+    exaggeration_steps = min(250, max(iterations // 2, 1))
+
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(seed)
+    embedding = 1e-4 * torch.randn((num_points, 2), generator=generator, dtype=torch.float32)
+    velocity = torch.zeros_like(embedding)
+
+    for step in range(iterations):
+        sq_norms = (embedding**2).sum(dim=1, keepdim=True)
+        num = 1.0 / (1.0 + sq_norms + sq_norms.transpose(0, 1) - 2.0 * (embedding @ embedding.transpose(0, 1)))
+        num.fill_diagonal_(0.0)
+        q = num / num.sum().clamp_min(1e-12)
+        p = joint * (early_exaggeration if step < exaggeration_steps else 1.0)
+
+        coeff = (p - q) * num
+        grad = 4.0 * (torch.diag(coeff.sum(dim=1)) - coeff) @ embedding
+        momentum = 0.5 if step < exaggeration_steps else 0.8
+        velocity = momentum * velocity - learning_rate * grad
+        embedding = embedding + velocity
+        embedding = embedding - embedding.mean(dim=0, keepdim=True)
+
+    return embedding.cpu()
+
+
+def sample_token_level_outputs(outputs: torch.Tensor, samples_per_expert: int, seed: int):
+    num_experts, num_tokens, output_dim = outputs.shape
+    sample_count = min(samples_per_expert, num_tokens)
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(seed)
+    token_indices = torch.randperm(num_tokens, generator=generator)[:sample_count]
+    sampled = outputs[:, token_indices, :]
+    flat_outputs = sampled.reshape(num_experts * sample_count, output_dim).cpu()
+    expert_indices = (
+        torch.arange(num_experts, dtype=torch.long).unsqueeze(1).expand(num_experts, sample_count).reshape(-1)
+    )
+    repeated_token_indices = token_indices.unsqueeze(0).expand(num_experts, sample_count).reshape(-1)
+    return {
+        "flat_outputs": flat_outputs,
+        "expert_indices": expert_indices,
+        "token_indices": repeated_token_indices,
+        "sample_count_per_expert": sample_count,
+    }
+
+
 def cast_storage_dtype(tensor: torch.Tensor, dtype_name: str):
     if dtype_name == "fp32":
         return tensor.float().cpu()
@@ -389,6 +522,30 @@ def save_projection_csvs(projection_cache, output_dir: Path):
                 writer.writerow([f"e{expert_idx}", f"{coord[0]:.6f}", f"{coord[1]:.6f}"])
 
 
+def save_token_tsne_csvs(token_tsne_cache, output_dir: Path, old_expert_count: int):
+    csv_dir = output_dir / "layer_tables" / "token_tsne"
+    csv_dir.mkdir(parents=True, exist_ok=True)
+    for layer, payload in token_tsne_cache.items():
+        coords = payload["coords_2d"]
+        experts = payload["expert_indices"]
+        token_indices = payload["token_indices"]
+        with (csv_dir / f"{layer}_token_tsne_2d.csv").open("w", encoding="utf-8", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["expert", "group", "token_index", "x", "y"])
+            for row_idx in range(coords.shape[0]):
+                expert_idx = int(experts[row_idx].item())
+                group = "wiki_old" if expert_idx < old_expert_count else "code_new"
+                writer.writerow(
+                    [
+                        f"e{expert_idx}",
+                        group,
+                        int(token_indices[row_idx].item()),
+                        f"{float(coords[row_idx, 0].item()):.6f}",
+                        f"{float(coords[row_idx, 1].item()):.6f}",
+                    ]
+                )
+
+
 def save_heatmaps(layer_results, output_dir: Path, title_prefix: str, plot_layers, vmin: float, vmax: float):
     selected = [item for item in layer_results if item["layer"] in plot_layers]
     if not selected:
@@ -476,6 +633,59 @@ def save_scatter_plots(layer_results, output_dir: Path, title_prefix: str, plot_
     plt.close(fig)
 
 
+def save_token_tsne_plots(token_tsne_cache, output_dir: Path, title_prefix: str, plot_layers, old_expert_count: int):
+    selected_layers = [layer for layer in plot_layers if layer in token_tsne_cache]
+    if not selected_layers:
+        return
+    cols = min(3, len(selected_layers))
+    rows = math.ceil(len(selected_layers) / cols)
+    fig, axes = plt.subplots(rows, cols, figsize=(5.2 * cols, 5.0 * rows))
+    if hasattr(axes, "reshape"):
+        flat_axes = list(axes.reshape(-1))
+    else:
+        flat_axes = [axes]
+
+    for ax_idx, ax in enumerate(flat_axes):
+        if ax_idx >= len(selected_layers):
+            ax.axis("off")
+            continue
+        layer = selected_layers[ax_idx]
+        payload = token_tsne_cache[layer]
+        coords = payload["coords_2d"]
+        experts = payload["expert_indices"]
+        old_mask = experts < old_expert_count
+        new_mask = ~old_mask
+        if bool(old_mask.any()):
+            ax.scatter(
+                coords[old_mask, 0],
+                coords[old_mask, 1],
+                s=10,
+                alpha=0.35,
+                color="#e45756",
+                label="Wiki experts (e0-e3)",
+            )
+        if bool(new_mask.any()):
+            ax.scatter(
+                coords[new_mask, 0],
+                coords[new_mask, 1],
+                s=10,
+                alpha=0.35,
+                color="#4c78a8",
+                label="Code experts (e4-e6)",
+            )
+        ax.set_title(layer)
+        ax.set_xlabel("t-SNE 1")
+        ax.set_ylabel("t-SNE 2")
+        if ax_idx == 0:
+            ax.legend(loc="best", fontsize=8)
+    fig.suptitle(title_prefix)
+    fig.tight_layout()
+    tsne_dir = output_dir / "token_tsne"
+    tsne_dir.mkdir(parents=True, exist_ok=True)
+    fig.savefig(tsne_dir / "expert_output_similarity_tsne.png", dpi=200)
+    plt.close(fig)
+
+
 def choose_plot_layers(layer_results, spec):
     if spec.strip():
         return [f"layer_{int(x):02d}" for x in spec.split(",") if x.strip()]
@@ -509,6 +719,7 @@ def main():
     layer_results = []
     aggregate_cache = {}
     projection_cache = {}
+    token_tsne_cache = {}
 
     if args.model_kind == "ffn":
         modules = collect_ffn_modules(model)
@@ -525,9 +736,28 @@ def main():
             cosine = mean_tokenwise_cosine_similarity_matrix(outputs).cpu()
             aggregate_vectors = aggregate_expert_outputs(outputs).cpu()
             projection_2d = project_expert_vectors_2d(aggregate_vectors)
+            token_sample = sample_token_level_outputs(
+                outputs,
+                args.tsne_sample_per_expert,
+                args.seed + int(layer_key.split("_")[-1]),
+            )
+            token_tsne = exact_tsne(
+                token_sample["flat_outputs"],
+                perplexity=args.tsne_perplexity,
+                iterations=args.tsne_iterations,
+                learning_rate=args.tsne_learning_rate,
+                early_exaggeration=args.tsne_early_exaggeration,
+                seed=args.seed + 1000 + int(layer_key.split("_")[-1]),
+            )
             aggregate_cache[layer_key] = aggregate_vectors
             projection_cache[layer_key] = {
                 "projection_2d": projection_2d,
+            }
+            token_tsne_cache[layer_key] = {
+                "coords_2d": token_tsne,
+                "expert_indices": token_sample["expert_indices"],
+                "token_indices": token_sample["token_indices"],
+                "sample_count_per_expert": token_sample["sample_count_per_expert"],
             }
             layer_results.append(
                 {
@@ -538,6 +768,8 @@ def main():
                     "raw_expert_output_file": raw_output_file,
                     "mean_tokenwise_cosine_similarity": [[float(v) for v in row] for row in cosine.tolist()],
                     "expert_projection_2d": [[float(v) for v in row] for row in projection_2d.tolist()],
+                    "token_tsne_csv_file": f"layer_tables/token_tsne/{layer_key}_token_tsne_2d.csv",
+                    "token_tsne_sample_count_per_expert": token_sample["sample_count_per_expert"],
                     "summary": summarize_similarity(cosine, args.source_num_experts),
                 }
             )
@@ -561,9 +793,28 @@ def main():
             cosine = mean_tokenwise_cosine_similarity_matrix(outputs).cpu()
             aggregate_vectors = aggregate_expert_outputs(outputs).cpu()
             projection_2d = project_expert_vectors_2d(aggregate_vectors)
+            token_sample = sample_token_level_outputs(
+                outputs,
+                args.tsne_sample_per_expert,
+                args.seed + int(layer_key.split("_")[-1]),
+            )
+            token_tsne = exact_tsne(
+                token_sample["flat_outputs"],
+                perplexity=args.tsne_perplexity,
+                iterations=args.tsne_iterations,
+                learning_rate=args.tsne_learning_rate,
+                early_exaggeration=args.tsne_early_exaggeration,
+                seed=args.seed + 1000 + int(layer_key.split("_")[-1]),
+            )
             aggregate_cache[layer_key] = aggregate_vectors
             projection_cache[layer_key] = {
                 "projection_2d": projection_2d,
+            }
+            token_tsne_cache[layer_key] = {
+                "coords_2d": token_tsne,
+                "expert_indices": token_sample["expert_indices"],
+                "token_indices": token_sample["token_indices"],
+                "sample_count_per_expert": token_sample["sample_count_per_expert"],
             }
             layer_results.append(
                 {
@@ -574,6 +825,8 @@ def main():
                     "raw_expert_output_file": raw_output_file,
                     "mean_tokenwise_cosine_similarity": [[float(v) for v in row] for row in cosine.tolist()],
                     "expert_projection_2d": [[float(v) for v in row] for row in projection_2d.tolist()],
+                    "token_tsne_csv_file": f"layer_tables/token_tsne/{layer_key}_token_tsne_2d.csv",
+                    "token_tsne_sample_count_per_expert": token_sample["sample_count_per_expert"],
                     "summary": summarize_similarity(cosine, args.source_num_experts),
                 }
             )
@@ -586,6 +839,7 @@ def main():
     plot_layers = choose_plot_layers(layer_results, args.plot_layers)
     save_layer_csvs(layer_results, output_dir)
     save_projection_csvs(projection_cache, output_dir)
+    save_token_tsne_csvs(token_tsne_cache, output_dir, args.source_num_experts)
     torch.save(aggregate_cache, output_dir / "expert_output_aggregate_vectors.pt")
     result = {
         "label": args.compare_label,
@@ -617,6 +871,12 @@ def main():
         "recompute_note": "Reuse hidden_states.pt with the checkpoint to compute alternative metrics without rerunning dataset forward.",
         "aggregate_vector_method": "token_sum",
         "aggregate_vector_cache_filename": "expert_output_aggregate_vectors.pt",
+        "token_tsne_sample_per_expert": args.tsne_sample_per_expert,
+        "token_tsne_perplexity": args.tsne_perplexity,
+        "token_tsne_iterations": args.tsne_iterations,
+        "token_tsne_learning_rate": args.tsne_learning_rate,
+        "token_tsne_early_exaggeration": args.tsne_early_exaggeration,
+        "token_tsne_plot_filename": "token_tsne/expert_output_similarity_tsne.png",
         "heatmap_vmin": args.heatmap_vmin,
         "heatmap_vmax": args.heatmap_vmax,
         "layer_csv_dir": "layer_tables",
@@ -639,6 +899,13 @@ def main():
         layer_results,
         output_dir,
         f"Expert output projection: {args.compare_label}",
+        plot_layers,
+        args.source_num_experts,
+    )
+    save_token_tsne_plots(
+        token_tsne_cache,
+        output_dir,
+        f"Expert output token t-SNE: {args.compare_label}",
         plot_layers,
         args.source_num_experts,
     )
