@@ -177,6 +177,7 @@ class SharedRouterQVLoraSelfAttention(SelfAttention):
         layer_number: int,
         attn_mask_type,
         cp_comm_type: str = None,
+        enable_shared_experts: bool = True,
     ):
         super().__init__(
             config=config,
@@ -185,7 +186,7 @@ class SharedRouterQVLoraSelfAttention(SelfAttention):
             attn_mask_type=attn_mask_type,
             cp_comm_type=cp_comm_type,
         )
-        if config.attn_lora_num_experts > 0:
+        if enable_shared_experts and config.attn_lora_num_experts > 0:
             query_output_size = (
                 self.num_attention_heads_per_partition * self.hidden_size_per_attention_head
             )
@@ -335,13 +336,17 @@ class SharedRouterHybridTransformerLayer(MegatronModule, BaseTransformerLayer):
             else:
                 attention_optional_kwargs["cp_comm_type"] = config.cp_comm_type
 
-        self.shared_expert_router = TopKRouter(config=self.config)
-        self.shared_expert_router.set_layer_number(self.layer_number)
+        if self.is_moe_layer:
+            self.shared_expert_router = TopKRouter(config=self.config)
+            self.shared_expert_router.set_layer_number(self.layer_number)
+        else:
+            self.shared_expert_router = None
 
         self.self_attention = build_module(
             submodules.self_attention,
             config=self.config,
             layer_number=layer_number,
+            enable_shared_experts=self.is_moe_layer,
             **attention_optional_kwargs,
         )
         self.self_attn_bda = build_module(submodules.self_attn_bda)
@@ -374,6 +379,8 @@ class SharedRouterHybridTransformerLayer(MegatronModule, BaseTransformerLayer):
         self.bias_dropout_add_exec_handler = torch.enable_grad
 
     def _compute_shared_routing(self, hidden_states: torch.Tensor) -> SharedRoutingContext:
+        if self.shared_expert_router is None:
+            raise ValueError("Shared routing requested for a layer without shared experts.")
         scores, routing_map = self.shared_expert_router(hidden_states)
         return SharedRoutingContext(scores=scores, routing_map=routing_map)
 
@@ -393,7 +400,9 @@ class SharedRouterHybridTransformerLayer(MegatronModule, BaseTransformerLayer):
     ):
         residual = hidden_states
         input_layernorm_output = self.input_layernorm(hidden_states)
-        routing_context = self._compute_shared_routing(input_layernorm_output)
+        routing_context = (
+            self._compute_shared_routing(input_layernorm_output) if self.is_moe_layer else None
+        )
 
         attention_output_with_bias = self.self_attention(
             input_layernorm_output,
