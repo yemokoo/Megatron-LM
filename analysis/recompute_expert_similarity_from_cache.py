@@ -22,12 +22,19 @@ def parse_args():
     parser.add_argument("--plot-layers", type=str, default="")
     parser.add_argument("--heatmap-vmin", type=float, default=0.0)
     parser.add_argument("--heatmap-vmax", type=float, default=1.0)
+    parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--tsne-sample-per-expert", type=int, default=256)
     parser.add_argument("--tsne-perplexity", type=float, default=30.0)
     parser.add_argument("--tsne-iterations", type=int, default=500)
     parser.add_argument("--tsne-learning-rate", type=float, default=200.0)
     parser.add_argument("--tsne-early-exaggeration", type=float, default=12.0)
     return parser.parse_args()
+
+
+def resolve_device(device_spec: str) -> torch.device:
+    if device_spec == "auto":
+        return torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    return torch.device(device_spec)
 
 
 def discover_dataset_dirs(input_dir: Path):
@@ -59,15 +66,16 @@ def linear_cka(x: torch.Tensor, y: torch.Tensor, eps: float = 1e-12) -> float:
     return float((hsic / denom).item())
 
 
-def compute_linear_cka_matrix(outputs: torch.Tensor) -> torch.Tensor:
+def compute_linear_cka_matrix(outputs: torch.Tensor, device: torch.device) -> torch.Tensor:
+    outputs = outputs.to(device=device, dtype=torch.float32)
     num_experts = outputs.shape[0]
-    matrix = torch.empty((num_experts, num_experts), dtype=torch.float32)
+    matrix = torch.empty((num_experts, num_experts), dtype=torch.float32, device=device)
     for i in range(num_experts):
         for j in range(i, num_experts):
             value = linear_cka(outputs[i], outputs[j])
             matrix[i, j] = value
             matrix[j, i] = value
-    return matrix
+    return matrix.cpu()
 
 
 def reduce_features_for_tsne(vectors: torch.Tensor, max_components: int = 50):
@@ -89,7 +97,7 @@ def _shannon_entropy_and_probs(dist_row: torch.Tensor, beta: float):
     prob_sum = probs.sum()
     if float(prob_sum.item()) <= 1e-12:
         normalized = torch.full_like(probs, 1.0 / max(probs.numel(), 1))
-        return torch.tensor(0.0, dtype=dist_row.dtype), normalized
+        return torch.tensor(0.0, dtype=dist_row.dtype, device=dist_row.device), normalized
     probs = probs / prob_sum
     entropy = -torch.sum(probs * torch.log(probs.clamp_min(1e-12)))
     return entropy, probs
@@ -98,11 +106,11 @@ def _shannon_entropy_and_probs(dist_row: torch.Tensor, beta: float):
 def compute_joint_probabilities(features: torch.Tensor, perplexity: float):
     num_points = features.shape[0]
     if num_points <= 1:
-        return torch.zeros((num_points, num_points), dtype=torch.float32)
+        return torch.zeros((num_points, num_points), dtype=torch.float32, device=features.device)
 
     sq_norms = (features**2).sum(dim=1, keepdim=True)
     distances = (sq_norms + sq_norms.transpose(0, 1) - 2.0 * (features @ features.transpose(0, 1))).clamp_min(0.0)
-    conditional = torch.zeros((num_points, num_points), dtype=torch.float32)
+    conditional = torch.zeros((num_points, num_points), dtype=torch.float32, device=features.device)
     target_entropy = math.log(max(min(perplexity, num_points - 1), 1.0))
 
     for row_idx in range(num_points):
@@ -126,7 +134,7 @@ def compute_joint_probabilities(features: torch.Tensor, perplexity: float):
         if probs is None:
             _, probs = _shannon_entropy_and_probs(row_dist, beta)
 
-        full_row = torch.zeros(num_points, dtype=torch.float32)
+        full_row = torch.zeros(num_points, dtype=torch.float32, device=features.device)
         if row_idx > 0:
             full_row[:row_idx] = probs[:row_idx]
         if row_idx + 1 < num_points:
@@ -145,20 +153,20 @@ def exact_tsne(
     early_exaggeration: float,
     seed: int,
 ):
+    device = features.device
     num_points = features.shape[0]
     if num_points == 0:
-        return torch.zeros((0, 2), dtype=torch.float32)
+        return torch.zeros((0, 2), dtype=torch.float32, device=device)
     if num_points == 1:
-        return torch.zeros((1, 2), dtype=torch.float32)
+        return torch.zeros((1, 2), dtype=torch.float32, device=device)
 
     effective_perplexity = min(perplexity, max(1.0, float(num_points - 1)))
     reduced = reduce_features_for_tsne(features)
     joint = compute_joint_probabilities(reduced, effective_perplexity)
     exaggeration_steps = min(250, max(iterations // 2, 1))
 
-    generator = torch.Generator(device="cpu")
-    generator.manual_seed(seed)
-    embedding = 1e-4 * torch.randn((num_points, 2), generator=generator, dtype=torch.float32)
+    embedding = 1e-4 * torch.randn((num_points, 2), generator=torch.Generator().manual_seed(seed), dtype=torch.float32)
+    embedding = embedding.to(device)
     velocity = torch.zeros_like(embedding)
 
     for step in range(iterations):
@@ -196,6 +204,13 @@ def sample_token_level_outputs(outputs: torch.Tensor, samples_per_expert: int, s
         "token_indices": repeated_token_indices,
         "sample_count_per_expert": sample_count,
     }
+
+
+def load_tensor(path: Path):
+    try:
+        return torch.load(path, map_location="cpu", weights_only=True)
+    except TypeError:
+        return torch.load(path, map_location="cpu")
 
 
 def masked_mean(matrix: torch.Tensor, row_slice: slice, col_slice: slice, diagonal: bool):
@@ -400,15 +415,15 @@ def recompute_for_dataset(dataset_dir: Path, args):
     token_tsne_cache = {}
     for layer_file in layer_files:
         layer_key = layer_file.stem.replace("_expert_outputs", "")
-        outputs = torch.load(layer_file, map_location="cpu")
-        matrix = compute_linear_cka_matrix(outputs)
+        outputs = load_tensor(layer_file)
+        matrix = compute_linear_cka_matrix(outputs, args.device)
         token_sample = sample_token_level_outputs(
             outputs,
             args.tsne_sample_per_expert,
             1234 + int(layer_key.split("_")[-1]),
         )
         token_tsne = exact_tsne(
-            token_sample["flat_outputs"],
+            token_sample["flat_outputs"].to(args.device, dtype=torch.float32),
             perplexity=args.tsne_perplexity,
             iterations=args.tsne_iterations,
             learning_rate=args.tsne_learning_rate,
@@ -460,6 +475,7 @@ def recompute_for_dataset(dataset_dir: Path, args):
         "plot_layers": plot_layers,
         "heatmap_vmin": args.heatmap_vmin,
         "heatmap_vmax": args.heatmap_vmax,
+        "device": str(args.device),
         "token_tsne_sample_per_expert": args.tsne_sample_per_expert,
         "token_tsne_perplexity": args.tsne_perplexity,
         "token_tsne_iterations": args.tsne_iterations,
@@ -479,6 +495,7 @@ def recompute_for_dataset(dataset_dir: Path, args):
 
 def main():
     args = parse_args()
+    args.device = resolve_device(args.device)
     input_dir = Path(args.input_dir)
     dataset_dirs = discover_dataset_dirs(input_dir)
     if not dataset_dirs:
@@ -487,7 +504,7 @@ def main():
         )
     for dataset_dir in dataset_dirs:
         recompute_for_dataset(dataset_dir, args)
-        print(f"Saved linear CKA outputs under: {dataset_dir}")
+        print(f"Saved linear CKA outputs under: {dataset_dir} (device={args.device})")
 
 
 if __name__ == "__main__":
