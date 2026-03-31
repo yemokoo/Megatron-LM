@@ -6,6 +6,7 @@ import torch
 from megatron.core.transformer.moe.experts import GroupedMLP, SequentialMLP, TEGroupedMLP
 from megatron.core.transformer.moe.router import Router
 from megatron.core.transformer.qv_lora_attention import QVLoraExpertRouter
+from megatron.core.transformer.shared_router_hybrid import SharedQVLoraExperts
 
 
 _EXPERT_SUFFIX_RE = re.compile(r"(?:weight|bias)(\d+)$")
@@ -60,6 +61,22 @@ def _copy_qv_lora_router(dst_router, src_router, num_existing_experts):
         dst_router.v_lora_b[:num_existing_experts].copy_(src_router.v_lora_b[:num_existing_experts])
 
 
+def _copy_shared_qv_lora_experts(dst_experts, src_experts, num_existing_experts):
+    with torch.no_grad():
+        dst_experts.q_lora_a[:num_existing_experts].copy_(
+            src_experts.q_lora_a[:num_existing_experts]
+        )
+        dst_experts.q_lora_b[:num_existing_experts].copy_(
+            src_experts.q_lora_b[:num_existing_experts]
+        )
+        dst_experts.v_lora_a[:num_existing_experts].copy_(
+            src_experts.v_lora_a[:num_existing_experts]
+        )
+        dst_experts.v_lora_b[:num_existing_experts].copy_(
+            src_experts.v_lora_b[:num_existing_experts]
+        )
+
+
 def expand_moe_model(target_model, source_model, num_existing_experts):
     _load_matching_state(target_model, source_model)
 
@@ -77,6 +94,10 @@ def expand_moe_model(target_model, source_model, num_existing_experts):
             source_module, QVLoraExpertRouter
         ):
             _copy_qv_lora_router(target_module, source_module, num_existing_experts)
+        elif isinstance(target_module, SharedQVLoraExperts) and isinstance(
+            source_module, SharedQVLoraExperts
+        ):
+            _copy_shared_qv_lora_experts(target_module, source_module, num_existing_experts)
 
 
 def _freeze_router(module, num_existing_experts):
@@ -159,6 +180,9 @@ def freeze_preexisting_moe_params(
                 _freeze_qv_lora_router(module, num_existing_experts)
             if freeze_existing_experts:
                 _freeze_qv_lora_experts(module, num_existing_experts)
+        elif isinstance(module, SharedQVLoraExperts):
+            if freeze_existing_experts:
+                _freeze_qv_lora_experts(module, num_existing_experts)
 
 
 def freeze_all_but_new_moe_params(
@@ -207,6 +231,15 @@ def freeze_all_but_new_moe_params(
             module.v_lora_b.requires_grad = True
             if freeze_existing_router:
                 _freeze_qv_lora_router(module, num_existing_experts)
+            if freeze_existing_experts:
+                _freeze_qv_lora_experts(module, num_existing_experts)
+            continue
+
+        if isinstance(module, SharedQVLoraExperts):
+            module.q_lora_a.requires_grad = True
+            module.q_lora_b.requires_grad = True
+            module.v_lora_a.requires_grad = True
+            module.v_lora_b.requires_grad = True
             if freeze_existing_experts:
                 _freeze_qv_lora_experts(module, num_existing_experts)
 
@@ -337,6 +370,36 @@ def _audit_qv_lora_router(module_name, target_router, source_router, num_existin
     }
 
 
+def _audit_shared_qv_lora_experts(module_name, target_experts, source_experts, num_existing_experts):
+    return {
+        "module": module_name,
+        "type": "SharedQVLoraExperts",
+        "copied_rows": num_existing_experts,
+        "num_target_experts": int(target_experts.q_lora_a.shape[0]),
+        "num_source_experts": int(source_experts.q_lora_a.shape[0]),
+        "q_lora_a": _tensor_summary(target_experts.q_lora_a),
+        "q_lora_b": _tensor_summary(target_experts.q_lora_b),
+        "v_lora_a": _tensor_summary(target_experts.v_lora_a),
+        "v_lora_b": _tensor_summary(target_experts.v_lora_b),
+        "copied_q_lora_a_max_abs_diff": _max_abs_diff(
+            target_experts.q_lora_a[:num_existing_experts],
+            source_experts.q_lora_a[:num_existing_experts],
+        ),
+        "copied_q_lora_b_max_abs_diff": _max_abs_diff(
+            target_experts.q_lora_b[:num_existing_experts],
+            source_experts.q_lora_b[:num_existing_experts],
+        ),
+        "copied_v_lora_a_max_abs_diff": _max_abs_diff(
+            target_experts.v_lora_a[:num_existing_experts],
+            source_experts.v_lora_a[:num_existing_experts],
+        ),
+        "copied_v_lora_b_max_abs_diff": _max_abs_diff(
+            target_experts.v_lora_b[:num_existing_experts],
+            source_experts.v_lora_b[:num_existing_experts],
+        ),
+    }
+
+
 def inspect_moe_expansion(target_model, source_model, num_existing_experts):
     audit: Dict[str, Any] = {
         "num_existing_experts": num_existing_experts,
@@ -363,6 +426,14 @@ def inspect_moe_expansion(target_model, source_model, num_existing_experts):
         ):
             audit["expert_modules"].append(
                 _audit_qv_lora_router(
+                    module_name, target_module, source_module, num_existing_experts
+                )
+            )
+        elif isinstance(target_module, SharedQVLoraExperts) and isinstance(
+            source_module, SharedQVLoraExperts
+        ):
+            audit["expert_modules"].append(
+                _audit_shared_qv_lora_experts(
                     module_name, target_module, source_module, num_existing_experts
                 )
             )

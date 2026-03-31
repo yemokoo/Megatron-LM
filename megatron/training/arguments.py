@@ -741,7 +741,9 @@ def validate_args(args, defaults={}):
     if args.num_experts == 0:
         args.num_experts = None
     if args.num_experts is not None:
-        assert args.spec is None, "Model Spec must be None when using MoEs"
+        assert args.spec is None or args.shared_router_hybrid_model, (
+            "Model Spec must be None when using MoEs unless --shared-router-hybrid-model is set"
+        )
 
     if args.moe_ffn_hidden_size is None:
         args.moe_ffn_hidden_size = args.ffn_hidden_size
@@ -2494,4 +2496,17 @@ def _add_experimental_args(parser):
     group.add_argument('--attn-lora-train-router-and-experts-only', action='store_true',
                        help='Freeze all backbone parameters after loading and train only '
                             'attention LoRA experts plus their routers.')
+    group.add_argument('--shared-router-hybrid-model', action='store_true',
+                       help='Enable the shared-router hybrid architecture where attention LoRA and '
+                            'FFN MoE experts share one router.')
+    group.add_argument('--shared-router-hybrid-expand-from-num-experts', type=int, default=None,
+                       help='Load a smaller shared-router hybrid checkpoint, copy its existing '
+                            'experts/router rows into the first slots of the larger target model, '
+                            'and leave newly added experts/router rows trainable for continual learning.')
+    group.add_argument('--shared-router-hybrid-train-new-experts-and-router-only', action='store_true',
+                       help='When expanding the shared-router hybrid model, freeze every old '
+                            'parameter and train only newly added experts plus newly added router rows.')
+    group.add_argument('--shared-router-hybrid-resume-from-num-experts', type=int, default=None,
+                       help='When resuming from an expanded shared-router hybrid checkpoint, '
+                            're-apply continual-learning freezing using this many original experts.')
     return parser

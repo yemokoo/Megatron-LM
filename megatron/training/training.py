@@ -136,6 +136,26 @@ def _load_attn_lora_source_model(
     return source_model
 
 
+def _load_shared_router_hybrid_source_model(
+    model_provider_func, model_type, checkpointing_context, num_existing_experts
+):
+    args = get_args()
+    target_num_experts = args.num_experts
+    target_attn_lora_num_experts = args.attn_lora_num_experts
+    args.num_experts = num_existing_experts
+    args.attn_lora_num_experts = num_existing_experts
+    source_model = get_model(model_provider_func, model_type, wrap_with_ddp=False)
+    args.num_experts = target_num_experts
+    args.attn_lora_num_experts = target_attn_lora_num_experts
+    _, args.num_floating_point_operations_so_far = load_checkpoint(
+        source_model,
+        None,
+        None,
+        checkpointing_context=checkpointing_context,
+    )
+    return source_model
+
+
 def _load_teacher_model_from_checkpoint(
     model_provider_func, model_type, checkpointing_context, teacher_load_dir
 ):
@@ -1013,11 +1033,90 @@ def setup_model_and_optimizer(model_provider_func,
             f'Expanded attention LoRA checkpoint from {args.attn_lora_expand_from_num_experts} '
             f'to {target_num_experts} experts.'
         )
+    elif args.shared_router_hybrid_expand_from_num_experts is not None:
+        torch.distributed.barrier()
+        assert args.shared_router_hybrid_model, (
+            "--shared-router-hybrid-expand-from-num-experts requires "
+            "--shared-router-hybrid-model."
+        )
+        assert args.load is not None, (
+            "--shared-router-hybrid-expand-from-num-experts requires --load."
+        )
+        assert args.num_experts is not None, (
+            "--shared-router-hybrid-expand-from-num-experts requires --num-experts."
+        )
+        assert args.attn_lora_num_experts > 0, (
+            "--shared-router-hybrid-expand-from-num-experts requires "
+            "--attn-lora-num-experts."
+        )
+        assert args.num_experts == args.attn_lora_num_experts, (
+            "Shared-router hybrid expansion requires "
+            "--num-experts == --attn-lora-num-experts."
+        )
+        assert (
+            args.shared_router_hybrid_expand_from_num_experts < args.num_experts
+        ), "--shared-router-hybrid-expand-from-num-experts must be smaller than --num-experts."
+
+        source_model = _load_shared_router_hybrid_source_model(
+            model_provider_func,
+            model_type,
+            checkpointing_context,
+            args.shared_router_hybrid_expand_from_num_experts,
+        )
+        source_unwrapped_model = unwrap_model(source_model)
+
+        for target_shard, source_shard in zip(unwrapped_model, source_unwrapped_model):
+            expand_moe_model(
+                target_shard, source_shard, args.shared_router_hybrid_expand_from_num_experts
+            )
+            if args.shared_router_hybrid_train_new_experts_and_router_only:
+                freeze_all_but_new_moe_params(
+                    target_shard,
+                    args.shared_router_hybrid_expand_from_num_experts,
+                    freeze_existing_experts=True,
+                    freeze_existing_router=True,
+                )
+            else:
+                freeze_preexisting_moe_params(
+                    target_shard,
+                    args.shared_router_hybrid_expand_from_num_experts,
+                    True,
+                    True,
+                )
+            if torch.distributed.get_rank() == 0:
+                audit_dir = os.path.join(args.save, "expansion_audit")
+                os.makedirs(audit_dir, exist_ok=True)
+                audit_path = os.path.join(
+                    audit_dir,
+                    "shared_router_hybrid_expand_"
+                    f"{args.shared_router_hybrid_expand_from_num_experts}_to_{args.num_experts}.json",
+                )
+                with open(audit_path, "w", encoding="utf-8") as f:
+                    json.dump(
+                        inspect_moe_expansion(
+                            target_shard,
+                            source_shard,
+                            args.shared_router_hybrid_expand_from_num_experts,
+                        ),
+                        f,
+                        indent=2,
+                    )
+
+        del source_model
+        set_old_moe_distill_teacher(None)
+        args.iteration = 0 if args.finetune else 1
+        if (args.fp16 or args.bf16) and optimizer is not None:
+            optimizer.reload_model_params()
+        print_rank_0(
+            "Expanded shared-router hybrid checkpoint from "
+            f"{args.shared_router_hybrid_expand_from_num_experts} to {args.num_experts} experts."
+        )
 
     if (
         args.moe_use_upcycling
         or args.moe_expand_from_num_experts is not None
         or args.attn_lora_expand_from_num_experts is not None
+        or args.shared_router_hybrid_expand_from_num_experts is not None
     ):
         pass
     elif (args.load is not None or args.pretrained_checkpoint is not None):
@@ -1156,9 +1255,38 @@ def setup_model_and_optimizer(model_provider_func,
                 'Resumed expanded attention LoRA checkpoint at iteration '
                 f'{args.iteration} with continual-learning freeze reapplied.'
             )
+        if args.shared_router_hybrid_resume_from_num_experts is not None:
+            assert args.shared_router_hybrid_model, (
+                "--shared-router-hybrid-resume-from-num-experts requires "
+                "--shared-router-hybrid-model."
+            )
+            assert args.shared_router_hybrid_resume_from_num_experts < args.num_experts, (
+                '--shared-router-hybrid-resume-from-num-experts must be smaller than '
+                '--num-experts.'
+            )
+            for target_shard in unwrapped_model:
+                if args.shared_router_hybrid_train_new_experts_and_router_only:
+                    freeze_all_but_new_moe_params(
+                        target_shard,
+                        args.shared_router_hybrid_resume_from_num_experts,
+                        freeze_existing_experts=True,
+                        freeze_existing_router=True,
+                    )
+                else:
+                    freeze_preexisting_moe_params(
+                        target_shard,
+                        args.shared_router_hybrid_resume_from_num_experts,
+                        True,
+                        True,
+                    )
+            print_rank_0(
+                'Resumed expanded shared-router hybrid checkpoint at iteration '
+                f'{args.iteration} with continual-learning freeze reapplied.'
+            )
         if (
             args.moe_resume_from_num_experts is None
             and args.attn_lora_resume_from_num_experts is None
+            and args.shared_router_hybrid_resume_from_num_experts is None
             and args.moe_old_model_kl_coeff > 0
             and args.moe_old_model_kl_load
         ):
