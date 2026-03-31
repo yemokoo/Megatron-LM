@@ -1,34 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-cd "$PROJECT_ROOT"
-
-resolve_python() {
-    if [ -x "$PROJECT_ROOT/.conda/envs/flame3090/bin/python" ]; then
-        echo "$PROJECT_ROOT/.conda/envs/flame3090/bin/python"
-        return
-    fi
-    if command -v python >/dev/null 2>&1; then
-        command -v python
-        return
-    fi
-    command -v python3
-}
-
-export PYTHON_BIN="${PYTHON_BIN:-$(resolve_python)}"
-
-build_data_path() {
-    "$PYTHON_BIN" - "$@" <<'PY'
-import sys
-from pathlib import Path
-parts = []
-for dataset_dir in sys.argv[1:]:
-    for bin_path in sorted(Path(dataset_dir).glob('*.bin')):
-        parts.extend(['1.0', str(bin_path.with_suffix(''))])
-print(' '.join(parts))
-PY
-}
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
 export RUN_ID="${RUN_ID:-wiki-shared-router-hybrid-pretrain-local-bf16-$(date -u +%Y%m%d-%H%M%S)}"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
@@ -74,17 +47,17 @@ export LR_WSD_DECAY_ITERS="${LR_WSD_DECAY_ITERS:-}"
 export MODEL_CONFIG_SCRIPT="${MODEL_CONFIG_SCRIPT:-configs/model/flame-shared-router-hybrid-experts.sh}"
 export DATASET_SPLIT="${DATASET_SPLIT:-100,0,0}"
 
-export TRAIN_DATASET="${TRAIN_DATASET:-$LOCAL_DATASET/wikipedia-full/tokenized/EleutherAI/pythia-12b-step1800-train-exact}"
+export TRAIN_DATASET="${TRAIN_DATASET:-$(dataset_dir_for_task wiki)}"
 export TRAIN_WEIGHTS="${TRAIN_WEIGHTS:-$LOCAL_WEIGHTS/a100/wiki-shared-router-hybrid-pretrain-local/$RUN_ID}"
 export LOG_DIR="${LOG_DIR:-$TRAIN_WEIGHTS/logs}"
 export RUN_METADATA="${RUN_METADATA:-$LOG_DIR/run_metadata.json}"
 export DATASET_NAME="${DATASET_NAME:-wiki_exact}"
 export DATASET_SOURCE="${DATASET_SOURCE:-Wikipedia exact train}"
-export PROBE_DATASET="${PROBE_DATASET:-$LOCAL_DATASET/wikipedia-full/tokenized/EleutherAI/pythia-12b-step1800-test-fullremainder-exact}"
+export PROBE_DATASET="${PROBE_DATASET:-$(probe_dir_for_task wiki)}"
 export PROBE_NAME="${PROBE_NAME:-wiki_probe}"
 export PROBE_EVAL_ITERS="${PROBE_EVAL_ITERS:-25}"
 export PROBE_EVAL_INTERVAL="${PROBE_EVAL_INTERVAL:-100}"
-export SECONDARY_PROBE_DATASET="${SECONDARY_PROBE_DATASET:-$LOCAL_DATASET/python-code-full/tokenized/EleutherAI/pythia-12b-step1800-test-matchwiki-exact}"
+export SECONDARY_PROBE_DATASET="${SECONDARY_PROBE_DATASET:-$(probe_dir_for_task code)}"
 export SECONDARY_PROBE_NAME="${SECONDARY_PROBE_NAME:-code_probe}"
 export SECONDARY_PROBE_EVAL_ITERS="${SECONDARY_PROBE_EVAL_ITERS:-25}"
 export SECONDARY_PROBE_EVAL_INTERVAL="${SECONDARY_PROBE_EVAL_INTERVAL:-100}"
