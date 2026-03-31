@@ -21,7 +21,6 @@ from megatron.core.datasets.gpt_dataset import GPTDataset, GPTDatasetConfig, Moc
 from megatron.core.datasets.utils import get_blend_from_list
 from megatron.core.transformer.moe.experts import GroupedMLP, SequentialMLP
 from megatron.core.transformer.moe.router import Router
-from megatron.core.transformer.qv_lora_attention import QVLoraExpertRouter
 from megatron.training import get_args, get_model, get_tokenizer
 from megatron.training.checkpointing import load_checkpoint
 from megatron.training.initialize import initialize_megatron
@@ -135,13 +134,14 @@ def install_hidden_collection_hooks(model, model_kind, hidden_store, max_tokens)
                 )
     else:
         for name, module in model.named_modules():
-            if not isinstance(module, QVLoraExpertRouter):
+            router_module = getattr(module, "qv_lora_experts", None)
+            if router_module is None:
                 continue
             layer_key = infer_layer_key(name, module)
             if layer_key is None:
                 continue
             hooks.append(
-                module.register_forward_pre_hook(
+                router_module.register_forward_pre_hook(
                     lambda mod, inputs, layer=layer_key: store_hidden(
                         hidden_store, int(layer.split("_")[-1]), inputs[0], max_tokens
                     )
@@ -293,12 +293,13 @@ def compute_ffn_outputs(experts_module, hidden_cpu):
 def collect_lora_modules(model):
     modules = {}
     for name, module in model.named_modules():
-        if not isinstance(module, QVLoraExpertRouter):
+        router_module = getattr(module, "qv_lora_experts", None)
+        if router_module is None:
             continue
         layer_key = infer_layer_key(name, module)
         if layer_key is None:
             continue
-        modules[layer_key] = module
+        modules[layer_key] = router_module
     return modules
 
 
