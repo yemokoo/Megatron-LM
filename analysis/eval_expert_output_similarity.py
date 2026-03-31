@@ -120,6 +120,25 @@ def infer_layer_key(name, module):
     return None
 
 
+def collect_lora_module_entries(model):
+    modules = {}
+    for name, module in model.named_modules():
+        expert_module = getattr(module, "qv_lora_experts", None)
+        if expert_module is None:
+            expert_module = getattr(module, "shared_qv_lora_experts", None)
+        if expert_module is None:
+            continue
+        layer_key = infer_layer_key(name, module)
+        if layer_key is None:
+            continue
+        modules[layer_key] = {
+            "attention_module": module,
+            "expert_module": expert_module,
+            "module_name": name,
+        }
+    return modules
+
+
 def install_hidden_collection_hooks(model, model_kind, hidden_store, max_tokens):
     hooks = []
     if model_kind == "ffn":
@@ -133,15 +152,11 @@ def install_hidden_collection_hooks(model, model_kind, hidden_store, max_tokens)
                     )
                 )
     else:
-        for name, module in model.named_modules():
-            router_module = getattr(module, "qv_lora_experts", None)
-            if router_module is None:
-                continue
-            layer_key = infer_layer_key(name, module)
-            if layer_key is None:
-                continue
+        lora_entries = collect_lora_module_entries(model)
+        for layer_key, payload in lora_entries.items():
+            attention_module = payload["attention_module"]
             hooks.append(
-                router_module.register_forward_pre_hook(
+                attention_module.register_forward_pre_hook(
                     lambda mod, inputs, layer=layer_key: store_hidden(
                         hidden_store, int(layer.split("_")[-1]), inputs[0], max_tokens
                     )
@@ -175,6 +190,11 @@ def collect_hidden_states(model):
             _ = model(tokens, position_ids, attention_mask, labels=None, runtime_gather_output=False)
 
     remove_hooks(hooks)
+    if args.model_kind == "lora" and not hidden_store:
+        raise RuntimeError(
+            "No LoRA hidden states were collected. This usually means the LoRA attention spec "
+            "was not enabled when building the model."
+        )
     return hidden_store
 
 
@@ -291,20 +311,14 @@ def compute_ffn_outputs(experts_module, hidden_cpu):
 
 
 def collect_lora_modules(model):
-    modules = {}
-    for name, module in model.named_modules():
-        router_module = getattr(module, "qv_lora_experts", None)
-        if router_module is None:
-            continue
-        layer_key = infer_layer_key(name, module)
-        if layer_key is None:
-            continue
-        modules[layer_key] = router_module
-    return modules
+    return {
+        layer_key: payload["expert_module"]
+        for layer_key, payload in collect_lora_module_entries(model).items()
+    }
 
 
 def compute_lora_outputs(router_module, hidden_cpu):
-    hidden = hidden_cpu.to(router_module.router_weight.device).float()
+    hidden = hidden_cpu.to(next(router_module.parameters()).device).float()
     outputs = []
     for expert_id in range(router_module.num_experts):
         q_low_rank = hidden @ router_module.q_lora_a[expert_id].float()
@@ -529,6 +543,11 @@ def main():
             )
     else:
         modules = collect_lora_modules(model)
+        if not modules:
+            raise RuntimeError(
+                "No LoRA expert modules were found in the loaded model. "
+                "Ensure the LoRA spec is enabled during evaluation."
+            )
         for layer_key, hidden in sorted(hidden_store.items()):
             router_module = modules.get(layer_key)
             if router_module is None:
@@ -557,6 +576,11 @@ def main():
                     "expert_projection_2d": [[float(v) for v in row] for row in projection_2d.tolist()],
                     "summary": summarize_similarity(cosine, args.source_num_experts),
                 }
+            )
+        if not layer_results:
+            raise RuntimeError(
+                "LoRA expert similarity produced no layer results. "
+                "Hidden states were collected, but no matching LoRA expert layers were found."
             )
 
     plot_layers = choose_plot_layers(layer_results, args.plot_layers)

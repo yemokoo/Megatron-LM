@@ -61,6 +61,9 @@ run_one() {
   local master_port="$3"
   local out_dir="$OUTPUT_ROOT/${dataset_name}"
   local extra_args=()
+  if [ "$MODEL_KIND" = "lora" ]; then
+    extra_args+=(--spec megatron.core.models.gpt.qv_lora_layer_specs gpt_qv_lora_local_spec)
+  fi
   if [ "$SAVE_HIDDEN_CACHE" = "1" ]; then
     extra_args+=(--save-hidden-cache)
   fi
