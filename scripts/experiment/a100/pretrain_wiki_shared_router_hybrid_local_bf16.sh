@@ -89,6 +89,10 @@ export SECONDARY_PROBE_NAME="${SECONDARY_PROBE_NAME:-code_probe}"
 export SECONDARY_PROBE_EVAL_ITERS="${SECONDARY_PROBE_EVAL_ITERS:-25}"
 export SECONDARY_PROBE_EVAL_INTERVAL="${SECONDARY_PROBE_EVAL_INTERVAL:-100}"
 export SECONDARY_PROBE_STEP_OFFSET="${SECONDARY_PROBE_STEP_OFFSET:-0}"
+export WANDB_STEP_OFFSET="${WANDB_STEP_OFFSET:-0}"
+export WANDB_PROJECT="${WANDB_PROJECT:-}"
+export WANDB_EXP_NAME="${WANDB_EXP_NAME:-$RUN_ID}"
+export WANDB_SAVE_DIR="${WANDB_SAVE_DIR:-$TRAIN_WEIGHTS/wandb}"
 
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
 export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=true
@@ -163,6 +167,16 @@ PY
 
 source "$MODEL_CONFIG_SCRIPT"
 
+WANDB_ARGS=()
+if [ -n "$WANDB_PROJECT" ]; then
+    WANDB_ARGS+=(
+        --wandb-project "$WANDB_PROJECT"
+        --wandb-exp-name "$WANDB_EXP_NAME"
+        --wandb-save-dir "$WANDB_SAVE_DIR"
+        --wandb-step-offset "$WANDB_STEP_OFFSET"
+    )
+fi
+
 torchrun \
     --nproc_per_node "$NPROC_PER_NODE" \
     --master_addr "$MASTER_ADDR" \
@@ -203,4 +217,5 @@ torchrun \
     --secondary-probe-eval-iters "$SECONDARY_PROBE_EVAL_ITERS" \
     --secondary-probe-eval-interval "$SECONDARY_PROBE_EVAL_INTERVAL" \
     --secondary-probe-step-offset "$SECONDARY_PROBE_STEP_OFFSET" \
-    --secondary-probe-data-path $(build_data_path "$SECONDARY_PROBE_DATASET")
+    --secondary-probe-data-path $(build_data_path "$SECONDARY_PROBE_DATASET") \
+    "${WANDB_ARGS[@]}"
