@@ -140,8 +140,19 @@ def _load_shared_router_hybrid_source_model(
     model_provider_func, model_type, checkpointing_context, num_existing_experts
 ):
     args = get_args()
+    original_load = args.load
+    original_finetune = args.finetune
+    original_no_load_optim = args.no_load_optim
+    original_no_load_rng = args.no_load_rng
+    original_consumed_train_samples = args.consumed_train_samples
+    original_consumed_valid_samples = args.consumed_valid_samples
     target_num_experts = args.num_experts
     target_attn_lora_num_experts = args.attn_lora_num_experts
+    args.finetune = True
+    args.no_load_optim = True
+    args.no_load_rng = True
+    args.consumed_train_samples = 0
+    args.consumed_valid_samples = 0
     args.num_experts = num_existing_experts
     args.attn_lora_num_experts = num_existing_experts
     source_model = get_model(model_provider_func, model_type, wrap_with_ddp=False)
@@ -153,6 +164,12 @@ def _load_shared_router_hybrid_source_model(
         None,
         checkpointing_context=checkpointing_context,
     )
+    args.load = original_load
+    args.finetune = original_finetune
+    args.no_load_optim = original_no_load_optim
+    args.no_load_rng = original_no_load_rng
+    args.consumed_train_samples = original_consumed_train_samples
+    args.consumed_valid_samples = original_consumed_valid_samples
     return source_model
 
 
