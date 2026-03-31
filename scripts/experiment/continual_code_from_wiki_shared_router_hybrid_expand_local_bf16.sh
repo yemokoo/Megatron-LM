@@ -3,6 +3,8 @@ set -euo pipefail
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/a100/common.sh"
 
+export PYTHONPATH="$PROJECT_ROOT/Megatron-LM${PYTHONPATH:+:$PYTHONPATH}"
+
 resolve_stage1_dir() {
     "$PYTHON_BIN" - <<'PY'
 import json

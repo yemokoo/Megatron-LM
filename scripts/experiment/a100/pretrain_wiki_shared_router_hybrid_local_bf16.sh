@@ -3,6 +3,8 @@ set -euo pipefail
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
+export PYTHONPATH="$PROJECT_ROOT/Megatron-LM${PYTHONPATH:+:$PYTHONPATH}"
+
 export RUN_ID="${RUN_ID:-wiki-shared-router-hybrid-pretrain-local-bf16-$(date -u +%Y%m%d-%H%M%S)}"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
 export NPROC_PER_NODE="${NPROC_PER_NODE:-2}"
