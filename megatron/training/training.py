@@ -1638,48 +1638,56 @@ def training_log(loss_dict, total_loss_dict, learning_rate, decoupled_learning_r
         log_string = f" [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]"
         log_string += ' iteration {:8d}/{:8d} |'.format(
             iteration, args.train_iters)
-        log_string += ' consumed samples: {:12d} |'.format(
-            args.consumed_train_samples)
-        if args.skipped_train_samples > 0:
-            log_string += ' skipped samples: {:12d} |'.format(
-                args.skipped_train_samples)
-        log_string += ' elapsed time per iteration (ms): {:.1f} |'.format(
-            elapsed_time_per_iteration * 1000.0)
-        if args.log_throughput:
-            log_string += f' throughput per GPU (TFLOP/s/GPU): {throughput:.1f} |'
-            if args.log_timers_to_tensorboard:
-                if writer:
-                    writer.add_scalar('throughput', throughput, iteration)
-                if wandb_writer:
-                    wandb_writer.log({'throughput': throughput}, wandb_iteration)
-        # Decoupled_learning_rate should be not None only on first and last pipeline stage.
-        log_string += f' learning rate: {learning_rate:.6E} |'
-        if args.decoupled_lr is not None and (mpu.is_pipeline_first_stage(ignore_virtual=True) or
-                                              mpu.is_pipeline_last_stage(ignore_virtual=True)):
-            assert decoupled_learning_rate is not None
-            log_string += f' decoupled learning rate: {decoupled_learning_rate:.6E} |'
+        if args.train_log_step_time_only:
+            log_string += ' elapsed time per iteration (ms): {:.1f} |'.format(
+                elapsed_time_per_iteration * 1000.0
+            )
+            for key in total_loss_dict:
+                if key not in [advanced_iters_key, skipped_iters_key, nan_iters_key]:
+                    total_loss_dict[key] = torch.tensor([0.0], dtype=torch.float, device='cuda')
         else:
-            assert decoupled_learning_rate is None
-        log_string += f' global batch size: {batch_size:5d} |'
-        for key in total_loss_dict:
-            if key not in [advanced_iters_key, skipped_iters_key,
-                           nan_iters_key]:
-                avg = total_loss_dict[key].item() / \
-                      float(max(1, total_loss_dict[advanced_iters_key]))
-                if avg > 0.0:
-                    log_string += ' {}: {:.6E} |'.format(key, avg)
-                total_loss_dict[key] = torch.tensor([0.0], dtype=torch.float, device='cuda')
-        log_string += f' loss scale: {loss_scale:.1f} |'
-        if grad_norm is not None:
-            log_string += f' grad norm: {grad_norm:.3f} |'
-        if num_zeros_in_grad is not None:
-            log_string += f' num zeros: {num_zeros_in_grad} |'
-        if params_norm is not None:
-            log_string += f' params norm: {params_norm:.3f} |'
-        log_string += ' number of skipped iterations: {:3d} |'.format(
-            total_loss_dict[skipped_iters_key])
-        log_string += ' number of nan iterations: {:3d} |'.format(
-            total_loss_dict[nan_iters_key])
+            log_string += ' consumed samples: {:12d} |'.format(
+                args.consumed_train_samples)
+            if args.skipped_train_samples > 0:
+                log_string += ' skipped samples: {:12d} |'.format(
+                    args.skipped_train_samples)
+            log_string += ' elapsed time per iteration (ms): {:.1f} |'.format(
+                elapsed_time_per_iteration * 1000.0)
+            if args.log_throughput:
+                log_string += f' throughput per GPU (TFLOP/s/GPU): {throughput:.1f} |'
+                if args.log_timers_to_tensorboard:
+                    if writer:
+                        writer.add_scalar('throughput', throughput, iteration)
+                    if wandb_writer:
+                        wandb_writer.log({'throughput': throughput}, wandb_iteration)
+            # Decoupled_learning_rate should be not None only on first and last pipeline stage.
+            log_string += f' learning rate: {learning_rate:.6E} |'
+            if args.decoupled_lr is not None and (mpu.is_pipeline_first_stage(ignore_virtual=True) or
+                                                  mpu.is_pipeline_last_stage(ignore_virtual=True)):
+                assert decoupled_learning_rate is not None
+                log_string += f' decoupled learning rate: {decoupled_learning_rate:.6E} |'
+            else:
+                assert decoupled_learning_rate is None
+            log_string += f' global batch size: {batch_size:5d} |'
+            for key in total_loss_dict:
+                if key not in [advanced_iters_key, skipped_iters_key,
+                               nan_iters_key]:
+                    avg = total_loss_dict[key].item() / \
+                          float(max(1, total_loss_dict[advanced_iters_key]))
+                    if avg > 0.0:
+                        log_string += ' {}: {:.6E} |'.format(key, avg)
+                    total_loss_dict[key] = torch.tensor([0.0], dtype=torch.float, device='cuda')
+            log_string += f' loss scale: {loss_scale:.1f} |'
+            if grad_norm is not None:
+                log_string += f' grad norm: {grad_norm:.3f} |'
+            if num_zeros_in_grad is not None:
+                log_string += f' num zeros: {num_zeros_in_grad} |'
+            if params_norm is not None:
+                log_string += f' params norm: {params_norm:.3f} |'
+            log_string += ' number of skipped iterations: {:3d} |'.format(
+                total_loss_dict[skipped_iters_key])
+            log_string += ' number of nan iterations: {:3d} |'.format(
+                total_loss_dict[nan_iters_key])
         total_loss_dict[advanced_iters_key] = 0
         total_loss_dict[skipped_iters_key] = 0
         total_loss_dict[nan_iters_key] = 0
