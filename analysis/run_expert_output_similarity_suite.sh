@@ -29,15 +29,18 @@ export MODEL_KIND="${MODEL_KIND:-ffn}"
 export MODEL_RUN_DIR="${MODEL_RUN_DIR:-}"
 export SOURCE_NUM_EXPERTS="${SOURCE_NUM_EXPERTS:-4}"
 export GPU_DEVICE="${GPU_DEVICE:-0}"
-export MICRO_BATCH_SIZE="${MICRO_BATCH_SIZE:-2}"
-export GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-2}"
+export MICRO_BATCH_SIZE="${MICRO_BATCH_SIZE:-64}"
+export GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-2304}"
 export SEQ_LENGTH="${SEQ_LENGTH:-512}"
-export MAX_BATCHES="${MAX_BATCHES:-16}"
-export MAX_TOKENS_PER_LAYER="${MAX_TOKENS_PER_LAYER:-16384}"
+export MAX_BATCHES="${MAX_BATCHES:-2}"
+export MAX_TOKENS_PER_LAYER="${MAX_TOKENS_PER_LAYER:-65536}"
 export PLOT_LAYERS="${PLOT_LAYERS:-}"
 export SAVE_HIDDEN_CACHE="${SAVE_HIDDEN_CACHE:-1}"
+export SAVE_RAW_EXPERT_OUTPUTS="${SAVE_RAW_EXPERT_OUTPUTS:-1}"
+export RAW_OUTPUT_DTYPE="${RAW_OUTPUT_DTYPE:-bf16}"
 export HEATMAP_VMIN="${HEATMAP_VMIN:--0.25}"
 export HEATMAP_VMAX="${HEATMAP_VMAX:-0.75}"
+export SAMPLE_SEED="${SAMPLE_SEED:-1234}"
 export MASTER_PORT_BASE="${MASTER_PORT_BASE:-29500}"
 export WIKI_EVAL_DATASET="${WIKI_EVAL_DATASET:-$PROJECT_ROOT/data/wiki/test}"
 export CODE_EVAL_DATASET="${CODE_EVAL_DATASET:-$PROJECT_ROOT/data/code/test}"
@@ -61,6 +64,9 @@ run_one() {
   if [ "$SAVE_HIDDEN_CACHE" = "1" ]; then
     extra_args+=(--save-hidden-cache)
   fi
+  if [ "$SAVE_RAW_EXPERT_OUTPUTS" = "1" ]; then
+    extra_args+=(--save-raw-expert-outputs --raw-output-dtype "$RAW_OUTPUT_DTYPE")
+  fi
   CUDA_VISIBLE_DEVICES="$GPU_DEVICE" torchrun --nproc_per_node 1 --master_port "$master_port" \
     analysis/eval_expert_output_similarity.py \
     --model-kind "$MODEL_KIND" \
@@ -68,6 +74,7 @@ run_one() {
     --compare-label "${MODEL_KIND}_${dataset_name}_expert_output_similarity" \
     --output-dir "$out_dir" \
     --source-num-experts "$SOURCE_NUM_EXPERTS" \
+    --seed "$SAMPLE_SEED" \
     --micro-batch-size "$MICRO_BATCH_SIZE" \
     --global-batch-size "$GLOBAL_BATCH_SIZE" \
     --seq-length "$SEQ_LENGTH" \
@@ -81,6 +88,7 @@ run_one() {
     --dataset-split 100,0,0 \
     --dataset-split-name train \
     --consumed-samples 0 \
+    --dataloader-type cyclic \
     --transformer-impl local \
     --no-persist-layer-norm \
     --no-gradient-accumulation-fusion \

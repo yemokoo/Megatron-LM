@@ -49,6 +49,13 @@ def add_args(parser):
     group.add_argument("--plot-layers", type=str, default="")
     group.add_argument("--save-hidden-cache", action="store_true")
     group.add_argument("--hidden-cache-filename", type=str, default="hidden_states.pt")
+    group.add_argument("--save-raw-expert-outputs", action="store_true")
+    group.add_argument(
+        "--raw-output-dtype",
+        type=str,
+        default="bf16",
+        choices=("fp32", "fp16", "bf16"),
+    )
     group.add_argument("--heatmap-vmin", type=float, default=-0.25)
     group.add_argument("--heatmap-vmax", type=float, default=0.75)
     return parser
@@ -58,7 +65,9 @@ def build_eval_dataloader():
     args = get_args()
     split_name_to_index = {"train": 0, "valid": 1, "test": 2}
     split_idx = split_name_to_index[args.dataset_split_name]
-    requested_samples = args.consumed_samples + args.max_batches * args.global_batch_size
+    requested_samples = (
+        args.consumed_samples + args.max_batches * args.micro_batch_size * args.data_parallel_size
+    )
     config = GPTDatasetConfig(
         random_seed=args.seed,
         sequence_length=args.seq_length,
@@ -175,6 +184,46 @@ def mean_tokenwise_cosine_similarity_matrix(outputs: torch.Tensor):
     normalized = F.normalize(outputs, dim=-1)
     per_token = torch.einsum("etd,ftd->eft", normalized, normalized)
     return per_token.mean(dim=-1)
+
+
+def aggregate_expert_outputs(outputs: torch.Tensor):
+    if outputs.dim() != 3:
+        raise ValueError(f"Expected [num_experts, num_tokens, output_dim], got {tuple(outputs.shape)}")
+    return outputs.sum(dim=1)
+
+
+def project_expert_vectors_2d(vectors: torch.Tensor):
+    vectors = vectors.float()
+    if vectors.shape[0] == 0:
+        return vectors.new_zeros((0, 2))
+    if vectors.shape[0] == 1:
+        return vectors.new_zeros((1, 2))
+
+    centered = vectors - vectors.mean(dim=0, keepdim=True)
+    q = min(2, centered.shape[0], centered.shape[1])
+    _u, _s, v = torch.pca_lowrank(centered, q=q, center=False)
+    coords = centered @ v[:, :q]
+    if q == 1:
+        coords = torch.cat([coords, torch.zeros_like(coords)], dim=1)
+    return coords[:, :2].cpu()
+
+
+def cast_storage_dtype(tensor: torch.Tensor, dtype_name: str):
+    if dtype_name == "fp32":
+        return tensor.float().cpu()
+    if dtype_name == "fp16":
+        return tensor.to(torch.float16).cpu()
+    if dtype_name == "bf16":
+        return tensor.to(torch.bfloat16).cpu()
+    raise ValueError(f"Unsupported storage dtype: {dtype_name}")
+
+
+def save_raw_expert_outputs(output_dir: Path, layer_key: str, outputs: torch.Tensor, dtype_name: str):
+    raw_dir = output_dir / "raw_expert_outputs"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    file_path = raw_dir / f"{layer_key}_expert_outputs.pt"
+    torch.save(cast_storage_dtype(outputs, dtype_name), file_path)
+    return file_path.relative_to(output_dir).as_posix()
 
 
 def masked_mean(matrix: torch.Tensor, row_slice: slice, col_slice: slice, diagonal: bool):
@@ -311,6 +360,20 @@ def save_layer_csvs(layer_results, output_dir: Path):
             writer.writerow(row)
 
 
+def save_projection_csvs(projection_cache, output_dir: Path):
+    csv_dir = output_dir / "layer_tables"
+    csv_dir.mkdir(parents=True, exist_ok=True)
+    for layer, payload in projection_cache.items():
+        coords = payload["projection_2d"]
+        with (csv_dir / f"{layer}_expert_projection_2d.csv").open(
+            "w", encoding="utf-8", newline=""
+        ) as f:
+            writer = csv.writer(f)
+            writer.writerow(["expert", "x", "y"])
+            for expert_idx, coord in enumerate(coords.tolist()):
+                writer.writerow([f"e{expert_idx}", f"{coord[0]:.6f}", f"{coord[1]:.6f}"])
+
+
 def save_heatmaps(layer_results, output_dir: Path, title_prefix: str, plot_layers, vmin: float, vmax: float):
     selected = [item for item in layer_results if item["layer"] in plot_layers]
     if not selected:
@@ -357,6 +420,47 @@ def save_heatmaps(layer_results, output_dir: Path, title_prefix: str, plot_layer
     plt.close(fig)
 
 
+def save_scatter_plots(layer_results, output_dir: Path, title_prefix: str, plot_layers, old_expert_count: int):
+    selected = [item for item in layer_results if item["layer"] in plot_layers]
+    if not selected:
+        return
+    cols = min(3, len(selected))
+    rows = math.ceil(len(selected) / cols)
+    fig, axes = plt.subplots(rows, cols, figsize=(5.2 * cols, 5.0 * rows))
+    if hasattr(axes, "reshape"):
+        flat_axes = list(axes.reshape(-1))
+    else:
+        flat_axes = [axes]
+
+    for ax_idx, ax in enumerate(flat_axes):
+        if ax_idx >= len(selected):
+            ax.axis("off")
+            continue
+        item = selected[ax_idx]
+        coords = torch.tensor(item["expert_projection_2d"])
+        num_experts = coords.shape[0]
+        for expert_idx in range(num_experts):
+            color = "#4c78a8" if expert_idx < old_expert_count else "#e45756"
+            ax.scatter(coords[expert_idx, 0], coords[expert_idx, 1], s=80, color=color)
+            ax.text(
+                coords[expert_idx, 0],
+                coords[expert_idx, 1],
+                f"e{expert_idx}",
+                fontsize=9,
+                ha="left",
+                va="bottom",
+            )
+        ax.set_title(item["layer"])
+        ax.set_xlabel("PC1")
+        ax.set_ylabel("PC2")
+        ax.axhline(0.0, color="lightgray", linewidth=0.8)
+        ax.axvline(0.0, color="lightgray", linewidth=0.8)
+    fig.suptitle(f"{title_prefix} (aggregate token-sum outputs)")
+    fig.tight_layout()
+    fig.savefig(output_dir / "expert_output_similarity_scatter.png", dpi=200)
+    plt.close(fig)
+
+
 def choose_plot_layers(layer_results, spec):
     if spec.strip():
         return [f"layer_{int(x):02d}" for x in spec.split(",") if x.strip()]
@@ -388,6 +492,8 @@ def main():
     if args.save_hidden_cache:
         torch.save(hidden_store, output_dir / args.hidden_cache_filename)
     layer_results = []
+    aggregate_cache = {}
+    projection_cache = {}
 
     if args.model_kind == "ffn":
         modules = collect_ffn_modules(model)
@@ -396,14 +502,27 @@ def main():
             if experts_module is None:
                 continue
             outputs = compute_ffn_outputs(experts_module, hidden)
+            raw_output_file = None
+            if args.save_raw_expert_outputs:
+                raw_output_file = save_raw_expert_outputs(
+                    output_dir, layer_key, outputs, args.raw_output_dtype
+                )
             cosine = mean_tokenwise_cosine_similarity_matrix(outputs).cpu()
+            aggregate_vectors = aggregate_expert_outputs(outputs).cpu()
+            projection_2d = project_expert_vectors_2d(aggregate_vectors)
+            aggregate_cache[layer_key] = aggregate_vectors
+            projection_cache[layer_key] = {
+                "projection_2d": projection_2d,
+            }
             layer_results.append(
                 {
                     "layer": layer_key,
                     "num_tokens": int(hidden.shape[0]),
                     "num_experts": int(outputs.shape[0]),
                     "output_dim": int(outputs.shape[-1]),
+                    "raw_expert_output_file": raw_output_file,
                     "mean_tokenwise_cosine_similarity": [[float(v) for v in row] for row in cosine.tolist()],
+                    "expert_projection_2d": [[float(v) for v in row] for row in projection_2d.tolist()],
                     "summary": summarize_similarity(cosine, args.source_num_experts),
                 }
             )
@@ -414,20 +533,35 @@ def main():
             if router_module is None:
                 continue
             outputs = compute_lora_outputs(router_module, hidden)
+            raw_output_file = None
+            if args.save_raw_expert_outputs:
+                raw_output_file = save_raw_expert_outputs(
+                    output_dir, layer_key, outputs, args.raw_output_dtype
+                )
             cosine = mean_tokenwise_cosine_similarity_matrix(outputs).cpu()
+            aggregate_vectors = aggregate_expert_outputs(outputs).cpu()
+            projection_2d = project_expert_vectors_2d(aggregate_vectors)
+            aggregate_cache[layer_key] = aggregate_vectors
+            projection_cache[layer_key] = {
+                "projection_2d": projection_2d,
+            }
             layer_results.append(
                 {
                     "layer": layer_key,
                     "num_tokens": int(hidden.shape[0]),
                     "num_experts": int(outputs.shape[0]),
                     "output_dim": int(outputs.shape[-1]),
+                    "raw_expert_output_file": raw_output_file,
                     "mean_tokenwise_cosine_similarity": [[float(v) for v in row] for row in cosine.tolist()],
+                    "expert_projection_2d": [[float(v) for v in row] for row in projection_2d.tolist()],
                     "summary": summarize_similarity(cosine, args.source_num_experts),
                 }
             )
 
     plot_layers = choose_plot_layers(layer_results, args.plot_layers)
     save_layer_csvs(layer_results, output_dir)
+    save_projection_csvs(projection_cache, output_dir)
+    torch.save(aggregate_cache, output_dir / "expert_output_aggregate_vectors.pt")
     result = {
         "label": args.compare_label,
         "model_kind": args.model_kind,
@@ -435,13 +569,29 @@ def main():
         "iteration": args.iteration,
         "source_num_experts": args.source_num_experts,
         "max_batches": args.max_batches,
+        "micro_batch_size": args.micro_batch_size,
+        "global_batch_size": args.global_batch_size,
+        "data_parallel_size": args.data_parallel_size,
+        "requested_samples": args.max_batches * args.micro_batch_size * args.data_parallel_size,
+        "requested_token_count": (
+            args.max_batches * args.micro_batch_size * args.data_parallel_size * args.seq_length
+        ),
+        "sample_seed": args.seed,
+        "sampling_policy": (
+            "deterministic random subset from the provided test dataset via GPTDataset train-index "
+            "construction with a fixed seed"
+        ),
         "max_tokens_per_layer": args.max_tokens_per_layer,
         "similarity_type": "mean_tokenwise_cosine",
         "same_hidden_input_per_expert": True,
         "saved_hidden_cache": bool(args.save_hidden_cache),
         "hidden_cache_filename": args.hidden_cache_filename if args.save_hidden_cache else None,
-        "raw_expert_outputs_saved": False,
+        "raw_expert_outputs_saved": bool(args.save_raw_expert_outputs),
+        "raw_expert_output_dtype": args.raw_output_dtype if args.save_raw_expert_outputs else None,
+        "raw_expert_output_dir": "raw_expert_outputs" if args.save_raw_expert_outputs else None,
         "recompute_note": "Reuse hidden_states.pt with the checkpoint to compute alternative metrics without rerunning dataset forward.",
+        "aggregate_vector_method": "token_sum",
+        "aggregate_vector_cache_filename": "expert_output_aggregate_vectors.pt",
         "heatmap_vmin": args.heatmap_vmin,
         "heatmap_vmax": args.heatmap_vmax,
         "layer_csv_dir": "layer_tables",
@@ -459,6 +609,13 @@ def main():
         plot_layers,
         args.heatmap_vmin,
         args.heatmap_vmax,
+    )
+    save_scatter_plots(
+        layer_results,
+        output_dir,
+        f"Expert output projection: {args.compare_label}",
+        plot_layers,
+        args.source_num_experts,
     )
     if torch.distributed.get_rank() == 0:
         print(json.dumps(result, indent=2))
