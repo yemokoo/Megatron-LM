@@ -121,12 +121,15 @@ export SECONDARY_PROBE_EVAL_ITERS="${SECONDARY_PROBE_EVAL_ITERS:-25}"
 export SECONDARY_PROBE_EVAL_INTERVAL="${SECONDARY_PROBE_EVAL_INTERVAL:-100}"
 export PROBE_STEP_OFFSET="${PROBE_STEP_OFFSET:-}"
 export SECONDARY_PROBE_STEP_OFFSET="${SECONDARY_PROBE_STEP_OFFSET:-}"
+export RUN_INITIAL_PROBE_EVAL="${RUN_INITIAL_PROBE_EVAL:-1}"
+export RUN_INITIAL_VALID_EVAL="${RUN_INITIAL_VALID_EVAL:-1}"
 export WANDB_STEP_OFFSET="${WANDB_STEP_OFFSET:-}"
 export WANDB_PROJECT="${WANDB_PROJECT:-}"
 export WANDB_EXP_NAME="${WANDB_EXP_NAME:-$RUN_ID}"
 export WANDB_SAVE_DIR="${WANDB_SAVE_DIR:-$TRAIN_WEIGHTS/wandb}"
 export WANDB_RUN_ID="${WANDB_RUN_ID:-$RUN_ID}"
 export WANDB_RESUME="${WANDB_RESUME:-allow}"
+export LOG_SOURCE_PROBE_BASELINE_BEFORE_EXPAND="${LOG_SOURCE_PROBE_BASELINE_BEFORE_EXPAND:-1}"
 
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
 export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=true
@@ -135,6 +138,12 @@ export STAGE1_WEIGHTS_DIR="$(resolve_stage1_dir)"
 export PROBE_STEP_OFFSET="${PROBE_STEP_OFFSET:-$(read_stage1_train_iters)}"
 export SECONDARY_PROBE_STEP_OFFSET="${SECONDARY_PROBE_STEP_OFFSET:-$PROBE_STEP_OFFSET}"
 export WANDB_STEP_OFFSET="${WANDB_STEP_OFFSET:-$PROBE_STEP_OFFSET}"
+export SOURCE_PRIMARY_PROBE_CANDIDATES="${SOURCE_PRIMARY_PROBE_CANDIDATES:-wiki_probe,wiki_a_probe}"
+export SOURCE_SECONDARY_PROBE_CANDIDATES="${SOURCE_SECONDARY_PROBE_CANDIDATES:-code_probe,code_b_probe}"
+
+if [ "$LOG_SOURCE_PROBE_BASELINE_BEFORE_EXPAND" = "1" ] && [ -n "$WANDB_PROJECT" ]; then
+    export RUN_INITIAL_PROBE_EVAL=0
+fi
 
 if [ "$DIRECT_LOCAL_SAVE" = "1" ]; then
     export SSD_TARGET_WEIGHTS="$TRAIN_WEIGHTS"
@@ -208,9 +217,35 @@ if [ -n "$WANDB_PROJECT" ]; then
     )
 fi
 
+if [ "$LOG_SOURCE_PROBE_BASELINE_BEFORE_EXPAND" = "1" ] && [ -n "$WANDB_PROJECT" ]; then
+    echo "logging source-model probe baseline at step $PROBE_STEP_OFFSET before expert expansion"
+    "$PYTHON_BIN" analysis/log_source_probe_baseline_to_wandb.py \
+        --source-run-dir "$STAGE1_WEIGHTS_DIR" \
+        --project "$WANDB_PROJECT" \
+        --run-name "$WANDB_EXP_NAME" \
+        --run-id "$WANDB_RUN_ID" \
+        --resume "$WANDB_RESUME" \
+        --save-dir "$WANDB_SAVE_DIR" \
+        --step "$PROBE_STEP_OFFSET" \
+        --primary-source-candidates "$SOURCE_SECONDARY_PROBE_CANDIDATES" \
+        --primary-target-name "$PROBE_NAME" \
+        --secondary-source-candidates "$SOURCE_PRIMARY_PROBE_CANDIDATES" \
+        --secondary-target-name "$SECONDARY_PROBE_NAME"
+fi
+
 LOG_STYLE_ARGS=()
 if [ "$TRAIN_LOG_STEP_TIME_ONLY" = "1" ]; then
     LOG_STYLE_ARGS+=(--train-log-step-time-only)
+fi
+
+INITIAL_VALID_ARGS=()
+if [ "$RUN_INITIAL_VALID_EVAL" = "1" ]; then
+    INITIAL_VALID_ARGS+=(--run-initial-valid-eval)
+fi
+
+INITIAL_PROBE_ARGS=()
+if [ "$RUN_INITIAL_PROBE_EVAL" = "1" ]; then
+    INITIAL_PROBE_ARGS+=(--run-initial-probe-eval)
 fi
 
 torchrun \
@@ -248,11 +283,16 @@ torchrun \
     --load "$SSD_SOURCE_WEIGHTS" \
     --eval-interval "$EVAL_INTERVAL" \
     --tensorboard-dir "$SSD_TARGET_WEIGHTS" \
+    --no-load-optim \
+    --no-load-rng \
+    --finetune \
+    "${INITIAL_VALID_ARGS[@]}" \
     --probe-name "$PROBE_NAME" \
     --probe-eval-iters "$PROBE_EVAL_ITERS" \
     --probe-eval-interval "$PROBE_EVAL_INTERVAL" \
     --probe-step-offset "$PROBE_STEP_OFFSET" \
     --probe-data-path $(build_data_path "$PROBE_DATASET") \
+    "${INITIAL_PROBE_ARGS[@]}" \
     --secondary-probe-name "$SECONDARY_PROBE_NAME" \
     --secondary-probe-eval-iters "$SECONDARY_PROBE_EVAL_ITERS" \
     --secondary-probe-eval-interval "$SECONDARY_PROBE_EVAL_INTERVAL" \
