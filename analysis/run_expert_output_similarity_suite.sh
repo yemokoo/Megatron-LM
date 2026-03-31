@@ -35,6 +35,9 @@ export SEQ_LENGTH="${SEQ_LENGTH:-512}"
 export MAX_BATCHES="${MAX_BATCHES:-16}"
 export MAX_TOKENS_PER_LAYER="${MAX_TOKENS_PER_LAYER:-16384}"
 export PLOT_LAYERS="${PLOT_LAYERS:-}"
+export SAVE_HIDDEN_CACHE="${SAVE_HIDDEN_CACHE:-1}"
+export HEATMAP_VMIN="${HEATMAP_VMIN:--0.25}"
+export HEATMAP_VMAX="${HEATMAP_VMAX:-0.75}"
 export MASTER_PORT_BASE="${MASTER_PORT_BASE:-29500}"
 export WIKI_EVAL_DATASET="${WIKI_EVAL_DATASET:-$PROJECT_ROOT/data/wiki/test}"
 export CODE_EVAL_DATASET="${CODE_EVAL_DATASET:-$PROJECT_ROOT/data/code/test}"
@@ -54,6 +57,10 @@ run_one() {
   local data_path="$2"
   local master_port="$3"
   local out_dir="$OUTPUT_ROOT/${dataset_name}"
+  local extra_args=()
+  if [ "$SAVE_HIDDEN_CACHE" = "1" ]; then
+    extra_args+=(--save-hidden-cache)
+  fi
   CUDA_VISIBLE_DEVICES="$GPU_DEVICE" torchrun --nproc_per_node 1 --master_port "$master_port" \
     analysis/eval_expert_output_similarity.py \
     --model-kind "$MODEL_KIND" \
@@ -66,6 +73,9 @@ run_one() {
     --seq-length "$SEQ_LENGTH" \
     --max-batches "$MAX_BATCHES" \
     --max-tokens-per-layer "$MAX_TOKENS_PER_LAYER" \
+    --heatmap-vmin "$HEATMAP_VMIN" \
+    --heatmap-vmax "$HEATMAP_VMAX" \
+    "${extra_args[@]}" \
     ${PLOT_LAYERS:+--plot-layers "$PLOT_LAYERS"} \
     --data-path $data_path \
     --dataset-split 100,0,0 \

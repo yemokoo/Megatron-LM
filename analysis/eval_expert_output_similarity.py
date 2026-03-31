@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import csv
 import json
 import math
 import sys
@@ -20,6 +21,7 @@ from megatron.core.datasets.gpt_dataset import GPTDataset, GPTDatasetConfig, Moc
 from megatron.core.datasets.utils import get_blend_from_list
 from megatron.core.transformer.moe.experts import GroupedMLP, SequentialMLP
 from megatron.core.transformer.moe.router import Router
+from megatron.core.transformer.qv_lora_attention import QVLoraExpertRouter
 from megatron.training import get_args, get_model, get_tokenizer
 from megatron.training.checkpointing import load_checkpoint
 from megatron.training.initialize import initialize_megatron
@@ -45,6 +47,10 @@ def add_args(parser):
     group.add_argument("--max-batches", type=int, default=2)
     group.add_argument("--max-tokens-per-layer", type=int, default=2048)
     group.add_argument("--plot-layers", type=str, default="")
+    group.add_argument("--save-hidden-cache", action="store_true")
+    group.add_argument("--hidden-cache-filename", type=str, default="hidden_states.pt")
+    group.add_argument("--heatmap-vmin", type=float, default=-0.25)
+    group.add_argument("--heatmap-vmax", type=float, default=0.75)
     return parser
 
 
@@ -96,6 +102,16 @@ def store_hidden(hidden_store, layer_number, hidden_states, max_tokens):
         hidden_store[layer_key] = torch.cat([hidden_store[layer_key], chunk], dim=0)
 
 
+def infer_layer_key(name, module):
+    layer_number = getattr(module, "layer_number", None)
+    if layer_number is not None:
+        return f"layer_{int(layer_number):02d}"
+    parts = name.split(".")
+    if "layers" in parts:
+        return f"layer_{int(parts[parts.index('layers') + 1]) + 1:02d}"
+    return None
+
+
 def install_hidden_collection_hooks(model, model_kind, hidden_store, max_tokens):
     hooks = []
     if model_kind == "ffn":
@@ -109,15 +125,16 @@ def install_hidden_collection_hooks(model, model_kind, hidden_store, max_tokens)
                     )
                 )
     else:
-        for module in model.modules():
-            router_module = getattr(module, "qv_lora_experts", None)
-            layer_number = getattr(module, "layer_number", None)
-            if router_module is None or layer_number is None:
+        for name, module in model.named_modules():
+            if not isinstance(module, QVLoraExpertRouter):
+                continue
+            layer_key = infer_layer_key(name, module)
+            if layer_key is None:
                 continue
             hooks.append(
-                router_module.register_forward_pre_hook(
-                    lambda mod, inputs, layer=layer_number: store_hidden(
-                        hidden_store, layer, inputs[0], max_tokens
+                module.register_forward_pre_hook(
+                    lambda mod, inputs, layer=layer_key: store_hidden(
+                        hidden_store, int(layer.split("_")[-1]), inputs[0], max_tokens
                     )
                 )
             )
@@ -226,12 +243,13 @@ def compute_ffn_outputs(experts_module, hidden_cpu):
 
 def collect_lora_modules(model):
     modules = {}
-    for module in model.modules():
-        router_module = getattr(module, "qv_lora_experts", None)
-        layer_number = getattr(module, "layer_number", None)
-        if router_module is None or layer_number is None:
+    for name, module in model.named_modules():
+        if not isinstance(module, QVLoraExpertRouter):
             continue
-        modules[f"layer_{int(layer_number):02d}"] = router_module
+        layer_key = infer_layer_key(name, module)
+        if layer_key is None:
+            continue
+        modules[layer_key] = module
     return modules
 
 
@@ -247,13 +265,59 @@ def compute_lora_outputs(router_module, hidden_cpu):
     return torch.stack(outputs, dim=0)
 
 
-def save_heatmaps(layer_results, output_dir: Path, title_prefix: str, plot_layers):
+def save_layer_csvs(layer_results, output_dir: Path):
+    csv_dir = output_dir / "layer_tables"
+    csv_dir.mkdir(parents=True, exist_ok=True)
+    summary_rows = []
+    for item in layer_results:
+        layer = item["layer"]
+        matrix = item["mean_tokenwise_cosine_similarity"]
+        with (csv_dir / f"{layer}_mean_tokenwise_cosine_similarity.csv").open(
+            "w", encoding="utf-8", newline=""
+        ) as f:
+            writer = csv.writer(f)
+            writer.writerow(["expert"] + [f"e{idx}" for idx in range(len(matrix))])
+            for row_idx, row in enumerate(matrix):
+                writer.writerow([f"e{row_idx}"] + [f"{float(value):.6f}" for value in row])
+
+        summary = item.get("summary", {})
+        summary_rows.append(
+            {
+                "layer": layer,
+                "num_tokens": item["num_tokens"],
+                "num_experts": item["num_experts"],
+                "output_dim": item["output_dim"],
+                "within_old_mean": summary.get("within_old_mean"),
+                "within_new_mean": summary.get("within_new_mean"),
+                "cross_mean": summary.get("cross_mean"),
+            }
+        )
+
+    with (csv_dir / "layer_similarity_summary.csv").open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=[
+                "layer",
+                "num_tokens",
+                "num_experts",
+                "output_dim",
+                "within_old_mean",
+                "within_new_mean",
+                "cross_mean",
+            ],
+        )
+        writer.writeheader()
+        for row in summary_rows:
+            writer.writerow(row)
+
+
+def save_heatmaps(layer_results, output_dir: Path, title_prefix: str, plot_layers, vmin: float, vmax: float):
     selected = [item for item in layer_results if item["layer"] in plot_layers]
     if not selected:
         return
     cols = min(3, len(selected))
     rows = math.ceil(len(selected) / cols)
-    fig, axes = plt.subplots(rows, cols, figsize=(4 * cols, 4 * rows))
+    fig, axes = plt.subplots(rows, cols, figsize=(5.2 * cols, 5.0 * rows))
     if hasattr(axes, "reshape"):
         flat_axes = list(axes.reshape(-1))
     else:
@@ -264,10 +328,28 @@ def save_heatmaps(layer_results, output_dir: Path, title_prefix: str, plot_layer
             continue
         item = selected[ax_idx]
         matrix = torch.tensor(item["mean_tokenwise_cosine_similarity"])
-        im = ax.imshow(matrix, vmin=-1.0, vmax=1.0, cmap="viridis")
+        im = ax.imshow(matrix, vmin=vmin, vmax=vmax, cmap="viridis")
         ax.set_title(item["layer"])
         ax.set_xlabel("Expert")
         ax.set_ylabel("Expert")
+        ax.set_xticks(range(matrix.shape[1]))
+        ax.set_yticks(range(matrix.shape[0]))
+        ax.set_xticklabels([f"e{i}" for i in range(matrix.shape[1])], rotation=0)
+        ax.set_yticklabels([f"e{i}" for i in range(matrix.shape[0])])
+        midpoint = (vmin + vmax) / 2.0
+        for row_idx in range(matrix.shape[0]):
+            for col_idx in range(matrix.shape[1]):
+                value = float(matrix[row_idx, col_idx].item())
+                text_color = "white" if value < midpoint else "black"
+                ax.text(
+                    col_idx,
+                    row_idx,
+                    f"{value:.2f}",
+                    ha="center",
+                    va="center",
+                    fontsize=8,
+                    color=text_color,
+                )
         fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
     fig.suptitle(title_prefix)
     fig.tight_layout()
@@ -303,6 +385,8 @@ def main():
     model.eval()
 
     hidden_store = collect_hidden_states(model)
+    if args.save_hidden_cache:
+        torch.save(hidden_store, output_dir / args.hidden_cache_filename)
     layer_results = []
 
     if args.model_kind == "ffn":
@@ -343,6 +427,7 @@ def main():
             )
 
     plot_layers = choose_plot_layers(layer_results, args.plot_layers)
+    save_layer_csvs(layer_results, output_dir)
     result = {
         "label": args.compare_label,
         "model_kind": args.model_kind,
@@ -352,6 +437,14 @@ def main():
         "max_batches": args.max_batches,
         "max_tokens_per_layer": args.max_tokens_per_layer,
         "similarity_type": "mean_tokenwise_cosine",
+        "same_hidden_input_per_expert": True,
+        "saved_hidden_cache": bool(args.save_hidden_cache),
+        "hidden_cache_filename": args.hidden_cache_filename if args.save_hidden_cache else None,
+        "raw_expert_outputs_saved": False,
+        "recompute_note": "Reuse hidden_states.pt with the checkpoint to compute alternative metrics without rerunning dataset forward.",
+        "heatmap_vmin": args.heatmap_vmin,
+        "heatmap_vmax": args.heatmap_vmax,
+        "layer_csv_dir": "layer_tables",
         "plot_layers": plot_layers,
         "layer_results": layer_results,
     }
@@ -364,6 +457,8 @@ def main():
         output_dir,
         f"Expert output cosine similarity: {args.compare_label}",
         plot_layers,
+        args.heatmap_vmin,
+        args.heatmap_vmax,
     )
     if torch.distributed.get_rank() == 0:
         print(json.dumps(result, indent=2))
