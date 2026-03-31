@@ -38,6 +38,7 @@ export TRAIN_ITERS="${TRAIN_ITERS:-}"
 export SAVE_INTERVAL="${SAVE_INTERVAL:-300}"
 export EVAL_INTERVAL="${EVAL_INTERVAL:-1000}"
 export LOG_INTERVAL="${LOG_INTERVAL:-10}"
+export TRAIN_LOG_STEP_TIME_ONLY="${TRAIN_LOG_STEP_TIME_ONLY:-1}"
 export LR="${LR:-3e-4}"
 export MIN_LR="${MIN_LR:-3e-5}"
 export LR_DECAY_STYLE="${LR_DECAY_STYLE:-WSD}"
@@ -150,6 +151,11 @@ if [ -n "$WANDB_PROJECT" ]; then
     )
 fi
 
+LOG_STYLE_ARGS=()
+if [ "$TRAIN_LOG_STEP_TIME_ONLY" = "1" ]; then
+    LOG_STYLE_ARGS+=(--train-log-step-time-only)
+fi
+
 torchrun \
     --nproc_per_node "$NPROC_PER_NODE" \
     --master_addr "$MASTER_ADDR" \
@@ -177,6 +183,7 @@ torchrun \
     --log-interval "$LOG_INTERVAL" \
     --log-throughput \
     --log-progress \
+    "${LOG_STYLE_ARGS[@]}" \
     --save "$SSD_WEIGHTS" \
     --save-interval "$SAVE_INTERVAL" \
     --load "$SSD_WEIGHTS" \
