@@ -63,6 +63,7 @@ export LOCAL_BASE="${LOCAL_BASE:-$PROJECT_ROOT/.local}"
 export LOCAL_DATASET="${LOCAL_DATASET:-$LOCAL_BASE/dataset}"
 export LOCAL_WEIGHTS="${LOCAL_WEIGHTS:-$LOCAL_BASE/weights}"
 export LOCAL_SSD_ROOT="${LOCAL_SSD_ROOT:-/tmp/flame-moe}"
+export DIRECT_LOCAL_SAVE="${DIRECT_LOCAL_SAVE:-1}"
 
 export SSD_MOUNT="${LOCAL_SSD_ROOT}/${RUN_ID}"
 export SSD_CODE_TRAIN="${SSD_MOUNT}/dataset/code_train"
@@ -132,6 +133,10 @@ export STAGE1_WEIGHTS_DIR="$(resolve_stage1_dir)"
 export PROBE_STEP_OFFSET="${PROBE_STEP_OFFSET:-$(read_stage1_train_iters)}"
 export SECONDARY_PROBE_STEP_OFFSET="${SECONDARY_PROBE_STEP_OFFSET:-$PROBE_STEP_OFFSET}"
 export WANDB_STEP_OFFSET="${WANDB_STEP_OFFSET:-$PROBE_STEP_OFFSET}"
+
+if [ "$DIRECT_LOCAL_SAVE" = "1" ]; then
+    export SSD_TARGET_WEIGHTS="$TRAIN_WEIGHTS"
+fi
 
 mkdir -p "$SSD_CODE_TRAIN" "$SSD_SOURCE_WEIGHTS" "$SSD_TARGET_WEIGHTS" "$TRAIN_WEIGHTS" "$LOG_DIR"
 rsync -rlptD \
@@ -252,3 +257,7 @@ torchrun \
     --secondary-probe-step-offset "$SECONDARY_PROBE_STEP_OFFSET" \
     --secondary-probe-data-path $(build_data_path "$SECONDARY_PROBE_DATASET") \
     "${WANDB_ARGS[@]}"
+
+if [ "$SSD_TARGET_WEIGHTS" != "$TRAIN_WEIGHTS" ]; then
+    rsync -rlptD "$SSD_TARGET_WEIGHTS/" "$TRAIN_WEIGHTS/"
+fi
