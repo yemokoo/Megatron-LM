@@ -125,7 +125,6 @@ run_one() {
     --no-load-optim
     --no-load-rng
     --exit-on-missing-checkpoint
-    --data-path
   )
   if [ "$MODEL_KIND" = "lora" ]; then
     args+=(
@@ -136,6 +135,7 @@ run_one() {
       --attn-lora-alpha "$ATTN_LORA_ALPHA"
     )
   fi
+  args+=(--data-path)
   CUDA_VISIBLE_DEVICES="$GPU_DEVICE" torchrun --nproc_per_node 1 --master_port "$MASTER_PORT" "${args[@]}" $data_path ${allowed:+--allowed-experts "$allowed"}
 }
 
