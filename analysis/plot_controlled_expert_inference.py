@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import math
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -77,9 +78,33 @@ def plot_grouped_bars(parsed, datasets, modes, metric_key, ylabel, title, output
         "wiki_only": "Wiki experts only",
         "code_only": "Code experts only",
     }
-    fig, axes = plt.subplots(1, len(datasets), figsize=(5 * len(datasets), 4), squeeze=False)
+    fig, axes = plt.subplots(
+        1,
+        len(datasets),
+        figsize=(6.2 * len(datasets), 5.2),
+        squeeze=False,
+        sharey=True,
+    )
     axes = axes[0]
     legend_handles = []
+    all_values = [
+        parsed[dataset][mode][metric_key]
+        for dataset in datasets
+        for mode in modes
+        if dataset in parsed and mode in parsed[dataset]
+    ]
+    if all_values:
+        value_min = min(all_values)
+        value_max = max(all_values)
+        if math.isclose(value_min, value_max):
+            pad = max(abs(value_max) * 0.1, 0.05)
+        else:
+            pad = max((value_max - value_min) * 0.12, 0.03)
+        shared_ymin = max(0.0, value_min - pad)
+        shared_ymax = value_max + pad
+    else:
+        shared_ymin, shared_ymax = 0.0, 1.0
+
     for ax, dataset in zip(axes, datasets):
         values = []
         labels = []
@@ -92,9 +117,11 @@ def plot_grouped_bars(parsed, datasets, modes, metric_key, ylabel, title, output
             labels.append(mode)
             colors.append(color_map.get(mode, "#888888"))
         bars = ax.bar(labels, values, color=colors)
-        ax.set_title(f"{dataset} dataset")
+        ax.set_title(f"{dataset} dataset", fontsize=17, pad=10, fontweight="bold")
         ax.set_ylabel(ylabel)
+        ax.set_ylim(shared_ymin, shared_ymax)
         ax.tick_params(axis="x", rotation=20)
+        ax.tick_params(axis="both", labelsize=12)
         for bar, value in zip(bars, values):
             bar_height = bar.get_height()
             y_min, y_max = ax.get_ylim()
@@ -122,19 +149,20 @@ def plot_grouped_bars(parsed, datasets, modes, metric_key, ylabel, title, output
             if all(existing.get_label() != legend_map.get(mode, mode) for existing in legend_handles):
                 bar.set_label(legend_map.get(mode, mode))
                 legend_handles.append(bar)
-    fig.suptitle(title)
+    fig.suptitle(title, fontsize=20, fontweight="bold", y=0.98)
     show_legend = not (set(modes) == {"top1", "top2"} or set(modes) == {"top2", "top1"})
     if legend_handles and show_legend:
         fig.legend(
             handles=legend_handles,
             loc="upper center",
-            bbox_to_anchor=(0.5, 0.98),
+            bbox_to_anchor=(0.5, 0.92),
             ncol=min(len(legend_handles), 3),
             frameon=False,
+            fontsize=13,
         )
-        fig.tight_layout(rect=[0, 0, 1, 0.92])
+        fig.tight_layout(rect=[0, 0, 1, 0.80])
     else:
-        fig.tight_layout(rect=[0, 0, 1, 0.95])
+        fig.tight_layout(rect=[0, 0, 1, 0.88])
     fig.savefig(output_path, dpi=200)
     plt.close(fig)
 
