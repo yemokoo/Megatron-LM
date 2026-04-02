@@ -17,6 +17,7 @@ Default model values:
 
 Experiment entrypoints:
 - `wiki A`: [wiki_a_a100_bf16.sh](/Users/yemokoo/miil/1.%20LLM-CL/LLM-continual-learning/scripts/experiment/a100/wiki_a_a100_bf16.sh)
+- `wiki A dense-x`: [wiki_a_dense_x_a100_bf16.sh](/Users/yemokoo/miil/1.%20LLM-CL/LLM-continual-learning/scripts/experiment/a100/wiki_a_dense_x_a100_bf16.sh)
 - `code B`: [code_b_a100_bf16.sh](/Users/yemokoo/miil/1.%20LLM-CL/LLM-continual-learning/scripts/experiment/a100/code_b_a100_bf16.sh)
 - `A -> B`: [a_to_b_a100_bf16.sh](/Users/yemokoo/miil/1.%20LLM-CL/LLM-continual-learning/scripts/experiment/a100/a_to_b_a100_bf16.sh)
 - `A -> B freeze`: [a_to_b_freeze_a100_bf16.sh](/Users/yemokoo/miil/1.%20LLM-CL/LLM-continual-learning/scripts/experiment/a100/a_to_b_freeze_a100_bf16.sh)
