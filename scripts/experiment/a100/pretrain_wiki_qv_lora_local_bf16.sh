@@ -48,6 +48,7 @@ export SSD_WEIGHTS="${SSD_MOUNT}/weights"
 export NUM_LAYERS="${NUM_LAYERS:-9}"
 export HIDDEN_SIZE="${HIDDEN_SIZE:-1024}"
 export FFN_HIDDEN_SIZE="${FFN_HIDDEN_SIZE:-5472}"
+export NUM_QUERY_GROUPS="${NUM_QUERY_GROUPS:-16}"
 export ATTN_LORA_NUM_EXPERTS="${ATTN_LORA_NUM_EXPERTS:-4}"
 export ATTN_LORA_RANK="${ATTN_LORA_RANK:-16}"
 export ATTN_LORA_TOPK="${ATTN_LORA_TOPK:-1}"
@@ -185,6 +186,7 @@ metadata = {
     'num_layers': int(os.environ['NUM_LAYERS']),
     'hidden_size': int(os.environ['HIDDEN_SIZE']),
     'ffn_hidden_size': int(os.environ['FFN_HIDDEN_SIZE']),
+    'num_query_groups': int(os.environ['NUM_QUERY_GROUPS']),
     'attn_lora_num_experts': int(os.environ['ATTN_LORA_NUM_EXPERTS']),
     'attn_lora_rank': int(os.environ['ATTN_LORA_RANK']),
     'attn_lora_topk': int(os.environ['ATTN_LORA_TOPK']),

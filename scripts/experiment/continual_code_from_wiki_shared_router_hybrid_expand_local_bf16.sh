@@ -16,7 +16,8 @@ if explicit:
     print(explicit)
     raise SystemExit(0)
 
-local_weights = Path(os.environ['LOCAL_WEIGHTS']) / 'a100' / 'wiki-shared-router-hybrid-pretrain-local'
+stage1_subdir = os.environ.get('STAGE1_SUBDIR', 'a100/wiki-shared-router-hybrid-pretrain-local')
+local_weights = Path(os.environ['LOCAL_WEIGHTS']) / stage1_subdir
 required_iters = int(os.environ.get('SOURCE_REQUIRED_ITERS', '1'))
 best = None
 best_mtime = -1.0
@@ -75,6 +76,7 @@ export SSD_TARGET_WEIGHTS="${SSD_MOUNT}/target_weights"
 export NUM_LAYERS="${NUM_LAYERS:-9}"
 export HIDDEN_SIZE="${HIDDEN_SIZE:-1024}"
 export FFN_HIDDEN_SIZE="${FFN_HIDDEN_SIZE:-5472}"
+export NUM_QUERY_GROUPS="${NUM_QUERY_GROUPS:-16}"
 export MOE_FFN_HIDDEN_SIZE="${MOE_FFN_HIDDEN_SIZE:-704}"
 export SOURCE_NUM_EXPERTS="${SOURCE_NUM_EXPERTS:-4}"
 export NUM_EXPERTS="${NUM_EXPERTS:-7}"
@@ -105,6 +107,7 @@ export DATASET_SPLIT="${DATASET_SPLIT:-100,0,0}"
 
 export TRAIN_DATASET="${TRAIN_DATASET:-$(dataset_dir_for_task code)}"
 export STAGE1_WEIGHTS_DIR="${STAGE1_WEIGHTS_DIR:-}"
+export STAGE1_SUBDIR="${STAGE1_SUBDIR:-a100/wiki-shared-router-hybrid-pretrain-local}"
 export SOURCE_REQUIRED_ITERS="${SOURCE_REQUIRED_ITERS:-1}"
 export TRAIN_WEIGHTS="${TRAIN_WEIGHTS:-$LOCAL_WEIGHTS/a100/code-from-wiki-shared-router-hybrid-expand-local/$RUN_ID}"
 export LOG_DIR="${LOG_DIR:-$TRAIN_WEIGHTS/logs}"
@@ -184,6 +187,7 @@ metadata = {
     'num_layers': int(os.environ['NUM_LAYERS']),
     'hidden_size': int(os.environ['HIDDEN_SIZE']),
     'ffn_hidden_size': int(os.environ['FFN_HIDDEN_SIZE']),
+    'num_query_groups': int(os.environ['NUM_QUERY_GROUPS']),
     'moe_ffn_hidden_size': int(os.environ['MOE_FFN_HIDDEN_SIZE']),
     'source_num_experts': int(os.environ['SOURCE_NUM_EXPERTS']),
     'target_num_experts': int(os.environ['NUM_EXPERTS']),

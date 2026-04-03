@@ -24,6 +24,7 @@ export SSD_WEIGHTS="${SSD_MOUNT}/weights"
 export NUM_LAYERS="${NUM_LAYERS:-9}"
 export HIDDEN_SIZE="${HIDDEN_SIZE:-1024}"
 export FFN_HIDDEN_SIZE="${FFN_HIDDEN_SIZE:-5472}"
+export NUM_QUERY_GROUPS="${NUM_QUERY_GROUPS:-16}"
 export MOE_FFN_HIDDEN_SIZE="${MOE_FFN_HIDDEN_SIZE:-704}"
 export NUM_EXPERTS="${NUM_EXPERTS:-4}"
 export MOE_ROUTER_TOPK="${MOE_ROUTER_TOPK:-2}"
@@ -135,6 +136,7 @@ metadata = {
     'num_layers': int(os.environ['NUM_LAYERS']),
     'hidden_size': int(os.environ['HIDDEN_SIZE']),
     'ffn_hidden_size': int(os.environ['FFN_HIDDEN_SIZE']),
+    'num_query_groups': int(os.environ['NUM_QUERY_GROUPS']),
     'moe_ffn_hidden_size': int(os.environ['MOE_FFN_HIDDEN_SIZE']),
     'num_experts': int(os.environ['NUM_EXPERTS']),
     'moe_router_topk': int(os.environ['MOE_ROUTER_TOPK']),

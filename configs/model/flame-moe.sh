@@ -7,6 +7,8 @@ MODEL_ARGS=(
     --ffn-hidden-size $FFN_HIDDEN_SIZE
     --num-layers $NUM_LAYERS
     --num-attention-heads 16
+    --group-query-attention
+    --num-query-groups ${NUM_QUERY_GROUPS:-16}
     --swiglu
     --max-position-embeddings 2048
     --normalization RMSNorm
