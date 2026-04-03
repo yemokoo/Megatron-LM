@@ -146,7 +146,10 @@ class QVLoraSelfAttention(SelfAttention):
             attn_mask_type=attn_mask_type,
             cp_comm_type=cp_comm_type,
         )
-        if config.attn_lora_num_experts > 0:
+        # Keep the first dense layer free of attention-LoRA experts so expertized
+        # attention starts from the second transformer layer onward.
+        enable_qv_lora = config.attn_lora_num_experts > 0 and self.layer_number > 1
+        if enable_qv_lora:
             query_output_size = (
                 self.num_attention_heads_per_partition * self.hidden_size_per_attention_head
             )
