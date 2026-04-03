@@ -42,6 +42,10 @@ from megatron.core.models.gpt.gpt_layer_specs import (
     get_gpt_layer_local_spec,
     get_gpt_layer_with_transformer_engine_spec,
 )
+from megatron.core.models.gpt.full_rank_lora_layer_specs import (
+    get_gpt_full_rank_lora_decoder_block_spec,
+    get_gpt_full_rank_lora_layer_local_spec,
+)
 
 
 stimer = StragglerDetector()
@@ -99,7 +103,19 @@ def model_provider(pre_process=True, post_process=True) -> Union[GPTModel, megat
         if args.spec is not None:
             transformer_layer_spec = import_module(args.spec)
         else:
-            if args.num_experts:
+            if config.attn_full_rank_lora_rank > 0:
+                if use_te:
+                    raise ValueError('Packed attention full-rank LoRA is currently supported only with local transformer_impl.')
+                if args.num_experts:
+                    transformer_layer_spec = get_gpt_full_rank_lora_decoder_block_spec(config)
+                else:
+                    transformer_layer_spec = get_gpt_full_rank_lora_layer_local_spec(
+                        args.num_experts,
+                        args.moe_grouped_gemm,
+                        args.qk_layernorm,
+                        args.moe_use_legacy_grouped_gemm,
+                    )
+            elif args.num_experts:
                 # Define the decoder block spec
                 transformer_layer_spec = get_gpt_decoder_block_spec(config, use_transformer_engine=use_te)
             else:

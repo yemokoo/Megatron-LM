@@ -2496,6 +2496,10 @@ def _add_experimental_args(parser):
     group.add_argument('--attn-lora-train-router-and-experts-only', action='store_true',
                        help='Freeze all backbone parameters after loading and train only '
                             'attention LoRA experts plus their routers.')
+    group.add_argument('--attn-full-rank-lora-rank', type=int, default=0,
+                       help='LoRA rank for packed attention linear_qkv and linear_proj adapters.')
+    group.add_argument('--attn-full-rank-lora-alpha', type=float, default=1.0,
+                       help='Scaling factor for packed attention full-rank LoRA outputs.')
     group.add_argument('--shared-router-hybrid-model', action='store_true',
                        help='Enable the shared-router hybrid architecture where attention LoRA and '
                             'FFN MoE experts share one router.')

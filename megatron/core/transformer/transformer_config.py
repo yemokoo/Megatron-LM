@@ -151,6 +151,12 @@ class TransformerConfig(ModelParallelConfig):
     attn_lora_train_router_and_experts_only: bool = False
     """Freeze all non-LoRA/router params after checkpoint load."""
 
+    attn_full_rank_lora_rank: int = 0
+    """LoRA rank for packed attention QKV and output projection adapters."""
+
+    attn_full_rank_lora_alpha: float = 1.0
+    """Scaling factor applied to packed attention full-rank LoRA outputs."""
+
     ####################
     # initialization
     ####################
