@@ -21,12 +21,12 @@ export E2_SOURCE_WEIGHTS_DIR="${E2_SOURCE_WEIGHTS_DIR:-$PROJECT_ROOT/.local/weig
 run_and_pause "2_A2_unfreeze" env \
     WANDB_MODE=offline \
     DIRECT_LOCAL_SAVE=1 \
-    RUN_ID=a2-wiki-to-code-ffn-moe-unfreeze-mha-kd1.0-a100-bf16-mb32-1800 \
-    TRAIN_WEIGHTS="$PROJECT_ROOT/.local/weights/a100/mha/a-to-b-moe-bf16/a2-wiki-to-code-ffn-moe-unfreeze-mha-kd1.0-a100-bf16-mb32-1800" \
+    RUN_ID=a2-wiki-to-code-ffn-moe-unfreeze-mha-kd1.0-a100-bf16-mb48-1800 \
+    TRAIN_WEIGHTS="$PROJECT_ROOT/.local/weights/a100/mha/a-to-b-moe-bf16/a2-wiki-to-code-ffn-moe-unfreeze-mha-kd1.0-a100-bf16-mb48-1800" \
     SOURCE_WEIGHTS_DIR="$A2_SOURCE_WEIGHTS_DIR" \
     WANDB_PROJECT=flame-continual-top2-qv-lora \
-    WANDB_EXP_NAME="A2 - Wiki to Code FFN MoE Unfreeze MHA KD1.0 mb32" \
-    MICRO_BATCH_SIZE=32 \
+    WANDB_EXP_NAME="A2 - Wiki to Code FFN MoE Unfreeze MHA KD1.0 mb48" \
+    MICRO_BATCH_SIZE=48 \
     GLOBAL_BATCH_SIZE=2304 \
     TRAIN_ITERS=1800 \
     SOURCE_NUM_EXPERTS=4 \
