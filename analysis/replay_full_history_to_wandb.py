@@ -115,6 +115,10 @@ def merge_payloads(base: dict[int, dict[str, float]], overlay: dict[int, dict[st
     return dict(sorted(merged.items()))
 
 
+def filter_payloads_after_step(payloads: dict[int, dict[str, float]], step: int) -> dict[int, dict[str, float]]:
+    return {event_step: payload for event_step, payload in payloads.items() if event_step > step}
+
+
 def replay_payloads(run, payloads: dict[int, dict[str, float]]) -> None:
     for step, payload in sorted(payloads.items()):
         wandb.log(payload, step=step)
@@ -182,7 +186,11 @@ def main():
         continual_payloads = history_to_step_payloads(continual_history, step_offset=step_offset)
         payloads = merge_payloads(payloads, continual_payloads)
         if args.continual_log is not None:
-            payloads = merge_payloads(payloads, parse_probe_history(args.continual_log))
+            continual_probe_payloads = filter_payloads_after_step(
+                parse_probe_history(args.continual_log),
+                args.baseline_step,
+            )
+            payloads = merge_payloads(payloads, continual_probe_payloads)
 
     run = wandb.init(**init_kwargs)
     try:
