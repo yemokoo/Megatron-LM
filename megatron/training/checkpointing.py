@@ -19,6 +19,7 @@ import torch
 
 from megatron.core import mpu, tensor_parallel, dist_checkpointing
 from megatron.core.dist_checkpointing.mapping import ShardedObject
+from megatron.core.dist_checkpointing.dict_utils import extract_matching_values
 from megatron.core.dist_checkpointing.serialization import get_default_load_sharded_strategy
 from megatron.core.dist_checkpointing.strategies.fully_parallel import \
     FullyParallelSaveStrategyWrapper, FullyParallelLoadStrategyWrapper
@@ -51,6 +52,23 @@ _CHECKPOINT_VERSION = None
 
 logger = getLogger(__name__)
 _NON_PERSISTENT_CKPT_SUBDIR = 'non_persistent'
+
+
+def _should_skip_attn_full_rank_lora_load(value):
+    key = getattr(value, 'key', None)
+    return isinstance(key, str) and 'full_rank_lora' in key
+
+
+def _strip_attn_full_rank_lora_from_sharded_state_dict(state_dict):
+    for model_key in list(state_dict.keys()):
+        if not model_key.startswith('model'):
+            continue
+        _matched, remainder = extract_matching_values(
+            state_dict[model_key],
+            _should_skip_attn_full_rank_lora_load,
+        )
+        state_dict[model_key] = remainder
+    return state_dict
 
 def set_checkpoint_version(value):
     global _CHECKPOINT_VERSION
@@ -1214,6 +1232,10 @@ def load_checkpoint(model, optimizer, opt_param_scheduler, load_arg='load', stri
                     args, model, gen_sd_optim, gen_sd_opt_param_scheduler, gen_sd_rng_state,
                     use_dist_ckpt=True, optim_sd_kwargs=optim_sd_kwargs, rerun_state=gen_sd_rerun_state
                 )
+                if args.finetune and getattr(args, 'attn_full_rank_lora_rank', 0) > 0:
+                    load_kwargs['sharded_state_dict'] = _strip_attn_full_rank_lora_from_sharded_state_dict(
+                        load_kwargs['sharded_state_dict']
+                    )
 
             # When "--fp8-param-gather" is disabled, this function doesn't modify anything.
             fix_fp8_params_lose_precision_when_loading_dist_ckpt(load_kwargs['sharded_state_dict'])
