@@ -183,7 +183,10 @@ def main():
                 collapse_probe_payload_at_or_before_step(source_probe_history, args.baseline_step)
             )
         step_offset = infer_continual_step_offset(continual_history, args.baseline_step)
-        continual_payloads = history_to_step_payloads(continual_history, step_offset=step_offset)
+        continual_payloads = filter_payloads_after_step(
+            history_to_step_payloads(continual_history, step_offset=step_offset),
+            args.baseline_step,
+        )
         payloads = merge_payloads(payloads, continual_payloads)
         if args.continual_log is not None:
             continual_probe_payloads = filter_payloads_after_step(
