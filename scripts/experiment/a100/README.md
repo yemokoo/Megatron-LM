@@ -41,3 +41,6 @@ Reference implementation:
 - continual runner: [run_continual_moe_a100_bf16.sh](/Users/yemokoo/miil/1.%20LLM-CL/LLM-continual-learning/scripts/experiment/a100/run_continual_moe_a100_bf16.sh)
 - sequential launcher: [run_all_moe_a100_bf16_sequential.sh](/Users/yemokoo/miil/1.%20LLM-CL/LLM-continual-learning/scripts/experiment/a100/run_all_moe_a100_bf16_sequential.sh)
 - no-shared-expert model config: [flame-moe-bf16-no-shared.sh](/Users/yemokoo/miil/1.%20LLM-CL/LLM-continual-learning/scripts/experiment/a100/flame-moe-bf16-no-shared.sh)
+
+Operational notes:
+- offline W&B training/upload workflow: [offline_wandb_upload_workflow_ko.md](/Users/yemokoo/miil/1.%20LLM-CL/LLM-continual-learning/docs/offline_wandb_upload_workflow_ko.md)
