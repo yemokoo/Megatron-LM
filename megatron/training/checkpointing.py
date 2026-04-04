@@ -1287,6 +1287,8 @@ def load_checkpoint(model, optimizer, opt_param_scheduler, load_arg='load', stri
 
     # Model.
     strict = False if args.retro_add_retriever else strict
+    if args.finetune and getattr(args, 'attn_full_rank_lora_rank', 0) > 0:
+        strict = False
     if not skip_load_to_model_and_opt:
         if len(ddp_model) == 1:
             ddp_model[0].load_state_dict(state_dict['model'], strict=strict)

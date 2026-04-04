@@ -1,5 +1,6 @@
 # Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
 
+from copy import deepcopy
 from typing import Tuple
 
 import torch
@@ -100,6 +101,14 @@ class FullRankLoraSelfAttention(SelfAttention):
                 param.requires_grad = False
             for param in self.linear_proj.parameters():
                 param.requires_grad = False
+
+            def remove_full_rank_lora_missing_keys(self, incompatible_keys):
+                keys = deepcopy(incompatible_keys.missing_keys)
+                for key in keys:
+                    if 'full_rank_lora' in key:
+                        incompatible_keys.missing_keys.remove(key)
+
+            self.register_load_state_dict_post_hook(remove_full_rank_lora_missing_keys)
         else:
             self.qkv_full_rank_lora = None
             self.proj_full_rank_lora = None
