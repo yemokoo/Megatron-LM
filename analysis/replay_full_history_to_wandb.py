@@ -98,6 +98,15 @@ def parse_probe_history(log_file: Path) -> dict[int, dict[str, float]]:
     return dict(sorted(payloads.items()))
 
 
+def collapse_probe_payload_at_or_before_step(payloads: dict[int, dict[str, float]], step: int) -> dict[str, float]:
+    collapsed = {}
+    for event_step, payload in sorted(payloads.items()):
+        if event_step > step:
+            break
+        collapsed.update(payload)
+    return collapsed
+
+
 def merge_payloads(base: dict[int, dict[str, float]], overlay: dict[int, dict[str, float]]) -> dict[int, dict[str, float]]:
     merged = {step: dict(payload) for step, payload in base.items()}
     for step, payload in overlay.items():
@@ -124,6 +133,7 @@ def main():
     )
     parser.add_argument("--run-dir", type=Path, help="Standalone run directory whose scalar history will be replayed as-is.")
     parser.add_argument("--source-run-dir", type=Path, help="Source run directory used to provide baseline values.")
+    parser.add_argument("--source-log", type=Path, help="Optional source log file used to add source probe metrics to the baseline step.")
     parser.add_argument("--continual-run-dir", type=Path, help="Continual run directory whose full scalar history will be replayed.")
     parser.add_argument("--continual-log", type=Path, help="Optional continual log file used to overlay probe values by step.")
     parser.add_argument("--project", required=True)
@@ -163,6 +173,11 @@ def main():
         source_history = load_scalar_history(args.source_run_dir)
         continual_history = load_scalar_history(args.continual_run_dir)
         payloads = {args.baseline_step: payload_at_or_before_step(source_history, args.baseline_step)}
+        if args.source_log is not None:
+            source_probe_history = parse_probe_history(args.source_log)
+            payloads[args.baseline_step].update(
+                collapse_probe_payload_at_or_before_step(source_probe_history, args.baseline_step)
+            )
         step_offset = infer_continual_step_offset(continual_history, args.baseline_step)
         continual_payloads = history_to_step_payloads(continual_history, step_offset=step_offset)
         payloads = merge_payloads(payloads, continual_payloads)
