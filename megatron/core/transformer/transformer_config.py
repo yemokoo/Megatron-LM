@@ -151,6 +151,9 @@ class TransformerConfig(ModelParallelConfig):
     attn_lora_train_router_and_experts_only: bool = False
     """Freeze all non-LoRA/router params after checkpoint load."""
 
+    attn_lora_include_proj: bool = False
+    """Whether routed attention LoRA experts also adapt the output projection."""
+
     attn_full_rank_lora_rank: int = 0
     """LoRA rank for packed attention QKV and output projection adapters."""
 
