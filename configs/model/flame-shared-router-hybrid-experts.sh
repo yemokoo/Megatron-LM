@@ -38,4 +38,5 @@ MODEL_ARGS=(
     --attn-lora-rank "${ATTN_LORA_RANK:-16}"
     --attn-lora-topk "${MOE_ROUTER_TOPK:-2}"
     --attn-lora-alpha "${ATTN_LORA_ALPHA:-16}"
+    ${ATTN_LORA_INCLUDE_PROJ:+--attn-lora-include-proj}
 )
