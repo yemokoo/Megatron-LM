@@ -107,6 +107,7 @@ export WANDB_SAVE_DIR="${WANDB_SAVE_DIR:-$TRAIN_WEIGHTS/wandb}"
 export WANDB_RUN_ID="${WANDB_RUN_ID:-$RUN_ID}"
 export WANDB_RESUME="${WANDB_RESUME:-allow}"
 export LOG_SOURCE_PROBE_BASELINE_BEFORE_EXPAND="${LOG_SOURCE_PROBE_BASELINE_BEFORE_EXPAND:-1}"
+export RESUME_CONTINUAL_FROM_TRAIN_WEIGHTS="${RESUME_CONTINUAL_FROM_TRAIN_WEIGHTS:-0}"
 
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
 export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=true
@@ -119,6 +120,11 @@ export SOURCE_WEIGHTS_DIR="$(resolve_completed_run_dir)"
 export PROBE_STEP_OFFSET="${PROBE_STEP_OFFSET:-$(read_train_iters_from_run)}"
 export SECONDARY_PROBE_STEP_OFFSET="${SECONDARY_PROBE_STEP_OFFSET:-$PROBE_STEP_OFFSET}"
 export WANDB_STEP_OFFSET="${WANDB_STEP_OFFSET:-$PROBE_STEP_OFFSET}"
+
+RESUME_FROM_TARGET=0
+if [ "$RESUME_CONTINUAL_FROM_TRAIN_WEIGHTS" = "1" ] && [ -f "$TRAIN_WEIGHTS/latest_checkpointed_iteration.txt" ]; then
+    RESUME_FROM_TARGET=1
+fi
 
 case "$SOURCE_TASK" in
     wiki)
@@ -189,6 +195,9 @@ echo "a100 bf16 continual run log: $RUN_LOG"
 echo "a100 bf16 continual gpu log: $GPU_LOG"
 echo "a100 bf16 continual metadata: $RUN_METADATA"
 echo "a100 bf16 source checkpoint: $SOURCE_WEIGHTS_DIR"
+if [ "$RESUME_FROM_TARGET" = "1" ]; then
+    echo "a100 bf16 continual resume checkpoint: $TRAIN_WEIGHTS"
+fi
 
 rsync -rlptD \
     --exclude 'logs/' \
@@ -197,6 +206,14 @@ rsync -rlptD \
     --exclude 'progress.txt' \
     "$SOURCE_WEIGHTS_DIR/" "$SSD_SOURCE_WEIGHTS/"
 rsync -rlptD --info=progress2 "$TRAIN_DATASET/" "$SSD_TRAIN_DATASET/"
+if [ "$RESUME_FROM_TARGET" = "1" ] && [ "$SSD_TARGET_WEIGHTS" != "$TRAIN_WEIGHTS" ]; then
+    rsync -rlptD \
+        --exclude 'logs/' \
+        --exclude 'wandb/' \
+        --exclude 'events.out.tfevents*' \
+        --exclude 'progress.txt' \
+        "$TRAIN_WEIGHTS/" "$SSD_TARGET_WEIGHTS/"
+fi
 
 write_continual_metadata
 source "$MODEL_CONFIG_SCRIPT"
@@ -235,16 +252,26 @@ SAVE_ARGS=(
     --log-progress
     --save "$SSD_TARGET_WEIGHTS"
     --save-interval "$SAVE_INTERVAL"
-    --load "$SSD_SOURCE_WEIGHTS"
     --eval-interval "$EVAL_INTERVAL"
     --tensorboard-dir "$SSD_TARGET_WEIGHTS"
-    --no-load-optim
-    --no-load-rng
-    --finetune
-    --moe-expand-from-num-experts "$SOURCE_NUM_EXPERTS"
     --moe-freeze-existing-experts
     --moe-freeze-existing-router
 )
+
+if [ "$RESUME_FROM_TARGET" = "1" ]; then
+    SAVE_ARGS+=(
+        --load "$SSD_TARGET_WEIGHTS"
+        --moe-resume-from-num-experts "$SOURCE_NUM_EXPERTS"
+    )
+else
+    SAVE_ARGS+=(
+        --load "$SSD_SOURCE_WEIGHTS"
+        --no-load-optim
+        --no-load-rng
+        --finetune
+        --moe-expand-from-num-experts "$SOURCE_NUM_EXPERTS"
+    )
+fi
 
 if [ "$RUN_INITIAL_VALID_EVAL" = "1" ]; then
     SAVE_ARGS+=(--run-initial-valid-eval)
@@ -254,6 +281,7 @@ if [ "$TRAIN_NEW_EXPERTS_AND_ROUTER_ONLY" = "1" ]; then
     SAVE_ARGS+=(--moe-train-new-experts-and-router-only)
 else
     SAVE_ARGS+=(
+        --moe-old-model-kl-load "$SSD_SOURCE_WEIGHTS"
         --moe-old-model-kl-coeff "$OLD_MODEL_KL_COEFF"
         --moe-old-model-kl-temperature "$OLD_MODEL_KL_TEMPERATURE"
     )
