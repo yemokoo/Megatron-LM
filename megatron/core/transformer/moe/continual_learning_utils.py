@@ -242,6 +242,18 @@ def freeze_all_but_new_moe_params(
             module.v_lora_b.requires_grad = True
             if freeze_existing_experts:
                 _freeze_qv_lora_experts(module, num_existing_experts)
+            continue
+
+        # Keep dense attention full-rank LoRA trainable even when shared weights are frozen.
+        qkv_full_rank_lora = getattr(module, "qkv_full_rank_lora", None)
+        if qkv_full_rank_lora is not None:
+            for param in qkv_full_rank_lora.parameters():
+                param.requires_grad = True
+
+        proj_full_rank_lora = getattr(module, "proj_full_rank_lora", None)
+        if proj_full_rank_lora is not None:
+            for param in proj_full_rank_lora.parameters():
+                param.requires_grad = True
 
 
 
