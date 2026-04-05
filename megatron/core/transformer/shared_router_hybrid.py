@@ -62,7 +62,7 @@ def _is_moe_layer(config: TransformerConfig, layer_number: int) -> bool:
 
 
 class SharedQVLoraExperts(MegatronModule):
-    """Attention Q/V LoRA experts that consume routing from an external shared router."""
+    """Attention Q/V LoRA experts with optional output-projection experts."""
 
     def __init__(
         self,
@@ -81,6 +81,7 @@ class SharedQVLoraExperts(MegatronModule):
         self.input_size = input_size
         self.query_output_size = query_output_size
         self.value_output_size = value_output_size
+        self.include_proj = config.attn_lora_include_proj
         self.num_experts = config.attn_lora_num_experts
         self.rank = config.attn_lora_rank
         self.scale = float(config.attn_lora_alpha) / float(max(self.rank, 1))
@@ -112,6 +113,28 @@ class SharedQVLoraExperts(MegatronModule):
                 dtype=params_dtype,
             )
         )
+        if self.include_proj:
+            self.o_lora_a = Parameter(
+                torch.empty(
+                    self.num_experts,
+                    input_size,
+                    self.rank,
+                    device=device,
+                    dtype=params_dtype,
+                )
+            )
+            self.o_lora_b = Parameter(
+                torch.empty(
+                    self.num_experts,
+                    self.rank,
+                    input_size,
+                    device=device,
+                    dtype=params_dtype,
+                )
+            )
+        else:
+            self.register_parameter('o_lora_a', None)
+            self.register_parameter('o_lora_b', None)
 
         if config.perform_initialization:
             self.reset_parameters()
@@ -123,6 +146,9 @@ class SharedQVLoraExperts(MegatronModule):
             torch.nn.init.zeros_(self.q_lora_b)
             torch.nn.init.normal_(self.v_lora_a, mean=0.0, std=std)
             torch.nn.init.zeros_(self.v_lora_b)
+            if self.include_proj:
+                torch.nn.init.normal_(self.o_lora_a, mean=0.0, std=std)
+                torch.nn.init.zeros_(self.o_lora_b)
 
     def forward(
         self, hidden_states: torch.Tensor, routing_context: SharedRoutingContext
@@ -166,9 +192,51 @@ class SharedQVLoraExperts(MegatronModule):
             v_delta.reshape(*original_shape, self.value_output_size),
         )
 
+    def forward_output(
+        self,
+        proj_input_states: torch.Tensor,
+        router_states: torch.Tensor,
+        routing_context: SharedRoutingContext,
+    ) -> torch.Tensor:
+        if not self.include_proj:
+            return torch.zeros_like(proj_input_states)
+
+        original_shape = proj_input_states.shape[:-1]
+        proj_input_flat = proj_input_states.reshape(-1, proj_input_states.shape[-1]).to(
+            self.o_lora_a.dtype
+        )
+        scores = routing_context.scores
+        routing_map = routing_context.routing_map
+        if scores.shape[0] != proj_input_flat.shape[0]:
+            raise ValueError(
+                f"Shared routing token count {scores.shape[0]} does not match projection input "
+                f"{proj_input_flat.shape[0]}"
+            )
+
+        output_delta = proj_input_flat.new_zeros((proj_input_flat.shape[0], self.input_size))
+
+        for expert_id in range(self.num_experts):
+            token_indices = torch.nonzero(routing_map[:, expert_id], as_tuple=False).flatten()
+            if token_indices.numel() == 0:
+                continue
+
+            expert_proj_in = proj_input_flat.index_select(0, token_indices)
+            expert_scale = (
+                scores.index_select(0, token_indices)[:, expert_id]
+                .to(proj_input_flat.dtype)
+                .unsqueeze(-1)
+                * self.scale
+            )
+
+            o_low_rank = expert_proj_in @ self.o_lora_a[expert_id]
+            o_out = (o_low_rank @ self.o_lora_b[expert_id]) * expert_scale
+            output_delta.index_add_(0, token_indices, o_out)
+
+        return output_delta.reshape(*original_shape, self.input_size)
+
 
 class SharedRouterQVLoraSelfAttention(SelfAttention):
-    """Self-attention whose LoRA experts consume routing from a shared router."""
+    """Self-attention whose routed LoRA experts optionally adapt Q/V/O."""
 
     def __init__(
         self,
@@ -203,13 +271,6 @@ class SharedRouterQVLoraSelfAttention(SelfAttention):
             self.shared_qv_lora_experts = None
         self._active_routing_context: Optional[SharedRoutingContext] = None
 
-    def forward(self, *args, routing_context: Optional[SharedRoutingContext] = None, **kwargs):
-        self._active_routing_context = routing_context
-        try:
-            return super().forward(*args, **kwargs)
-        finally:
-            self._active_routing_context = None
-
     def get_query_key_value_tensors(self, hidden_states, key_value_states=None):
         query, key, value = super().get_query_key_value_tensors(hidden_states, key_value_states)
         if self.shared_qv_lora_experts is None or self._active_routing_context is None:
@@ -219,6 +280,50 @@ class SharedRouterQVLoraSelfAttention(SelfAttention):
         query = query + q_delta.to(query.dtype).reshape_as(query)
         value = value + v_delta.to(value.dtype).reshape_as(value)
         return query, key, value
+
+    def forward(
+        self,
+        hidden_states,
+        attention_mask,
+        key_value_states=None,
+        inference_params=None,
+        rotary_pos_emb=None,
+        rotary_pos_cos=None,
+        rotary_pos_sin=None,
+        attention_bias=None,
+        packed_seq_params=None,
+        sequence_len_offset=None,
+        routing_context: Optional[SharedRoutingContext] = None,
+    ):
+        self._active_routing_context = routing_context
+        try:
+            output, bias = super().forward(
+                hidden_states=hidden_states,
+                attention_mask=attention_mask,
+                key_value_states=key_value_states,
+                inference_params=inference_params,
+                rotary_pos_emb=rotary_pos_emb,
+                rotary_pos_cos=rotary_pos_cos,
+                rotary_pos_sin=rotary_pos_sin,
+                attention_bias=attention_bias,
+                packed_seq_params=packed_seq_params,
+                sequence_len_offset=sequence_len_offset,
+            )
+        finally:
+            self._active_routing_context = None
+
+        if (
+            self.shared_qv_lora_experts is None
+            or not self.config.attn_lora_include_proj
+            or routing_context is None
+        ):
+            return output, bias
+
+        output_delta = self.shared_qv_lora_experts.forward_output(
+            output, hidden_states, routing_context
+        )
+        output = output + output_delta.to(output.dtype)
+        return output, bias
 
 
 class SharedRouterMoELayer(BaseMoELayer):
