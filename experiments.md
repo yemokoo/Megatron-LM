@@ -22,6 +22,12 @@
 - Wiki pretrain entry: [scripts/experiment/a100/wiki_e2_mha_a100_bf16.sh](/Users/yemokoo/miil/1.%20LLM-CL/LLM-continual-learning/scripts/experiment/a100/wiki_e2_mha_a100_bf16.sh)
 - Wiki pretrain stage script: [scripts/experiment/a100/pretrain_wiki_shared_router_hybrid_local_bf16.sh](/Users/yemokoo/miil/1.%20LLM-CL/LLM-continual-learning/scripts/experiment/a100/pretrain_wiki_shared_router_hybrid_local_bf16.sh)
 - Wiki to code entry: [scripts/experiment/a100/code_from_wiki_e2_mha_a100_bf16.sh](/Users/yemokoo/miil/1.%20LLM-CL/LLM-continual-learning/scripts/experiment/a100/code_from_wiki_e2_mha_a100_bf16.sh)
+- Wiki pretrain entry, full-rank expert variant: [scripts/experiment/a100/wiki_e5_fullrank_qvo_mha_a100_bf16.sh](/Users/yemokoo/miil/1.%20LLM-CL/LLM-continual-learning/scripts/experiment/a100/wiki_e5_fullrank_qvo_mha_a100_bf16.sh)
+- Wiki to code entry, full-rank expert variant: [scripts/experiment/a100/code_from_wiki_e5_fullrank_qvo_mha_a100_bf16.sh](/Users/yemokoo/miil/1.%20LLM-CL/LLM-continual-learning/scripts/experiment/a100/code_from_wiki_e5_fullrank_qvo_mha_a100_bf16.sh)
+- Offline chain, full-rank expert variant: [scripts/experiment/a100/offline_chain_e5_fullrank_qvo_mha.sh](/Users/yemokoo/miil/1.%20LLM-CL/LLM-continual-learning/scripts/experiment/a100/offline_chain_e5_fullrank_qvo_mha.sh)
+- Wiki pretrain entry, full-rank QV expert variant: [scripts/experiment/a100/wiki_e5_fullrank_qv_mha_a100_bf16.sh](/Users/yemokoo/miil/1.%20LLM-CL/LLM-continual-learning/scripts/experiment/a100/wiki_e5_fullrank_qv_mha_a100_bf16.sh)
+- Wiki to code entry, full-rank QV expert variant: [scripts/experiment/a100/code_from_wiki_e5_fullrank_qv_mha_a100_bf16.sh](/Users/yemokoo/miil/1.%20LLM-CL/LLM-continual-learning/scripts/experiment/a100/code_from_wiki_e5_fullrank_qv_mha_a100_bf16.sh)
+- Offline chain, full-rank QV expert variant: [scripts/experiment/a100/offline_chain_e5_fullrank_qv_mha.sh](/Users/yemokoo/miil/1.%20LLM-CL/LLM-continual-learning/scripts/experiment/a100/offline_chain_e5_fullrank_qv_mha.sh)
 - Wiki to code stage script: [scripts/experiment/continual_code_from_wiki_shared_router_hybrid_expand_local_bf16.sh](/Users/yemokoo/miil/1.%20LLM-CL/LLM-continual-learning/scripts/experiment/continual_code_from_wiki_shared_router_hybrid_expand_local_bf16.sh)
 - Model config: [configs/model/flame-shared-router-hybrid-experts.sh](/Users/yemokoo/miil/1.%20LLM-CL/LLM-continual-learning/configs/model/flame-shared-router-hybrid-experts.sh)
 - Core implementation: [Megatron-LM/megatron/core/transformer/shared_router_hybrid.py](/Users/yemokoo/miil/1.%20LLM-CL/LLM-continual-learning/Megatron-LM/megatron/core/transformer/shared_router_hybrid.py)
@@ -56,6 +62,8 @@ Notes:
 - `E2`: shared-router hybrid, attention LoRA expert rank 16
 - `E3`: shared-router hybrid, attention LoRA expert rank 256
 - `E4`: shared-router hybrid, attention LoRA expert with projection included (`ATTN_LORA_INCLUDE_PROJ=1`)
+- `E5`: shared-router hybrid, attention LoRA expert full-rank-style (`rank=1024`, `ATTN_LORA_INCLUDE_PROJ=1`)
+- `E5 QV`: shared-router hybrid, attention LoRA expert full-rank-style on Q/V only (`rank=1024`)
 - `F1`: FFN expert + full-rank LoRA unfreeze
 - `F2`: FFN expert + full-rank LoRA freeze
 
