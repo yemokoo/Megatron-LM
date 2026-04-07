@@ -39,7 +39,6 @@ def add_args(parser):
     group.add_argument("--consumed-samples", type=int, default=0)
     group.add_argument("--target-eval-tokens", type=int, default=1_000_000)
     group.add_argument("--max-batches", type=int, default=8)
-    group.add_argument("--data-path", nargs="+", required=True)
     return parser
 
 
