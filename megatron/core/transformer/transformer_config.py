@@ -160,6 +160,9 @@ class TransformerConfig(ModelParallelConfig):
     attn_full_rank_lora_alpha: float = 1.0
     """Scaling factor applied to packed attention full-rank LoRA outputs."""
 
+    attn_full_rank_lora_targets: str = "qkvo"
+    """Attention projections adapted by full-rank LoRA. Supported letters: q, k, v, o."""
+
     ####################
     # initialization
     ####################

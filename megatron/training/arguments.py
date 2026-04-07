@@ -2503,6 +2503,9 @@ def _add_experimental_args(parser):
                        help='LoRA rank for packed attention linear_qkv and linear_proj adapters.')
     group.add_argument('--attn-full-rank-lora-alpha', type=float, default=1.0,
                        help='Scaling factor for packed attention full-rank LoRA outputs.')
+    group.add_argument('--attn-full-rank-lora-targets', type=str, default='qkvo',
+                       help='Attention projections adapted by full-rank LoRA. '
+                            'Use a combination of q, k, v, o (for example: qvo, qkv, qv).')
     group.add_argument('--shared-router-hybrid-model', action='store_true',
                        help='Enable the shared-router hybrid architecture where attention LoRA and '
                             'FFN MoE experts share one router.')

@@ -279,6 +279,12 @@ def freeze_all_but_new_moe_params(
             for param in qkv_full_rank_lora.parameters():
                 param.requires_grad = True
 
+        for attr_name in ("q_full_rank_lora", "k_full_rank_lora", "v_full_rank_lora"):
+            adapter = getattr(module, attr_name, None)
+            if adapter is not None:
+                for param in adapter.parameters():
+                    param.requires_grad = True
+
         proj_full_rank_lora = getattr(module, "proj_full_rank_lora", None)
         if proj_full_rank_lora is not None:
             for param in proj_full_rank_lora.parameters():

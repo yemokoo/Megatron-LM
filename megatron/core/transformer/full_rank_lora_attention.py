@@ -59,6 +59,18 @@ class FullRankLoraAdapter(torch.nn.Module):
 class FullRankLoraSelfAttention(SelfAttention):
     """Self-attention with full-rank LoRA on packed QKV and output projection."""
 
+    @staticmethod
+    def _parse_targets(targets: str) -> set[str]:
+        normalized = (targets or "").lower()
+        invalid = sorted(set(normalized) - set("qkvo"))
+        if invalid:
+            raise ValueError(
+                f"Unsupported attn_full_rank_lora_targets={targets!r}; invalid entries: {''.join(invalid)}"
+            )
+        if not normalized:
+            raise ValueError("attn_full_rank_lora_targets must contain at least one of q, k, v, o")
+        return set(normalized)
+
     def __init__(
         self,
         config: TransformerConfig,
@@ -77,25 +89,62 @@ class FullRankLoraSelfAttention(SelfAttention):
 
         enable_full_rank_lora = config.attn_full_rank_lora_rank > 0 and self.layer_number > 1
         if enable_full_rank_lora:
-            rank = min(
-                config.attn_full_rank_lora_rank,
-                self.config.hidden_size,
-                self.query_projection_size + 2 * self.kv_projection_size,
-            )
-            self.qkv_full_rank_lora = FullRankLoraAdapter(
-                config=config,
-                input_size=self.config.hidden_size,
-                output_size=self.query_projection_size + 2 * self.kv_projection_size,
-                rank=rank,
-                alpha=config.attn_full_rank_lora_alpha,
-            )
-            self.proj_full_rank_lora = FullRankLoraAdapter(
-                config=config,
-                input_size=self.query_projection_size,
-                output_size=self.config.hidden_size,
-                rank=min(config.attn_full_rank_lora_rank, self.query_projection_size),
-                alpha=config.attn_full_rank_lora_alpha,
-            )
+            targets = self._parse_targets(config.attn_full_rank_lora_targets)
+            use_packed_qkv = {"q", "k", "v"}.issubset(targets)
+            self.qkv_full_rank_lora = None
+            self.q_full_rank_lora = None
+            self.k_full_rank_lora = None
+            self.v_full_rank_lora = None
+
+            if use_packed_qkv:
+                rank = min(
+                    config.attn_full_rank_lora_rank,
+                    self.config.hidden_size,
+                    self.query_projection_size + 2 * self.kv_projection_size,
+                )
+                self.qkv_full_rank_lora = FullRankLoraAdapter(
+                    config=config,
+                    input_size=self.config.hidden_size,
+                    output_size=self.query_projection_size + 2 * self.kv_projection_size,
+                    rank=rank,
+                    alpha=config.attn_full_rank_lora_alpha,
+                )
+            else:
+                if "q" in targets:
+                    self.q_full_rank_lora = FullRankLoraAdapter(
+                        config=config,
+                        input_size=self.config.hidden_size,
+                        output_size=self.query_projection_size,
+                        rank=min(config.attn_full_rank_lora_rank, self.config.hidden_size, self.query_projection_size),
+                        alpha=config.attn_full_rank_lora_alpha,
+                    )
+                if "k" in targets:
+                    self.k_full_rank_lora = FullRankLoraAdapter(
+                        config=config,
+                        input_size=self.config.hidden_size,
+                        output_size=self.kv_projection_size,
+                        rank=min(config.attn_full_rank_lora_rank, self.config.hidden_size, self.kv_projection_size),
+                        alpha=config.attn_full_rank_lora_alpha,
+                    )
+                if "v" in targets:
+                    self.v_full_rank_lora = FullRankLoraAdapter(
+                        config=config,
+                        input_size=self.config.hidden_size,
+                        output_size=self.kv_projection_size,
+                        rank=min(config.attn_full_rank_lora_rank, self.config.hidden_size, self.kv_projection_size),
+                        alpha=config.attn_full_rank_lora_alpha,
+                    )
+
+            if "o" in targets:
+                self.proj_full_rank_lora = FullRankLoraAdapter(
+                    config=config,
+                    input_size=self.query_projection_size,
+                    output_size=self.config.hidden_size,
+                    rank=min(config.attn_full_rank_lora_rank, self.query_projection_size),
+                    alpha=config.attn_full_rank_lora_alpha,
+                )
+            else:
+                self.proj_full_rank_lora = None
 
             for param in self.linear_qkv.parameters():
                 param.requires_grad = False
@@ -111,6 +160,9 @@ class FullRankLoraSelfAttention(SelfAttention):
             self.register_load_state_dict_post_hook(remove_full_rank_lora_missing_keys)
         else:
             self.qkv_full_rank_lora = None
+            self.q_full_rank_lora = None
+            self.k_full_rank_lora = None
+            self.v_full_rank_lora = None
             self.proj_full_rank_lora = None
 
     def get_query_key_value_tensors(self, hidden_states, key_value_states=None):
@@ -139,6 +191,30 @@ class FullRankLoraSelfAttention(SelfAttention):
 
         query, key, value = torch.split(mixed_qkv, split_arg_list, dim=3)
         query = query.reshape(query.size(0), query.size(1), -1, self.hidden_size_per_attention_head)
+        if self.q_full_rank_lora is not None:
+            q_delta = self.q_full_rank_lora(hidden_states).to(query.dtype)
+            query = query + q_delta.view(
+                query.size(0),
+                query.size(1),
+                self.num_attention_heads_per_partition,
+                self.hidden_size_per_attention_head,
+            )
+        if self.k_full_rank_lora is not None:
+            k_delta = self.k_full_rank_lora(hidden_states).to(key.dtype)
+            key = key + k_delta.view(
+                key.size(0),
+                key.size(1),
+                self.num_query_groups_per_partition,
+                self.hidden_size_per_attention_head,
+            )
+        if self.v_full_rank_lora is not None:
+            v_delta = self.v_full_rank_lora(hidden_states).to(value.dtype)
+            value = value + v_delta.view(
+                value.size(0),
+                value.size(1),
+                self.num_query_groups_per_partition,
+                self.hidden_size_per_attention_head,
+            )
 
         if self.q_layernorm is not None:
             query = self.q_layernorm(query)
