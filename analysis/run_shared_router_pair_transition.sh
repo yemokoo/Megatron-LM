@@ -33,8 +33,19 @@ raise SystemExit(0)
 PY
 }
 
-dataset_blend_args() {
-  find "$1" -type f -name '*.bin' -exec sh -c 'printf "1.0 %s " "${1%.bin}"' _ {} \; | sed 's/ $//'
+build_dataset_blend_array() {
+    local dataset_dir="$1"
+    local -n out_array_ref="$2"
+    out_array_ref=()
+
+    while IFS= read -r -d '' bin_path; do
+        out_array_ref+=("1.0" "${bin_path%.bin}")
+    done < <(find "$dataset_dir" -type f -name '*.bin' -print0 | sort -z)
+
+    if [ "${#out_array_ref[@]}" -eq 0 ]; then
+        echo "ERROR: no .bin files found under $dataset_dir"
+        exit 1
+    fi
 }
 
 truthy() {
@@ -89,7 +100,8 @@ if [ -z "$SOURCE_NUM_EXPERTS" ] || [ -z "$TOTAL_NUM_EXPERTS" ]; then
 fi
 
 mkdir -p "$OUTPUT_ROOT"
-WIKI_DATA_PATH="$(dataset_blend_args "$TASK_WIKI")"
+WIKI_DATA_PATH_ARGS=()
+build_dataset_blend_array "$TASK_WIKI" WIKI_DATA_PATH_ARGS
 WIKI_DUMP_PT="$OUTPUT_ROOT/wiki_pairs.pt"
 CODE_DUMP_PT="$OUTPUT_ROOT/code_pairs.pt"
 
@@ -109,7 +121,7 @@ run_dump() {
     --load "$run_dir"
     --output-pt "$output_pt"
     --compare-label "$compare_label"
-    --data-path
+    --data-path "${WIKI_DATA_PATH_ARGS[@]}"
     --target-eval-tokens "$TARGET_EVAL_TOKENS"
     --max-batches 8
     --micro-batch-size "$MICRO_BATCH_SIZE"
@@ -146,8 +158,7 @@ run_dump() {
     --nnodes 1 \
     --nproc_per_node 1 \
     --master_port "$port" \
-    "${args[@]}" \
-    $WIKI_DATA_PATH
+    "${args[@]}"
 }
 
 run_dump \
