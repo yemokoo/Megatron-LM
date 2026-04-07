@@ -45,11 +45,22 @@ def add_args(parser):
 def normalize_blend_path_args(data_path_args):
     normalized = []
     for entry in data_path_args:
+        try:
+            float(entry)
+            normalized.append(entry)
+            continue
+        except (TypeError, ValueError):
+            pass
+
         candidate = Path(entry)
+        if candidate.with_suffix(".bin").exists() or candidate.with_suffix(".idx").exists():
+            normalized.append(entry)
+            continue
         if candidate.is_dir():
             prefixes = sorted(bin_path.with_suffix("") for bin_path in candidate.glob("*.bin"))
             if not prefixes:
-                raise FileNotFoundError(f"No .bin files found under dataset directory {candidate}")
+                normalized.append(entry)
+                continue
             for prefix in prefixes:
                 normalized.extend(["1.0", str(prefix)])
         else:
