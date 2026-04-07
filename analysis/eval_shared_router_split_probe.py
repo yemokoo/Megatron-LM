@@ -391,6 +391,7 @@ def main():
             "use_checkpoint_args": True,
             "micro_batch_size": 8,
             "global_batch_size": 8,
+            "shared_router_hybrid_model": True,
         },
     )
     args = get_args()
