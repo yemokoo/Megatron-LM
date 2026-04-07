@@ -11,6 +11,9 @@
 - Replay to W&B: [analysis/replay_full_history_to_wandb.py](/Users/yemokoo/miil/1.%20LLM-CL/LLM-continual-learning/analysis/replay_full_history_to_wandb.py)
 - Shared-router split probe eval: [analysis/eval_shared_router_split_probe.py](/Users/yemokoo/miil/1.%20LLM-CL/LLM-continual-learning/analysis/eval_shared_router_split_probe.py)
 - Shared-router split probe plot: [analysis/plot_shared_router_split_probe.py](/Users/yemokoo/miil/1.%20LLM-CL/LLM-continual-learning/analysis/plot_shared_router_split_probe.py)
+- Shared-router pair dump: [analysis/dump_shared_router_pairs.py](/Users/yemokoo/miil/1.%20LLM-CL/LLM-continual-learning/analysis/dump_shared_router_pairs.py)
+- Shared-router pair transition compare: [analysis/compare_shared_router_pair_transitions.py](/Users/yemokoo/miil/1.%20LLM-CL/LLM-continual-learning/analysis/compare_shared_router_pair_transitions.py)
+- Shared-router pair transition runner: [analysis/run_shared_router_pair_transition.sh](/Users/yemokoo/miil/1.%20LLM-CL/LLM-continual-learning/analysis/run_shared_router_pair_transition.sh)
 
 ## 2. FFN MoE Baselines
 
