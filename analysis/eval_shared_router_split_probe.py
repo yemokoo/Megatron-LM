@@ -31,6 +31,16 @@ from megatron.legacy.data.data_samplers import build_pretraining_data_loader
 from pretrain_gpt import get_batch, is_dataset_built_on_rank, model_provider
 
 
+def ensure_runtime_flag(flag):
+    if flag not in sys.argv:
+        sys.argv.append(flag)
+
+
+def ensure_runtime_kv(flag, value):
+    if flag not in sys.argv:
+        sys.argv.extend([flag, str(value)])
+
+
 def add_args(parser):
     group = parser.add_argument_group(title="shared-router-split-probe")
     group.add_argument("--output-root", type=str, required=True)
@@ -382,16 +392,21 @@ def save_bar_plots(results, output_root: Path):
 
 
 def main():
+    # These eval-only runs load hybrid checkpoints directly, so we make the
+    # required Megatron runtime flags explicit instead of relying on parser
+    # defaults for store_true arguments.
+    ensure_runtime_flag("--use-checkpoint-args")
+    ensure_runtime_flag("--shared-router-hybrid-model")
+    ensure_runtime_flag("--bf16")
+    ensure_runtime_kv("--micro-batch-size", 8)
+    ensure_runtime_kv("--global-batch-size", 8)
+
     initialize_megatron(
         extra_args_provider=add_args,
         args_defaults={
             "no_load_rng": True,
             "no_load_optim": True,
             "exit_on_missing_checkpoint": True,
-            "use_checkpoint_args": True,
-            "micro_batch_size": 8,
-            "global_batch_size": 8,
-            "shared_router_hybrid_model": True,
         },
     )
     args = get_args()
