@@ -389,6 +389,8 @@ def main():
             "no_load_optim": True,
             "exit_on_missing_checkpoint": True,
             "use_checkpoint_args": True,
+            "micro_batch_size": 8,
+            "global_batch_size": 8,
         },
     )
     args = get_args()
