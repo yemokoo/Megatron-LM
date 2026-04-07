@@ -106,6 +106,23 @@ def build_eval_dataloader_for_path(data_path, num_batches):
     return build_pretraining_data_loader(selected_ds, args.consumed_samples)
 
 
+def normalize_blend_path_args(data_path_args):
+    normalized = []
+    for entry in data_path_args:
+        candidate = Path(entry)
+        if candidate.is_dir():
+            prefixes = sorted(bin_path.with_suffix("") for bin_path in candidate.glob("*.bin"))
+            if not prefixes:
+                raise FileNotFoundError(
+                    f"No .bin files found under dataset directory {candidate}"
+                )
+            for prefix in prefixes:
+                normalized.extend(["1.0", str(prefix)])
+        else:
+            normalized.append(entry)
+    return normalized
+
+
 def clone_batch_to_cpu(batch):
     output = []
     for item in batch:
@@ -420,6 +437,7 @@ def main():
         },
     )
     args = get_args()
+    args.code_data_path = normalize_blend_path_args(args.code_data_path)
     args.shared_eval_iters = max(
         args.max_batches,
         math.ceil(args.target_eval_tokens / max(args.micro_batch_size * args.seq_length, 1)),
