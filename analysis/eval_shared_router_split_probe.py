@@ -2,6 +2,7 @@
 import argparse
 import json
 import math
+import os
 import sys
 import types
 from pathlib import Path
@@ -39,6 +40,14 @@ def ensure_runtime_flag(flag):
 def ensure_runtime_kv(flag, value):
     if flag not in sys.argv:
         sys.argv.extend([flag, str(value)])
+
+
+def ensure_single_process_dist_env():
+    os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
+    os.environ.setdefault("MASTER_PORT", "29591")
+    os.environ.setdefault("RANK", "0")
+    os.environ.setdefault("WORLD_SIZE", "1")
+    os.environ.setdefault("LOCAL_RANK", "0")
 
 
 def add_args(parser):
@@ -400,6 +409,7 @@ def main():
     ensure_runtime_flag("--bf16")
     ensure_runtime_kv("--micro-batch-size", 8)
     ensure_runtime_kv("--global-batch-size", 8)
+    ensure_single_process_dist_env()
 
     initialize_megatron(
         extra_args_provider=add_args,
