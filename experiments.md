@@ -54,6 +54,8 @@
 - Wiki to code entry: [code_from_wiki_e2_mha_a100_bf16.sh](/Users/yemokoo/miil/1.%20LLM-CL/LLM-continual-learning/scripts/experiment/a100/code_from_wiki_e2_mha_a100_bf16.sh)
 - Wiki pretrain entry, full-rank QV expert variant: [wiki_e5_fullrank_qv_mha_a100_bf16.sh](/Users/yemokoo/miil/1.%20LLM-CL/LLM-continual-learning/scripts/experiment/a100/wiki_e5_fullrank_qv_mha_a100_bf16.sh)
 - Wiki to code entry, full-rank QV expert variant: [code_from_wiki_e5_fullrank_qv_mha_a100_bf16.sh](/Users/yemokoo/miil/1.%20LLM-CL/LLM-continual-learning/scripts/experiment/a100/code_from_wiki_e5_fullrank_qv_mha_a100_bf16.sh)
+- Wiki pretrain entry, full-rank QKVO expert variant: [wiki_e6_fullrank_qkvo_expert_mha_a100_bf16.sh](/Users/yemokoo/miil/1.%20LLM-CL/LLM-continual-learning/scripts/experiment/a100/wiki_e6_fullrank_qkvo_expert_mha_a100_bf16.sh)
+- Wiki to code entry, full-rank QKVO expert variant: [code_from_wiki_e6_fullrank_qkvo_expert_mha_a100_bf16.sh](/Users/yemokoo/miil/1.%20LLM-CL/LLM-continual-learning/scripts/experiment/a100/code_from_wiki_e6_fullrank_qkvo_expert_mha_a100_bf16.sh)
 - Offline chain, full-rank QV expert variant: [offline_chain_e5_fullrank_qv_mha.sh](/Users/yemokoo/miil/1.%20LLM-CL/LLM-continual-learning/scripts/experiment/a100/offline_chain_e5_fullrank_qv_mha.sh)
 - Wiki to code stage script: [continual_code_from_wiki_shared_router_hybrid_expand_local_bf16.sh](/Users/yemokoo/miil/1.%20LLM-CL/LLM-continual-learning/scripts/experiment/continual_code_from_wiki_shared_router_hybrid_expand_local_bf16.sh)
 - Model config: [flame-shared-router-hybrid-experts.sh](/Users/yemokoo/miil/1.%20LLM-CL/LLM-continual-learning/configs/model/flame-shared-router-hybrid-experts.sh)
@@ -70,6 +72,17 @@
 - `E3`: shared-router hybrid, attention LoRA expert rank 256
 - `E4`: shared-router hybrid, attention LoRA expert with projection included
 - `E5 QV`: shared-router hybrid, full-rank-style attention LoRA expert on `Q/V` only
+- `E6 QKVO expert`: shared-router hybrid, attention full-rank expert on `Q/K/V/O`
+
+stage별 probe 기본값:
+- `wiki stage`: primary `wiki_probe`, secondary `code_probe`
+- `code stage`: primary `code_probe`, secondary `wiki_probe`
+
+현재 비교 철학:
+- `wiki stage`는 전체 파라미터를 정상적으로 학습한다
+- `code stage`는 `shared_router_hybrid_train_new_experts_and_router_only` 경로를 써서, 기존 shared/base는 freeze하고 새로 확장된 expert와 router 쪽만 학습한다
+- attention 쪽은 shared router가 선택한 expert index를 FFN expert와 같이 공유한다
+- `E6`에서는 attention expert가 `Q/K/V/O` projection 각각에 대응하는 full-rank update를 가진다
 
 ### 3.3 Dense / Standalone LoRA Path
 
@@ -211,6 +224,7 @@ projection variant 의미:
 - `E3`: shared-router hybrid, attention LoRA expert rank 256
 - `E4`: shared-router hybrid, QVO-side attention LoRA expert with projection
 - `E5 QV`: shared-router hybrid, full-rank-style attention LoRA expert on Q/V only
+- `E6 QKVO expert`: shared-router hybrid, full-rank attention expert on Q/K/V/O
 - `F1`: full-rank LoRA + unfreeze
 - `F2`: full-rank LoRA + freeze shared
 - `F3`: rank-16 standalone LoRA + unfreeze
