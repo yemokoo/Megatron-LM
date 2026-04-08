@@ -6,7 +6,10 @@ import torch
 from megatron.core.transformer.moe.experts import GroupedMLP, SequentialMLP, TEGroupedMLP
 from megatron.core.transformer.moe.router import Router
 from megatron.core.transformer.qv_lora_attention import QVLoraExpertRouter
-from megatron.core.transformer.shared_router_hybrid import SharedQVLoraExperts
+from megatron.core.transformer.shared_router_hybrid import (
+    SharedFullRankLoraExperts,
+    SharedQVLoraExperts,
+)
 
 
 _EXPERT_SUFFIX_RE = re.compile(r"(?:weight|bias)(\d+)$")
@@ -97,6 +100,26 @@ def _copy_shared_qv_lora_experts(dst_experts, src_experts, num_existing_experts)
             )
 
 
+def _copy_shared_full_rank_lora_experts(dst_experts, src_experts, num_existing_experts):
+    with torch.no_grad():
+        for attr_name in (
+            "qkv_lora_a",
+            "qkv_lora_b",
+            "q_lora_a",
+            "q_lora_b",
+            "k_lora_a",
+            "k_lora_b",
+            "v_lora_a",
+            "v_lora_b",
+            "proj_lora_a",
+            "proj_lora_b",
+        ):
+            dst_param = getattr(dst_experts, attr_name, None)
+            src_param = getattr(src_experts, attr_name, None)
+            if dst_param is not None and src_param is not None:
+                dst_param[:num_existing_experts].copy_(src_param[:num_existing_experts])
+
+
 def expand_moe_model(target_model, source_model, num_existing_experts):
     _load_matching_state(target_model, source_model)
 
@@ -118,6 +141,10 @@ def expand_moe_model(target_model, source_model, num_existing_experts):
             source_module, SharedQVLoraExperts
         ):
             _copy_shared_qv_lora_experts(target_module, source_module, num_existing_experts)
+        elif isinstance(target_module, SharedFullRankLoraExperts) and isinstance(
+            source_module, SharedFullRankLoraExperts
+        ):
+            _copy_shared_full_rank_lora_experts(target_module, source_module, num_existing_experts)
 
 
 def _freeze_router(module, num_existing_experts):
@@ -160,6 +187,29 @@ def _freeze_qv_lora_experts(module, num_existing_experts):
     if getattr(module, "o_lora_a", None) is not None:
         module.o_lora_a.register_hook(_zero_existing_expert_grads)
         module.o_lora_b.register_hook(_zero_existing_expert_grads)
+
+
+def _freeze_shared_full_rank_lora_experts(module, num_existing_experts):
+    def _zero_existing_expert_grads(grad):
+        grad = grad.clone()
+        grad[:num_existing_experts].zero_()
+        return grad
+
+    for attr_name in (
+        "qkv_lora_a",
+        "qkv_lora_b",
+        "q_lora_a",
+        "q_lora_b",
+        "k_lora_a",
+        "k_lora_b",
+        "v_lora_a",
+        "v_lora_b",
+        "proj_lora_a",
+        "proj_lora_b",
+    ):
+        param = getattr(module, attr_name, None)
+        if param is not None:
+            param.register_hook(_zero_existing_expert_grads)
 
 
 def _freeze_qv_lora_router(module, num_existing_experts):
@@ -206,6 +256,9 @@ def freeze_preexisting_moe_params(
         elif isinstance(module, SharedQVLoraExperts):
             if freeze_existing_experts:
                 _freeze_qv_lora_experts(module, num_existing_experts)
+        elif isinstance(module, SharedFullRankLoraExperts):
+            if freeze_existing_experts:
+                _freeze_shared_full_rank_lora_experts(module, num_existing_experts)
 
 
 def freeze_all_but_new_moe_params(
@@ -271,6 +324,26 @@ def freeze_all_but_new_moe_params(
                 module.o_lora_b.requires_grad = True
             if freeze_existing_experts:
                 _freeze_qv_lora_experts(module, num_existing_experts)
+            continue
+
+        if isinstance(module, SharedFullRankLoraExperts):
+            for attr_name in (
+                "qkv_lora_a",
+                "qkv_lora_b",
+                "q_lora_a",
+                "q_lora_b",
+                "k_lora_a",
+                "k_lora_b",
+                "v_lora_a",
+                "v_lora_b",
+                "proj_lora_a",
+                "proj_lora_b",
+            ):
+                param = getattr(module, attr_name, None)
+                if param is not None:
+                    param.requires_grad = True
+            if freeze_existing_experts:
+                _freeze_shared_full_rank_lora_experts(module, num_existing_experts)
             continue
 
         # Keep dense attention full-rank LoRA trainable even when shared weights are frozen.
