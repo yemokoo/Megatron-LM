@@ -115,6 +115,8 @@ export SOURCE_REQUIRED_ITERS="${SOURCE_REQUIRED_ITERS:-1}"
 export TRAIN_WEIGHTS="${TRAIN_WEIGHTS:-$LOCAL_WEIGHTS/a100/code-from-wiki-shared-router-hybrid-expand-local/$RUN_ID}"
 export LOG_DIR="${LOG_DIR:-$TRAIN_WEIGHTS/logs}"
 export RUN_METADATA="${RUN_METADATA:-$LOG_DIR/run_metadata.json}"
+export RUN_LOG="${RUN_LOG:-$LOG_DIR/run.log}"
+export GPU_LOG="${GPU_LOG:-$LOG_DIR/gpu.log}"
 export DATASET_NAME="${DATASET_NAME:-code_exact}"
 export DATASET_SOURCE="${DATASET_SOURCE:-Python code exact train}"
 export PROBE_DATASET="${PROBE_DATASET:-$(probe_dir_for_task code)}"
@@ -150,6 +152,35 @@ if [ "$DIRECT_LOCAL_SAVE" = "1" ]; then
 fi
 
 mkdir -p "$SSD_CODE_TRAIN" "$SSD_SOURCE_WEIGHTS" "$SSD_TARGET_WEIGHTS" "$TRAIN_WEIGHTS" "$LOG_DIR"
+exec > >(
+    tee -a "$RUN_LOG" | "$PYTHON_BIN" -u -c '
+import re, sys
+iter_re = re.compile(r"(\[[^]]+\]) iteration\s+(\d+)/\s*(\d+).*throughput per GPU \(TFLOP/s/GPU\):\s*([0-9.]+)")
+val_re = re.compile(r"validation loss at iteration\s+(\d+).*lm loss value:\s*([^|]+)")
+save_re = re.compile(r"saving checkpoint at iteration\s+(\d+)")
+keep_re = re.compile(r"shared-router hybrid|ERROR:|Traceback|failed \(exitcode|checkpoint at|probe |Expanded MoE checkpoint")
+for line in sys.stdin:
+    line = line.rstrip("\n")
+    m = iter_re.search(line)
+    if m:
+        print(f"{m.group(1)} step {m.group(2)}/{m.group(3)} | GPU {m.group(4)} TFLOP/s", flush=True)
+        continue
+    m = val_re.search(line)
+    if m:
+        print(f"validation step {m.group(1)} | lm loss {m.group(2).strip()}", flush=True)
+        continue
+    m = save_re.search(line)
+    if m:
+        print(f"saving checkpoint step {m.group(1)}", flush=True)
+        continue
+    if keep_re.search(line):
+        print(line, flush=True)
+'
+) 2>&1
+
+echo "shared-router hybrid continual run log: $RUN_LOG"
+echo "shared-router hybrid continual gpu log: $GPU_LOG"
+echo "shared-router hybrid continual metadata: $RUN_METADATA"
 rsync -rlptD \
     --exclude 'logs/' \
     --exclude 'wandb/' \
