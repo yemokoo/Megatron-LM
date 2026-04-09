@@ -36,6 +36,7 @@ from megatron.core.utils import make_viewless_tensor
 class SharedRoutingContext:
     scores: torch.Tensor
     routing_map: torch.Tensor
+    expert_token_indices: Optional[Tuple[torch.Tensor, ...]] = None
 
 
 @dataclass
@@ -75,6 +76,20 @@ def _parse_full_rank_targets(targets: str) -> set[str]:
     if not normalized:
         raise ValueError("attn_full_rank_lora_targets must contain at least one of q, k, v, o")
     return set(normalized)
+
+
+def _parse_active_full_rank_targets(active_targets: str, instantiated_targets: set[str]) -> set[str]:
+    if not active_targets:
+        return set(instantiated_targets)
+    normalized_active = _parse_full_rank_targets(active_targets)
+    if not normalized_active.issubset(instantiated_targets):
+        missing = ''.join(sorted(normalized_active - instantiated_targets))
+        raise ValueError(
+            f"attn_full_rank_lora_active_targets={active_targets!r} is not a subset of "
+            f"attn_full_rank_lora_targets={''.join(sorted(instantiated_targets))!r}; "
+            f"invalid active entries: {missing}"
+        )
+    return normalized_active
 
 
 class SharedQVLoraExperts(MegatronModule):
@@ -275,6 +290,9 @@ class SharedFullRankLoraExperts(MegatronModule):
         self.rank = config.attn_full_rank_lora_rank
         self.scale = float(config.attn_full_rank_lora_alpha) / float(max(self.rank, 1))
         self.targets = _parse_full_rank_targets(config.attn_full_rank_lora_targets)
+        self.active_targets = _parse_active_full_rank_targets(
+            config.attn_full_rank_lora_active_targets, self.targets
+        )
         self.use_packed_qkv = {"q", "k", "v"}.issubset(self.targets)
 
         device = None if config.use_cpu_initialization else torch.cuda.current_device()
@@ -396,9 +414,13 @@ class SharedFullRankLoraExperts(MegatronModule):
         q_delta = hidden_flat.new_zeros((hidden_flat.shape[0], self.query_output_size))
         k_delta = hidden_flat.new_zeros((hidden_flat.shape[0], self.value_output_size))
         v_delta = hidden_flat.new_zeros((hidden_flat.shape[0], self.value_output_size))
+        expert_token_indices = routing_context.expert_token_indices
 
         for expert_id in range(self.num_experts):
-            token_indices = torch.nonzero(routing_map[:, expert_id], as_tuple=False).flatten()
+            if expert_token_indices is not None:
+                token_indices = expert_token_indices[expert_id]
+            else:
+                token_indices = torch.nonzero(routing_map[:, expert_id], as_tuple=False).flatten()
             if token_indices.numel() == 0:
                 continue
 
@@ -429,11 +451,11 @@ class SharedFullRankLoraExperts(MegatronModule):
                     (expert_hidden @ self.v_lora_a[expert_id]) @ self.v_lora_b[expert_id]
                 ) * expert_scale if self.v_lora_a is not None else None
 
-            if q_out is not None:
+            if q_out is not None and "q" in self.active_targets:
                 q_delta.index_add_(0, token_indices, q_out)
-            if k_out is not None:
+            if k_out is not None and "k" in self.active_targets:
                 k_delta.index_add_(0, token_indices, k_out)
-            if v_out is not None:
+            if v_out is not None and "v" in self.active_targets:
                 v_delta.index_add_(0, token_indices, v_out)
 
         return (
@@ -445,13 +467,14 @@ class SharedFullRankLoraExperts(MegatronModule):
     def forward_proj(
         self, core_attn_out: torch.Tensor, routing_context: SharedRoutingContext
     ) -> torch.Tensor:
-        if not self.has_output_adapter():
+        if not self.has_output_adapter() or "o" not in self.active_targets:
             return torch.zeros_like(core_attn_out[..., : self.input_size])
 
         original_shape = core_attn_out.shape[:-1]
         core_attn_flat = core_attn_out.reshape(-1, core_attn_out.shape[-1]).to(self.proj_lora_a.dtype)
         scores = routing_context.scores
         routing_map = routing_context.routing_map
+        expert_token_indices = routing_context.expert_token_indices
         if scores.shape[0] != core_attn_flat.shape[0]:
             raise ValueError(
                 f"Shared routing token count {scores.shape[0]} does not match projection input "
@@ -461,7 +484,10 @@ class SharedFullRankLoraExperts(MegatronModule):
         output_delta = core_attn_flat.new_zeros((core_attn_flat.shape[0], self.input_size))
 
         for expert_id in range(self.num_experts):
-            token_indices = torch.nonzero(routing_map[:, expert_id], as_tuple=False).flatten()
+            if expert_token_indices is not None:
+                token_indices = expert_token_indices[expert_id]
+            else:
+                token_indices = torch.nonzero(routing_map[:, expert_id], as_tuple=False).flatten()
             if token_indices.numel() == 0:
                 continue
 
@@ -844,7 +870,15 @@ class SharedRouterHybridTransformerLayer(MegatronModule, BaseTransformerLayer):
         if self.shared_expert_router is None:
             raise ValueError("Shared routing requested for a layer without shared experts.")
         scores, routing_map = self.shared_expert_router(hidden_states)
-        return SharedRoutingContext(scores=scores, routing_map=routing_map)
+        expert_token_indices = tuple(
+            torch.nonzero(routing_map[:, expert_id], as_tuple=False).flatten()
+            for expert_id in range(routing_map.shape[1])
+        )
+        return SharedRoutingContext(
+            scores=scores,
+            routing_map=routing_map,
+            expert_token_indices=expert_token_indices,
+        )
 
     def forward(
         self,

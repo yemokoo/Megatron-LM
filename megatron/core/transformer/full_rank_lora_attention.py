@@ -71,6 +71,20 @@ class FullRankLoraSelfAttention(SelfAttention):
             raise ValueError("attn_full_rank_lora_targets must contain at least one of q, k, v, o")
         return set(normalized)
 
+    @classmethod
+    def _parse_active_targets(cls, active_targets: str, instantiated_targets: set[str]) -> set[str]:
+        if not active_targets:
+            return set(instantiated_targets)
+        normalized_active = cls._parse_targets(active_targets)
+        if not normalized_active.issubset(instantiated_targets):
+            missing = ''.join(sorted(normalized_active - instantiated_targets))
+            raise ValueError(
+                f"attn_full_rank_lora_active_targets={active_targets!r} is not a subset of "
+                f"attn_full_rank_lora_targets={''.join(sorted(instantiated_targets))!r}; "
+                f"invalid active entries: {missing}"
+            )
+        return normalized_active
+
     def __init__(
         self,
         config: TransformerConfig,
@@ -90,7 +104,11 @@ class FullRankLoraSelfAttention(SelfAttention):
         enable_full_rank_lora = config.attn_full_rank_lora_rank > 0 and self.layer_number > 1
         if enable_full_rank_lora:
             targets = self._parse_targets(config.attn_full_rank_lora_targets)
+            active_targets = self._parse_active_targets(
+                config.attn_full_rank_lora_active_targets, targets
+            )
             use_packed_qkv = {"q", "k", "v"}.issubset(targets)
+            self.active_targets = active_targets
             self.qkv_full_rank_lora = None
             self.q_full_rank_lora = None
             self.k_full_rank_lora = None
@@ -159,6 +177,7 @@ class FullRankLoraSelfAttention(SelfAttention):
 
             self.register_load_state_dict_post_hook(remove_full_rank_lora_missing_keys)
         else:
+            self.active_targets = set()
             self.qkv_full_rank_lora = None
             self.q_full_rank_lora = None
             self.k_full_rank_lora = None
@@ -167,8 +186,9 @@ class FullRankLoraSelfAttention(SelfAttention):
 
     def get_query_key_value_tensors(self, hidden_states, key_value_states=None):
         mixed_qkv, _ = self.linear_qkv(hidden_states)
+        lora_qkv_delta = None
         if self.qkv_full_rank_lora is not None:
-            mixed_qkv = mixed_qkv + self.qkv_full_rank_lora(hidden_states).to(mixed_qkv.dtype)
+            lora_qkv_delta = self.qkv_full_rank_lora(hidden_states).to(mixed_qkv.dtype)
 
         new_tensor_shape = mixed_qkv.size()[:-1] + (
             self.num_query_groups_per_partition,
@@ -191,7 +211,34 @@ class FullRankLoraSelfAttention(SelfAttention):
 
         query, key, value = torch.split(mixed_qkv, split_arg_list, dim=3)
         query = query.reshape(query.size(0), query.size(1), -1, self.hidden_size_per_attention_head)
-        if self.q_full_rank_lora is not None:
+        if lora_qkv_delta is not None:
+            lora_qkv_delta = lora_qkv_delta.view(*new_tensor_shape)
+            q_delta, k_delta, v_delta = torch.split(lora_qkv_delta, split_arg_list, dim=3)
+            q_delta = q_delta.reshape(
+                query.size(0),
+                query.size(1),
+                self.num_attention_heads_per_partition,
+                self.hidden_size_per_attention_head,
+            )
+            k_delta = k_delta.reshape(
+                key.size(0),
+                key.size(1),
+                self.num_query_groups_per_partition,
+                self.hidden_size_per_attention_head,
+            )
+            v_delta = v_delta.reshape(
+                value.size(0),
+                value.size(1),
+                self.num_query_groups_per_partition,
+                self.hidden_size_per_attention_head,
+            )
+            if "q" in self.active_targets:
+                query = query + q_delta
+            if "k" in self.active_targets:
+                key = key + k_delta
+            if "v" in self.active_targets:
+                value = value + v_delta
+        if self.q_full_rank_lora is not None and "q" in self.active_targets:
             q_delta = self.q_full_rank_lora(hidden_states).to(query.dtype)
             query = query + q_delta.view(
                 query.size(0),
@@ -199,7 +246,7 @@ class FullRankLoraSelfAttention(SelfAttention):
                 self.num_attention_heads_per_partition,
                 self.hidden_size_per_attention_head,
             )
-        if self.k_full_rank_lora is not None:
+        if self.k_full_rank_lora is not None and "k" in self.active_targets:
             k_delta = self.k_full_rank_lora(hidden_states).to(key.dtype)
             key = key + k_delta.view(
                 key.size(0),
@@ -207,7 +254,7 @@ class FullRankLoraSelfAttention(SelfAttention):
                 self.num_query_groups_per_partition,
                 self.hidden_size_per_attention_head,
             )
-        if self.v_full_rank_lora is not None:
+        if self.v_full_rank_lora is not None and "v" in self.active_targets:
             v_delta = self.v_full_rank_lora(hidden_states).to(value.dtype)
             value = value + v_delta.view(
                 value.size(0),
@@ -309,7 +356,7 @@ class FullRankLoraSelfAttention(SelfAttention):
             core_attn_out = core_attn_out.reshape(core_attn_out.size(0), 1, -1)
 
         output, bias = self.linear_proj(core_attn_out)
-        if self.proj_full_rank_lora is not None:
+        if self.proj_full_rank_lora is not None and "o" in self.active_targets:
             output = output + self.proj_full_rank_lora(core_attn_out).to(output.dtype)
 
         return output, bias

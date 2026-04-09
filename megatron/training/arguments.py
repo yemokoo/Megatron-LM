@@ -2506,6 +2506,9 @@ def _add_experimental_args(parser):
     group.add_argument('--attn-full-rank-lora-targets', type=str, default='qkvo',
                        help='Attention projections adapted by full-rank LoRA. '
                             'Use a combination of q, k, v, o (for example: qvo, qkv, qv).')
+    group.add_argument('--attn-full-rank-lora-active-targets', type=str, default='',
+                       help='Subset of instantiated full-rank LoRA projections to actually apply. '
+                            'Useful for keeping packed QKV parameterization while masking some outputs.')
     group.add_argument('--shared-router-hybrid-model', action='store_true',
                        help='Enable the shared-router hybrid architecture where attention LoRA and '
                             'FFN MoE experts share one router.')

@@ -163,6 +163,9 @@ class TransformerConfig(ModelParallelConfig):
     attn_full_rank_lora_targets: str = "qkvo"
     """Attention projections adapted by full-rank LoRA. Supported letters: q, k, v, o."""
 
+    attn_full_rank_lora_active_targets: str = ""
+    """Subset of instantiated full-rank LoRA projections to actually apply. Empty means use all instantiated targets."""
+
     ####################
     # initialization
     ####################
