@@ -36,4 +36,5 @@ MODEL_ARGS=(
     --attn-full-rank-lora-rank "${ATTN_FULL_RANK_LORA_RANK:-1024}"
     --attn-full-rank-lora-alpha "${ATTN_FULL_RANK_LORA_ALPHA:-1024}"
     --attn-full-rank-lora-targets "${ATTN_FULL_RANK_LORA_TARGETS:-qkvo}"
+    --attn-full-rank-lora-active-targets "${ATTN_FULL_RANK_LORA_ACTIVE_TARGETS:-}"
 )

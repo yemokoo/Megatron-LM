@@ -34,6 +34,7 @@ export ATTN_LORA_ALPHA="${ATTN_LORA_ALPHA:-16}"
 export ATTN_FULL_RANK_LORA_RANK="${ATTN_FULL_RANK_LORA_RANK:-0}"
 export ATTN_FULL_RANK_LORA_ALPHA="${ATTN_FULL_RANK_LORA_ALPHA:-1.0}"
 export ATTN_FULL_RANK_LORA_TARGETS="${ATTN_FULL_RANK_LORA_TARGETS:-qkvo}"
+export ATTN_FULL_RANK_LORA_ACTIVE_TARGETS="${ATTN_FULL_RANK_LORA_ACTIVE_TARGETS:-}"
 export MICRO_BATCH_SIZE="${MICRO_BATCH_SIZE:-8}"
 export GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-1024}"
 export PIPELINE_MODEL_PARALLEL_SIZE=1
@@ -179,6 +180,7 @@ metadata = {
     'attn_full_rank_lora_rank': int(os.environ.get('ATTN_FULL_RANK_LORA_RANK', '0')),
     'attn_full_rank_lora_alpha': float(os.environ.get('ATTN_FULL_RANK_LORA_ALPHA', '1.0')),
     'attn_full_rank_lora_targets': os.environ.get('ATTN_FULL_RANK_LORA_TARGETS', 'qkvo'),
+    'attn_full_rank_lora_active_targets': os.environ.get('ATTN_FULL_RANK_LORA_ACTIVE_TARGETS', ''),
     'shared_router_hybrid': True,
 }
 with open(os.environ['RUN_METADATA'], 'w', encoding='utf-8') as f:
