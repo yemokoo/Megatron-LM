@@ -198,6 +198,7 @@ Representative output folders:
 For a reproducible A100-side setup, use:
 - [environment.a100.yml](./environment.a100.yml)
 - [install_a100_env.sh](./scripts/miscellaneous/install_a100_env.sh)
+- [KT_24_07_SETUP.md](./KT_24_07_SETUP.md) for the KT no-conda path
 
 Typical flow on a remote server:
 ```bash
@@ -208,6 +209,13 @@ bash scripts/miscellaneous/install_a100_env.sh
 This creates a conda environment, installs PyTorch/CUDA packages, then builds:
 - [apex](./apex)
 - [TransformerEngine](./TransformerEngine)
+
+If you are resuming on the KT server from the NGC `24.07` image, prefer the no-conda KT path instead:
+
+```bash
+bash scripts/miscellaneous/install_kt_24_07_no_conda.sh
+source scripts/miscellaneous/activate_kt_env.sh
+```
 
 The setup is intended to approximate the current local Docker/conda environment without shipping the Docker image itself.
 

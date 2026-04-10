@@ -30,31 +30,25 @@ fi
 
 # ── 3. Submodule 설정 ────────────────────────────────────────────────────────
 echo "==> [3/8] Submodule 설정"
-# Megatron-LM URL을 yemokoo fork으로 (이미 .gitmodules에서 바뀌었지만 안전하게)
-git config submodule.Megatron-LM.url https://github.com/yemokoo/Megatron-LM.git
-
-# Megatron-LM submodule fetch & checkout
-cd "$REPO_DIR/Megatron-LM"
-git fetch https://github.com/yemokoo/Megatron-LM.git multi-nodes 2>/dev/null || true
-git checkout f504c822 2>/dev/null || true
-cd "$REPO_DIR"
-
-# 나머지 submodule
-git submodule update --init apex
-git submodule update --init TransformerEngine
-git submodule update --init lm-evaluation-harness
-
-# TE 내부 submodule (cuDNN frontend)
-cd "$REPO_DIR/TransformerEngine"
-git submodule update --init --recursive
-cd "$REPO_DIR"
+# KT 복구 시에는 과거 고정 커밋으로 덮지 않고, 현재 root repo가 가리키는
+# submodule 상태를 그대로 복원한다. 그래야 최신 실험 코드와 맞는다.
+git submodule sync --recursive
+git submodule update --init --recursive Megatron-LM
+git submodule update --init --recursive apex
+git submodule update --init --recursive TransformerEngine
+git submodule update --init --recursive lm-evaluation-harness
 
 # ── 4. PYTHONPATH & bashrc 설정 ──────────────────────────────────────────────
 echo "==> [4/8] PYTHONPATH 설정"
 PYTHONPATH_LINE="export PYTHONPATH=$REPO_DIR/Megatron-LM:\${PYTHONPATH:-}"
+LOCAL_BIN_LINE='export PATH="$HOME/.local/bin:$PATH"'
 if ! grep -q "Megatron-LM" ~/.bashrc 2>/dev/null; then
   echo "$PYTHONPATH_LINE" >> ~/.bashrc
 fi
+if ! grep -Fq "$LOCAL_BIN_LINE" ~/.bashrc 2>/dev/null; then
+  echo "$LOCAL_BIN_LINE" >> ~/.bashrc
+fi
+export PATH="$HOME/.local/bin:$PATH"
 export PYTHONPATH="$REPO_DIR/Megatron-LM:${PYTHONPATH:-}"
 
 # ── 5. pip 업그레이드 + PyTorch 설치 ─────────────────────────────────────────
@@ -175,7 +169,7 @@ echo "  wheels:   $WHEEL_DIR"
 echo ""
 echo "학습 실행 예시:"
 echo "  cd $REPO_DIR"
-echo "  PYTHONPATH=\$PWD/Megatron-LM:\${PYTHONPATH:-} \\"
+echo "  source scripts/miscellaneous/activate_kt_env.sh"
 echo "  CUDA_VISIBLE_DEVICES=0,1 NPROC_PER_NODE=2 \\"
 echo "  MICRO_BATCH_SIZE=16 GLOBAL_BATCH_SIZE=2304 \\"
 echo "  TRAIN_ITERS=1800 SAVE_INTERVAL=300 EVAL_INTERVAL=100 \\"
@@ -183,3 +177,8 @@ echo "  SEQ_LENGTH=512 \\"
 echo "  TRAIN_DATASET=$DATA_DIR/wiki/train \\"
 echo "  PROBE_DATASET=$DATA_DIR/wiki/test \\"
 echo "  bash scripts/experiment/pretrain_wiki_dense_local_bf16.sh"
+echo ""
+echo "현재 KT 기준 런타임:"
+echo "  python: /usr/bin/python (user-site packages under ~/.local)"
+echo "  activate helper: source scripts/miscellaneous/activate_kt_env.sh"
+echo "  repo-local extensions: Apex / TransformerEngine from this checkout"

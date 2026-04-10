@@ -2,6 +2,21 @@
 
 Use this when the KT server session must start from the allowed NGC PyTorch `24.07` image and creating a separate conda environment is not the preferred path.
 
+## Validated KT Snapshot
+
+The currently observed KT runtime is:
+- Ubuntu `22.04.4`
+- `2x NVIDIA A100 80GB PCIe`
+- system `python` = `/usr/bin/python` (`Python 3.10.12`)
+- `pip` installed into `~/.local`
+- `torch 2.5.1`, `torchvision 0.20.1`, `torchaudio 2.5.1`
+- local source installs for `apex` and `transformer_engine`
+
+This means the canonical KT restore path should match that reality:
+- no extra conda env
+- no required project venv
+- restore packages into the KT user-site environment and then source the repo helper
+
 ## Why 24.07
 
 Among the allowed presets (`25.05`, `25.01`, `24.07`, `23.09`), `24.07` is the closest conservative fit for this repo because:
@@ -13,7 +28,8 @@ Among the allowed presets (`25.05`, `25.01`, `24.07`, `23.09`), `24.07` is the c
 
 - one KT session = one Docker/container session
 - do not create a separate conda env unless the platform explicitly supports and expects it
-- install the project dependencies directly into the provided session environment
+- install the project dependencies into the KT session's system Python user site (`~/.local`)
+- restore the repo runtime with `source scripts/miscellaneous/activate_kt_env.sh`
 
 ## Setup Steps
 
@@ -49,7 +65,7 @@ Leave warmup running while dependencies install, then stop it with `Ctrl-C`.
 
 ```bash
 bash scripts/miscellaneous/install_kt_24_07_no_conda.sh
-source .venv-kt2407/bin/activate
+source scripts/miscellaneous/activate_kt_env.sh
 ```
 
 ## Smoke Tests
@@ -67,10 +83,10 @@ They now fall back to `python` / `python3` automatically if that local conda env
 
 On KT, the preferred path is now:
 - start from the NGC `24.07` session
-- recreate `.venv-kt2407` with the helper script
-- activate that venv before running training or eval
+- recreate the user-site runtime with the helper install script
+- source `scripts/miscellaneous/activate_kt_env.sh` before running training or eval
 
-The setup script explicitly reinstalls a project-local PyTorch stack close to the previously validated local environment:
+The setup script explicitly reinstalls a KT user-site PyTorch stack close to the previously validated local environment:
 - Python `3.10`
 - `torch 2.5.1+cu121`
 - `torchvision 0.20.1+cu121`
@@ -82,13 +98,14 @@ The setup script explicitly reinstalls a project-local PyTorch stack close to th
 1. Start from NGC PyTorch `24.07`
 2. Clone repo and checkout `slurm`
 3. Run the no-conda install script
-4. Confirm PyTorch + Apex + TransformerEngine imports
-5. Run a tiny Megatron smoke test
-6. Only then resume training/eval
+4. Source `scripts/miscellaneous/activate_kt_env.sh`
+5. Confirm PyTorch + Apex + TransformerEngine imports
+6. Run a tiny Megatron smoke test
+7. Only then resume training/eval
 
 ## Precision Note
 
 Because KT uses A100, `bf16` becomes realistic again. But for bring-up:
-- first confirm the recreated venv imports and Megatron help path
+- first confirm the recreated KT runtime imports and Megatron help path
 - then run a tiny smoke test
 - only after that switch the main training path to `bf16`

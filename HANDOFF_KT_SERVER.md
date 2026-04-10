@@ -128,8 +128,9 @@ Reasoning:
 Important nuance:
 - choose `24.07` as the base image
 - do not rely on the image's stock `PyTorch 2.4` as the final runtime
-- recreate a project-local venv with `scripts/miscellaneous/install_kt_24_07_no_conda.sh`
-- that script now reinstalls a project-local stack close to the previously validated local env: `Python 3.10`, `torch 2.5.1+cu121`, local Apex, and local TransformerEngine
+- recreate the KT user-site runtime with `scripts/miscellaneous/install_kt_24_07_no_conda.sh`
+- source `scripts/miscellaneous/activate_kt_env.sh` in each new KT session
+- that install path now matches the currently observed KT runtime: `/usr/bin/python`, `~/.local` packages, `Python 3.10`, `torch 2.5.1+cu121`, local Apex, and local TransformerEngine
 
 Practical KT-server plan:
 1. start from NGC PyTorch `24.07`
@@ -137,7 +138,7 @@ Practical KT-server plan:
 3. if the session is reclaimed on low utilization, run `python scripts/miscellaneous/session_warmup.py` in another pane while installing
 4. default warmup is light (`1s` compute / `4s` sleep); if needed, raise it with `--matrix-size 3072 --compute-seconds 2.0 --sleep-seconds 2.0`
 5. run `bash scripts/miscellaneous/install_kt_24_07_no_conda.sh`
-6. `source .venv-kt2407/bin/activate`
+6. `source scripts/miscellaneous/activate_kt_env.sh`
 7. run smoke tests before full training/eval
 
 ## A100 Migration Priority
