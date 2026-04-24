@@ -63,6 +63,7 @@ from megatron.training.utils import (
 from megatron.legacy.data.data_samplers import build_pretraining_data_loader
 from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
 from megatron.core.transformer.moe.continual_learning_utils import (
+    enable_self_attention_params,
     expand_moe_model,
     freeze_all_but_attn_lora_router_params,
     freeze_all_but_new_moe_params,
@@ -945,6 +946,13 @@ def setup_model_and_optimizer(model_provider_func,
                     freeze_existing_experts=True,
                     freeze_existing_router=True,
                 )
+                if args.moe_train_attention_with_new_experts:
+                    attention_stats = enable_self_attention_params(target_shard)
+                    print_rank_0(
+                        "Enabled self-attention training alongside new MoE experts/router "
+                        f"({attention_stats['tensors']} tensors, "
+                        f"{attention_stats['parameters']} parameters)."
+                    )
             else:
                 freeze_preexisting_moe_params(
                     target_shard,
@@ -1169,6 +1177,14 @@ def setup_model_and_optimizer(model_provider_func,
                         freeze_existing_experts=True,
                         freeze_existing_router=True,
                     )
+                    if args.moe_train_attention_with_new_experts:
+                        attention_stats = enable_self_attention_params(target_shard)
+                        print_rank_0(
+                            "Re-enabled self-attention training alongside new MoE "
+                            "experts/router after checkpoint load "
+                            f"({attention_stats['tensors']} tensors, "
+                            f"{attention_stats['parameters']} parameters)."
+                        )
                 else:
                     freeze_preexisting_moe_params(
                         target_shard,

@@ -375,6 +375,23 @@ def freeze_all_but_attn_lora_router_params(model):
             for param in module.parameters():
                 param.requires_grad = True
 
+
+def enable_self_attention_params(model):
+    trainable_params = 0
+    trainable_tensors = 0
+
+    for module in model.modules():
+        self_attention = getattr(module, "self_attention", None)
+        if self_attention is None:
+            continue
+        for param in self_attention.parameters():
+            if not param.requires_grad:
+                param.requires_grad = True
+                trainable_params += param.numel()
+                trainable_tensors += 1
+
+    return {"tensors": trainable_tensors, "parameters": trainable_params}
+
 def _tensor_summary(tensor):
     return {
         "shape": list(tensor.shape),

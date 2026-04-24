@@ -2392,6 +2392,8 @@ def _add_moe_args(parser):
                        help='Freeze the copied router rows when --moe-expand-from-num-experts is used.')
     group.add_argument('--moe-train-new-experts-and-router-only', action='store_true',
                        help='When expanding from a smaller MoE checkpoint, freeze every parameter except the newly added experts and the trainable portion of the expanded router.')
+    group.add_argument('--moe-train-attention-with-new-experts', action='store_true',
+                       help='With --moe-train-new-experts-and-router-only, also keep self-attention parameters trainable while the rest of the shared trunk remains frozen.')
     group.add_argument('--moe-resume-from-num-experts', type=int, default=None,
                        help='When resuming from an already-expanded MoE checkpoint, re-apply continual-learning freezing using this many original experts.')
     group.add_argument('--moe-old-model-kl-load', type=str, default=None,
