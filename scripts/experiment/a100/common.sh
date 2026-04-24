@@ -281,6 +281,7 @@ for idx_path in sorted(dataset_dir.glob('*.idx')):
     shards.append({'prefix': prefix.name, 'documents': shard_docs, 'tokens': shard_tokens})
 
 freeze_shared = os.environ.get('TRAIN_NEW_EXPERTS_AND_ROUTER_ONLY', '0') == '1'
+old_model_kl_enabled = os.environ.get('ENABLE_OLD_MODEL_KL', '0') == '1'
 metadata = {
     'stage': os.environ['STAGE_NAME'],
     'run_id': os.environ['RUN_ID'],
@@ -306,9 +307,10 @@ metadata = {
     'precision': os.environ['PRECISION'],
     'shared_expert_enabled': False,
     'shared_frozen': freeze_shared,
-    'old_model_kl_enabled': not freeze_shared,
-    'old_model_kl_coeff': None if freeze_shared else float(os.environ['OLD_MODEL_KL_COEFF']),
-    'old_model_kl_temperature': None if freeze_shared else float(os.environ['OLD_MODEL_KL_TEMPERATURE']),
+    'train_attention_with_new_experts': os.environ.get('TRAIN_ATTENTION_WITH_NEW_EXPERTS', '0') == '1',
+    'old_model_kl_enabled': old_model_kl_enabled,
+    'old_model_kl_coeff': float(os.environ['OLD_MODEL_KL_COEFF']) if old_model_kl_enabled else None,
+    'old_model_kl_temperature': float(os.environ['OLD_MODEL_KL_TEMPERATURE']) if old_model_kl_enabled else None,
     'probe_step_offset': int(os.environ['PROBE_STEP_OFFSET']),
 }
 with open(os.environ['RUN_METADATA'], 'w', encoding='utf-8') as f:

@@ -59,6 +59,7 @@ export EXPERT_MODEL_PARALLEL_SIZE=1
 export TRANSFORMER_IMPL="${TRANSFORMER_IMPL:-local}"
 export PRECISION="bf16"
 export TRAIN_NEW_EXPERTS_AND_ROUTER_ONLY="${TRAIN_NEW_EXPERTS_AND_ROUTER_ONLY:-$FREEZE_SHARED}"
+export TRAIN_ATTENTION_WITH_NEW_EXPERTS="${TRAIN_ATTENTION_WITH_NEW_EXPERTS:-0}"
 
 export TRAIN_ITERS="${TRAIN_ITERS:-1800}"
 export SAVE_INTERVAL="${SAVE_INTERVAL:-300}"
@@ -66,6 +67,15 @@ export EVAL_INTERVAL="${EVAL_INTERVAL:-100}"
 export LOG_INTERVAL="${LOG_INTERVAL:-10}"
 export OLD_MODEL_KL_COEFF="${OLD_MODEL_KL_COEFF:-1.0}"
 export OLD_MODEL_KL_TEMPERATURE="${OLD_MODEL_KL_TEMPERATURE:-1.0}"
+if [ -z "${ENABLE_OLD_MODEL_KL:-}" ]; then
+    if [ "$TRAIN_NEW_EXPERTS_AND_ROUTER_ONLY" = "1" ]; then
+        export ENABLE_OLD_MODEL_KL=0
+    else
+        export ENABLE_OLD_MODEL_KL=1
+    fi
+else
+    export ENABLE_OLD_MODEL_KL
+fi
 export GPU_LOG_INTERVAL_SECONDS="${GPU_LOG_INTERVAL_SECONDS:-30}"
 export LR="${LR:-3e-4}"
 export MIN_LR="${MIN_LR:-3e-5}"
@@ -111,6 +121,11 @@ export RESUME_CONTINUAL_FROM_TRAIN_WEIGHTS="${RESUME_CONTINUAL_FROM_TRAIN_WEIGHT
 
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
 export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=true
+
+if [ "$TRAIN_ATTENTION_WITH_NEW_EXPERTS" = "1" ] && [ "$TRAIN_NEW_EXPERTS_AND_ROUTER_ONLY" != "1" ]; then
+    echo "ERROR: TRAIN_ATTENTION_WITH_NEW_EXPERTS=1 requires TRAIN_NEW_EXPERTS_AND_ROUTER_ONLY=1." >&2
+    exit 1
+fi
 
 if [ "$DIRECT_LOCAL_SAVE" = "1" ]; then
     export SSD_TARGET_WEIGHTS="$TRAIN_WEIGHTS"
@@ -279,7 +294,12 @@ fi
 
 if [ "$TRAIN_NEW_EXPERTS_AND_ROUTER_ONLY" = "1" ]; then
     SAVE_ARGS+=(--moe-train-new-experts-and-router-only)
-else
+    if [ "$TRAIN_ATTENTION_WITH_NEW_EXPERTS" = "1" ]; then
+        SAVE_ARGS+=(--moe-train-attention-with-new-experts)
+    fi
+fi
+
+if [ "$ENABLE_OLD_MODEL_KL" = "1" ]; then
     SAVE_ARGS+=(
         --moe-old-model-kl-load "$SSD_SOURCE_WEIGHTS"
         --moe-old-model-kl-coeff "$OLD_MODEL_KL_COEFF"
