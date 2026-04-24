@@ -3,9 +3,10 @@ set -euo pipefail
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
 
-export SOURCE_TASK="${SOURCE_TASK:?SOURCE_TASK must be set to wiki or code}"
-export TARGET_TASK="${TARGET_TASK:?TARGET_TASK must be set to wiki or code}"
+export SOURCE_TASK="${SOURCE_TASK:?SOURCE_TASK must be set}"
+export TARGET_TASK="${TARGET_TASK:?TARGET_TASK must be set}"
 export FREEZE_SHARED="${FREEZE_SHARED:-0}"
+export TRAIN_ATTENTION_WITH_NEW_EXPERTS="${TRAIN_ATTENTION_WITH_NEW_EXPERTS:-0}"
 
 if [ "$SOURCE_TASK" = "wiki" ] && [ "$TARGET_TASK" = "code" ]; then
     export STAGE_NAME="${STAGE_NAME:-a_to_b}"
@@ -15,15 +16,25 @@ elif [ "$SOURCE_TASK" = "code" ] && [ "$TARGET_TASK" = "wiki" ]; then
     export STAGE_NAME="${STAGE_NAME:-b_to_a}"
     export STAGE_DIR_NAME="${STAGE_DIR_NAME:-a100/b-to-a-moe-bf16}"
     export STAGE_LABEL="${STAGE_LABEL:-b_to_a}"
+elif [ "$SOURCE_TASK" = "wiki" ] && [ "$TARGET_TASK" = "conversation" ]; then
+    export STAGE_NAME="${STAGE_NAME:-wiki_to_conversation}"
+    export STAGE_DIR_NAME="${STAGE_DIR_NAME:-a100/wiki-to-conversation-moe-bf16}"
+    export STAGE_LABEL="${STAGE_LABEL:-wiki_to_conversation}"
 else
     echo "ERROR: unsupported continual direction ${SOURCE_TASK} -> ${TARGET_TASK}" >&2
     exit 1
 fi
 
 if [ "$FREEZE_SHARED" = "1" ]; then
-    export STAGE_NAME="${STAGE_NAME}_freeze"
-    export STAGE_DIR_NAME="${STAGE_DIR_NAME}-freeze"
-    export STAGE_LABEL="${STAGE_LABEL}_freeze"
+    if [ "$TRAIN_ATTENTION_WITH_NEW_EXPERTS" = "1" ]; then
+        export STAGE_NAME="${STAGE_NAME}_attn_unfreeze"
+        export STAGE_DIR_NAME="${STAGE_DIR_NAME}-attn-unfreeze"
+        export STAGE_LABEL="${STAGE_LABEL}_attn_unfreeze"
+    else
+        export STAGE_NAME="${STAGE_NAME}_freeze"
+        export STAGE_DIR_NAME="${STAGE_DIR_NAME}-freeze"
+        export STAGE_LABEL="${STAGE_LABEL}_freeze"
+    fi
 fi
 
 export RUN_ID="${RUN_ID:-${STAGE_LABEL}-a100-bf16-$(date -u +%Y%m%d-%H%M%S)}"
@@ -59,7 +70,6 @@ export EXPERT_MODEL_PARALLEL_SIZE=1
 export TRANSFORMER_IMPL="${TRANSFORMER_IMPL:-local}"
 export PRECISION="bf16"
 export TRAIN_NEW_EXPERTS_AND_ROUTER_ONLY="${TRAIN_NEW_EXPERTS_AND_ROUTER_ONLY:-$FREEZE_SHARED}"
-export TRAIN_ATTENTION_WITH_NEW_EXPERTS="${TRAIN_ATTENTION_WITH_NEW_EXPERTS:-0}"
 
 export TRAIN_ITERS="${TRAIN_ITERS:-1800}"
 export SAVE_INTERVAL="${SAVE_INTERVAL:-300}"
@@ -148,6 +158,9 @@ case "$SOURCE_TASK" in
     code)
         export SOURCE_PRIMARY_PROBE_CANDIDATES="${SOURCE_PRIMARY_PROBE_CANDIDATES:-code_probe,code_b_probe}"
         ;;
+    conversation)
+        export SOURCE_PRIMARY_PROBE_CANDIDATES="${SOURCE_PRIMARY_PROBE_CANDIDATES:-conversation_probe,conversation_c_probe}"
+        ;;
 esac
 
 case "$TARGET_TASK" in
@@ -156,6 +169,9 @@ case "$TARGET_TASK" in
         ;;
     code)
         export SOURCE_SECONDARY_PROBE_CANDIDATES="${SOURCE_SECONDARY_PROBE_CANDIDATES:-code_probe,code_b_probe}"
+        ;;
+    conversation)
+        export SOURCE_SECONDARY_PROBE_CANDIDATES="${SOURCE_SECONDARY_PROBE_CANDIDATES:-conversation_probe,conversation_c_probe}"
         ;;
 esac
 

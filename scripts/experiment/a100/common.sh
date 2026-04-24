@@ -34,6 +34,9 @@ default_train_dir_for_task() {
                 echo "$LOCAL_DATASET/python-code-full/tokenized/EleutherAI/pythia-12b-step1800-train-exact"
             fi
             ;;
+        conversation)
+            echo "$PROJECT_ROOT/data/conversation/train"
+            ;;
         *)
             echo "ERROR: unknown task '$1'" >&2
             return 1
@@ -56,6 +59,9 @@ default_probe_dir_for_task() {
             else
                 echo "$LOCAL_DATASET/python-code-full/tokenized/EleutherAI/pythia-12b-step1800-test-matchwiki-exact"
             fi
+            ;;
+        conversation)
+            echo "$PROJECT_ROOT/data/conversation/test"
             ;;
         *)
             echo "ERROR: unknown task '$1'" >&2
@@ -93,6 +99,9 @@ weights_subdir_for_task() {
         code)
             echo "a100/code-b-moe-bf16"
             ;;
+        conversation)
+            echo "a100/conversation-c-moe-bf16"
+            ;;
         *)
             echo "ERROR: unknown task '$1'" >&2
             return 1
@@ -104,6 +113,7 @@ stage_label_for_task() {
     case "$1" in
         wiki) echo "wiki_a" ;;
         code) echo "code_b" ;;
+        conversation) echo "conversation_c" ;;
         *)
             echo "ERROR: unknown task '$1'" >&2
             return 1
@@ -115,6 +125,7 @@ dataset_name_for_task() {
     case "$1" in
         wiki) echo "wiki_exact" ;;
         code) echo "code_exact" ;;
+        conversation) echo "conversation_opensubtitles_exact_dedup" ;;
         *)
             echo "ERROR: unknown task '$1'" >&2
             return 1
@@ -126,6 +137,7 @@ dataset_source_for_task() {
     case "$1" in
         wiki) echo "Wikipedia exact train" ;;
         code) echo "Python code exact train" ;;
+        conversation) echo "OpenSubtitles v2018 English exact-dedup train" ;;
         *)
             echo "ERROR: unknown task '$1'" >&2
             return 1
