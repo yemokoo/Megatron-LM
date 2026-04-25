@@ -950,7 +950,8 @@ def setup_model_and_optimizer(model_provider_func,
                     attention_stats = enable_self_attention_params(target_shard)
                     print_rank_0(
                         "Enabled self-attention training alongside new MoE experts/router "
-                        f"({attention_stats['tensors']} tensors, "
+                        f"({attention_stats['layers']} MoE layers, "
+                        f"{attention_stats['tensors']} tensors, "
                         f"{attention_stats['parameters']} parameters)."
                     )
             else:
@@ -1182,7 +1183,8 @@ def setup_model_and_optimizer(model_provider_func,
                         print_rank_0(
                             "Re-enabled self-attention training alongside new MoE "
                             "experts/router after checkpoint load "
-                            f"({attention_stats['tensors']} tensors, "
+                            f"({attention_stats['layers']} MoE layers, "
+                            f"{attention_stats['tensors']} tensors, "
                             f"{attention_stats['parameters']} parameters)."
                         )
                 else:

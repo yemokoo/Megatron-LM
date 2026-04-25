@@ -4,6 +4,7 @@ from typing import Any, Dict, List
 import torch
 
 from megatron.core.transformer.moe.experts import GroupedMLP, SequentialMLP, TEGroupedMLP
+from megatron.core.transformer.moe.moe_layer import BaseMoELayer
 from megatron.core.transformer.moe.router import Router
 from megatron.core.transformer.qv_lora_attention import QVLoraExpertRouter
 from megatron.core.transformer.shared_router_hybrid import (
@@ -379,18 +380,25 @@ def freeze_all_but_attn_lora_router_params(model):
 def enable_self_attention_params(model):
     trainable_params = 0
     trainable_tensors = 0
+    enabled_layers = 0
 
     for module in model.modules():
         self_attention = getattr(module, "self_attention", None)
-        if self_attention is None:
+        mlp = getattr(module, "mlp", None)
+        if self_attention is None or not isinstance(mlp, BaseMoELayer):
             continue
+        enabled_layers += 1
         for param in self_attention.parameters():
             if not param.requires_grad:
                 param.requires_grad = True
                 trainable_params += param.numel()
                 trainable_tensors += 1
 
-    return {"tensors": trainable_tensors, "parameters": trainable_params}
+    return {
+        "layers": enabled_layers,
+        "tensors": trainable_tensors,
+        "parameters": trainable_params,
+    }
 
 def _tensor_summary(tensor):
     return {
