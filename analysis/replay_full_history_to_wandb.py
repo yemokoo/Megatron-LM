@@ -115,6 +115,23 @@ def merge_payloads(base: dict[int, dict[str, float]], overlay: dict[int, dict[st
     return dict(sorted(merged.items()))
 
 
+def merge_payloads_preserve_existing_keys(
+    base: dict[int, dict[str, float]],
+    overlay: dict[int, dict[str, float]],
+    *,
+    preserve_steps: set[int],
+) -> dict[int, dict[str, float]]:
+    merged = {step: dict(payload) for step, payload in base.items()}
+    for step, payload in overlay.items():
+        merged.setdefault(step, {})
+        if step in preserve_steps:
+            for key, value in payload.items():
+                merged[step].setdefault(key, value)
+        else:
+            merged[step].update(payload)
+    return dict(sorted(merged.items()))
+
+
 def filter_payloads_after_step(payloads: dict[int, dict[str, float]], step: int) -> dict[int, dict[str, float]]:
     return {event_step: payload for event_step, payload in payloads.items() if event_step > step}
 
@@ -197,7 +214,11 @@ def main():
                 parse_probe_history(args.continual_log),
                 args.baseline_step,
             )
-            payloads = merge_payloads(payloads, continual_probe_payloads)
+            payloads = merge_payloads_preserve_existing_keys(
+                payloads,
+                continual_probe_payloads,
+                preserve_steps={args.baseline_step},
+            )
 
     run = wandb.init(**init_kwargs)
     try:
