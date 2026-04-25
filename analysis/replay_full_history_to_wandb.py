@@ -119,6 +119,10 @@ def filter_payloads_after_step(payloads: dict[int, dict[str, float]], step: int)
     return {event_step: payload for event_step, payload in payloads.items() if event_step > step}
 
 
+def filter_payloads_at_or_after_step(payloads: dict[int, dict[str, float]], step: int) -> dict[int, dict[str, float]]:
+    return {event_step: payload for event_step, payload in payloads.items() if event_step >= step}
+
+
 def replay_payloads(run, payloads: dict[int, dict[str, float]]) -> None:
     for step, payload in sorted(payloads.items()):
         wandb.log(payload, step=step)
@@ -189,7 +193,7 @@ def main():
         )
         payloads = merge_payloads(payloads, continual_payloads)
         if args.continual_log is not None:
-            continual_probe_payloads = filter_payloads_after_step(
+            continual_probe_payloads = filter_payloads_at_or_after_step(
                 parse_probe_history(args.continual_log),
                 args.baseline_step,
             )
