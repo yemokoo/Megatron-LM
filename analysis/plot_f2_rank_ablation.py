@@ -198,10 +198,11 @@ def plot_with_matplotlib(results: list[RankResult], output_path: Path) -> None:
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     ranks = [row.rank for row in results]
+    x_positions = list(range(len(ranks)))
     wiki_acc = [row.wiki_acc for row in results]
     code_acc = [row.code_acc for row in results]
 
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4.8), sharex=True)
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5.2), sharex=True)
     fig.suptitle("F2 Rank Ablation: Final Next-Token Accuracy at Local Step 1800", fontsize=14)
 
     panels = (
@@ -209,17 +210,41 @@ def plot_with_matplotlib(results: list[RankResult], output_path: Path) -> None:
         (axes[1], code_acc, "Code Probe", "#1d4ed8"),
     )
     for axis, values, title, color in panels:
-        axis.plot(ranks, values, marker="o", linewidth=2.2, color=color)
-        for rank, value in zip(ranks, values):
+        axis.plot(x_positions, values, marker="o", linewidth=2.2, color=color)
+        finite_values = [value for value in values if value is not None]
+        if finite_values:
+            y_span = max(finite_values) - min(finite_values)
+            y_pad = max(y_span * 0.22, 0.0015)
+            axis.set_ylim(min(finite_values) - y_pad, max(finite_values) + y_pad)
+
+        for idx, (rank, value) in enumerate(zip(ranks, values)):
             if value is None:
                 continue
-            axis.annotate(f"{value:.4f}", (rank, value), textcoords="offset points", xytext=(0, 7), ha="center", fontsize=8)
+            vertical_offset = 11 if idx % 2 == 0 else -17
+            va = "bottom" if vertical_offset > 0 else "top"
+            axis.annotate(
+                f"{value:.4f}",
+                (x_positions[idx], value),
+                textcoords="offset points",
+                xytext=(0, vertical_offset),
+                ha="center",
+                va=va,
+                fontsize=8,
+                bbox={
+                    "boxstyle": "round,pad=0.18",
+                    "facecolor": "white",
+                    "edgecolor": "none",
+                    "alpha": 0.78,
+                },
+            )
         axis.set_title(title)
-        axis.set_xlabel("Full-rank LoRA rank")
+        axis.set_xlabel("Full-rank LoRA rank (equally spaced)")
         axis.set_ylabel("next_token_acc")
         axis.grid(True, alpha=0.3)
-        axis.set_xticks(ranks)
-        axis.tick_params(axis="x", rotation=45)
+        axis.set_xticks(x_positions)
+        axis.set_xticklabels([str(rank) for rank in ranks])
+        axis.tick_params(axis="x", rotation=35)
+        axis.margins(x=0.04)
 
     fig.tight_layout()
     fig.savefig(output_path, dpi=180)
