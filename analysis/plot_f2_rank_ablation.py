@@ -193,6 +193,46 @@ def write_csv(results: list[RankResult], path: Path) -> None:
             )
 
 
+def write_retention_csv(results: list[RankResult], path: Path, baseline_rank: int) -> None:
+    baseline = next((row for row in results if row.rank == baseline_rank), None)
+    if baseline is None or baseline.wiki_acc is None or baseline.code_acc is None:
+        return
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=[
+                "rank",
+                "rank_cost_pct_vs_baseline",
+                "rank_saving_pct_vs_baseline",
+                "wiki_next_token_acc",
+                "wiki_retention_pct_vs_baseline",
+                "wiki_drop_abs_vs_baseline",
+                "code_next_token_acc",
+                "code_retention_pct_vs_baseline",
+                "code_drop_abs_vs_baseline",
+            ],
+        )
+        writer.writeheader()
+        for row in results:
+            if row.wiki_acc is None or row.code_acc is None:
+                continue
+            writer.writerow(
+                {
+                    "rank": row.rank,
+                    "rank_cost_pct_vs_baseline": f"{row.rank / baseline_rank * 100:.2f}",
+                    "rank_saving_pct_vs_baseline": f"{(1 - row.rank / baseline_rank) * 100:.2f}",
+                    "wiki_next_token_acc": f"{row.wiki_acc:.6f}",
+                    "wiki_retention_pct_vs_baseline": f"{row.wiki_acc / baseline.wiki_acc * 100:.2f}",
+                    "wiki_drop_abs_vs_baseline": f"{baseline.wiki_acc - row.wiki_acc:.6f}",
+                    "code_next_token_acc": f"{row.code_acc:.6f}",
+                    "code_retention_pct_vs_baseline": f"{row.code_acc / baseline.code_acc * 100:.2f}",
+                    "code_drop_abs_vs_baseline": f"{baseline.code_acc - row.code_acc:.6f}",
+                }
+            )
+
+
 def plot_with_matplotlib(results: list[RankResult], output_path: Path) -> None:
     import matplotlib.pyplot as plt
 
@@ -250,6 +290,100 @@ def plot_with_matplotlib(results: list[RankResult], output_path: Path) -> None:
     fig.savefig(output_path, dpi=180)
 
 
+def plot_retention_with_matplotlib(
+    results: list[RankResult],
+    output_path: Path,
+    baseline_rank: int,
+    thresholds: list[float],
+) -> None:
+    import matplotlib.pyplot as plt
+
+    baseline = next((row for row in results if row.rank == baseline_rank), None)
+    if baseline is None or baseline.wiki_acc is None or baseline.code_acc is None:
+        print(f"skip retention plot: baseline rank {baseline_rank} is missing")
+        return
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    ranks = [row.rank for row in results]
+    x_positions = list(range(len(ranks)))
+    wiki_retention = [
+        None if row.wiki_acc is None else row.wiki_acc / baseline.wiki_acc * 100.0
+        for row in results
+    ]
+    code_retention = [
+        None if row.code_acc is None else row.code_acc / baseline.code_acc * 100.0
+        for row in results
+    ]
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5.2), sharex=True)
+    fig.suptitle(f"F2 Rank Ablation: Retention vs Rank {baseline_rank}", fontsize=14)
+
+    panels = (
+        (axes[0], wiki_retention, "Wiki Probe Retention", "#b45309"),
+        (axes[1], code_retention, "Code Probe Retention", "#1d4ed8"),
+    )
+    for axis, values, title, color in panels:
+        axis.plot(x_positions, values, marker="o", linewidth=2.2, color=color)
+        finite_values = [value for value in values if value is not None]
+        if finite_values:
+            threshold_values = thresholds if thresholds else []
+            y_min = min(finite_values + threshold_values)
+            y_max = max(finite_values + threshold_values)
+            y_pad = max((y_max - y_min) * 0.18, 0.35)
+            axis.set_ylim(y_min - y_pad, y_max + y_pad)
+
+        for threshold in thresholds:
+            axis.axhline(threshold, linestyle="--", linewidth=1.2, color="#6b7280", alpha=0.65)
+            axis.text(
+                len(x_positions) - 0.55,
+                threshold,
+                f"{threshold:g}%",
+                va="bottom",
+                ha="right",
+                fontsize=8,
+                color="#4b5563",
+                bbox={
+                    "boxstyle": "round,pad=0.16",
+                    "facecolor": "white",
+                    "edgecolor": "none",
+                    "alpha": 0.78,
+                },
+            )
+
+        for idx, (rank, value) in enumerate(zip(ranks, values)):
+            if value is None:
+                continue
+            vertical_offset = 11 if idx % 2 == 0 else -17
+            va = "bottom" if vertical_offset > 0 else "top"
+            axis.annotate(
+                f"{value:.2f}%",
+                (x_positions[idx], value),
+                textcoords="offset points",
+                xytext=(0, vertical_offset),
+                ha="center",
+                va=va,
+                fontsize=8,
+                bbox={
+                    "boxstyle": "round,pad=0.18",
+                    "facecolor": "white",
+                    "edgecolor": "none",
+                    "alpha": 0.78,
+                },
+            )
+
+        axis.set_title(title)
+        axis.set_xlabel("Full-rank LoRA rank (equally spaced)")
+        axis.set_ylabel(f"retention vs rank {baseline_rank} (%)")
+        axis.grid(True, alpha=0.3)
+        axis.set_xticks(x_positions)
+        axis.set_xticklabels([str(rank) for rank in ranks])
+        axis.tick_params(axis="x", rotation=35)
+        axis.margins(x=0.04)
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=180)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -275,6 +409,8 @@ def main() -> None:
     parser.add_argument("--local-step", type=int, default=1800)
     parser.add_argument("--output-dir", type=Path, default=Path("analysis_outputs/f2_rank_ablation"))
     parser.add_argument("--output-name", default="f2_rank_ablation_final_acc")
+    parser.add_argument("--baseline-rank", type=int, default=1024)
+    parser.add_argument("--retention-thresholds", nargs="*", type=float, default=[99.0, 99.5])
     args = parser.parse_args()
 
     explicit_runs = dict(args.rank_run)
@@ -284,11 +420,22 @@ def main() -> None:
 
     csv_path = args.output_dir / f"{args.output_name}.csv"
     png_path = args.output_dir / f"{args.output_name}.png"
+    retention_csv_path = args.output_dir / f"{args.output_name}_retention_vs_{args.baseline_rank}.csv"
+    retention_png_path = args.output_dir / f"{args.output_name}_retention_vs_{args.baseline_rank}.png"
     write_csv(results, csv_path)
+    write_retention_csv(results, retention_csv_path, args.baseline_rank)
     plot_with_matplotlib(results, png_path)
+    plot_retention_with_matplotlib(
+        results,
+        retention_png_path,
+        args.baseline_rank,
+        args.retention_thresholds,
+    )
 
     print(f"wrote csv: {csv_path}")
     print(f"wrote plot: {png_path}")
+    print(f"wrote retention csv: {retention_csv_path}")
+    print(f"wrote retention plot: {retention_png_path}")
     print()
     print("rank\twiki_acc\tcode_acc\tlog")
     for row in results:
