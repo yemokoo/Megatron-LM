@@ -233,6 +233,55 @@ def write_retention_csv(results: list[RankResult], path: Path, baseline_rank: in
             )
 
 
+def write_tradeoff_csv(
+    results: list[RankResult],
+    path: Path,
+    code_baseline_rank: int,
+    wiki_reference_rank: int,
+) -> None:
+    code_baseline = next((row for row in results if row.rank == code_baseline_rank), None)
+    wiki_reference = next((row for row in results if row.rank == wiki_reference_rank), None)
+    if (
+        code_baseline is None
+        or code_baseline.code_acc is None
+        or wiki_reference is None
+        or wiki_reference.wiki_acc is None
+    ):
+        return
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=[
+                "rank",
+                "rank_cost_pct_vs_code_baseline",
+                "rank_saving_pct_vs_code_baseline",
+                "code_next_token_acc",
+                "code_retention_pct_vs_code_baseline",
+                "code_drop_abs_vs_code_baseline",
+                "wiki_next_token_acc",
+                "wiki_drop_abs_vs_reference",
+            ],
+        )
+        writer.writeheader()
+        for row in results:
+            if row.code_acc is None or row.wiki_acc is None:
+                continue
+            writer.writerow(
+                {
+                    "rank": row.rank,
+                    "rank_cost_pct_vs_code_baseline": f"{row.rank / code_baseline_rank * 100:.2f}",
+                    "rank_saving_pct_vs_code_baseline": f"{(1 - row.rank / code_baseline_rank) * 100:.2f}",
+                    "code_next_token_acc": f"{row.code_acc:.6f}",
+                    "code_retention_pct_vs_code_baseline": f"{row.code_acc / code_baseline.code_acc * 100:.2f}",
+                    "code_drop_abs_vs_code_baseline": f"{code_baseline.code_acc - row.code_acc:.6f}",
+                    "wiki_next_token_acc": f"{row.wiki_acc:.6f}",
+                    "wiki_drop_abs_vs_reference": f"{wiki_reference.wiki_acc - row.wiki_acc:.6f}",
+                }
+            )
+
+
 def plot_with_matplotlib(results: list[RankResult], output_path: Path) -> None:
     import matplotlib.pyplot as plt
 
@@ -280,6 +329,139 @@ def plot_with_matplotlib(results: list[RankResult], output_path: Path) -> None:
         axis.set_title(title)
         axis.set_xlabel("Full-rank LoRA rank (equally spaced)")
         axis.set_ylabel("next_token_acc")
+        axis.grid(True, alpha=0.3)
+        axis.set_xticks(x_positions)
+        axis.set_xticklabels([str(rank) for rank in ranks])
+        axis.tick_params(axis="x", rotation=35)
+        axis.margins(x=0.04)
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=180)
+
+
+def plot_tradeoff_with_matplotlib(
+    results: list[RankResult],
+    output_path: Path,
+    code_baseline_rank: int,
+    wiki_reference_rank: int,
+    code_thresholds: list[float],
+) -> None:
+    import matplotlib.pyplot as plt
+
+    code_baseline = next((row for row in results if row.rank == code_baseline_rank), None)
+    wiki_reference = next((row for row in results if row.rank == wiki_reference_rank), None)
+    if (
+        code_baseline is None
+        or code_baseline.code_acc is None
+        or wiki_reference is None
+        or wiki_reference.wiki_acc is None
+    ):
+        print(
+            "skip trade-off plot: "
+            f"code baseline rank {code_baseline_rank} or wiki reference rank {wiki_reference_rank} is missing"
+        )
+        return
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    ranks = [row.rank for row in results]
+    x_positions = list(range(len(ranks)))
+    wiki_drop = [
+        None if row.wiki_acc is None else wiki_reference.wiki_acc - row.wiki_acc
+        for row in results
+    ]
+    code_retention = [
+        None if row.code_acc is None else row.code_acc / code_baseline.code_acc * 100.0
+        for row in results
+    ]
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5.2), sharex=True)
+    fig.suptitle(
+        "F2 Rank Ablation: Wiki Drop vs Code Retention at Local Step 1800",
+        fontsize=14,
+    )
+
+    wiki_axis = axes[0]
+    wiki_axis.plot(x_positions, wiki_drop, marker="o", linewidth=2.2, color="#b45309")
+    finite_wiki = [value for value in wiki_drop if value is not None]
+    if finite_wiki:
+        y_min = min(finite_wiki + [0.0])
+        y_max = max(finite_wiki + [0.0])
+        y_pad = max((y_max - y_min) * 0.22, 0.0015)
+        wiki_axis.set_ylim(y_min - y_pad, y_max + y_pad)
+    wiki_axis.axhline(0.0, linestyle="--", linewidth=1.2, color="#6b7280", alpha=0.65)
+    for idx, (rank, value) in enumerate(zip(ranks, wiki_drop)):
+        if value is None:
+            continue
+        vertical_offset = 11 if idx % 2 == 0 else -17
+        va = "bottom" if vertical_offset > 0 else "top"
+        wiki_axis.annotate(
+            f"{value:.4f}",
+            (x_positions[idx], value),
+            textcoords="offset points",
+            xytext=(0, vertical_offset),
+            ha="center",
+            va=va,
+            fontsize=8,
+            bbox={
+                "boxstyle": "round,pad=0.18",
+                "facecolor": "white",
+                "edgecolor": "none",
+                "alpha": 0.78,
+            },
+        )
+    wiki_axis.set_title(f"Wiki Drop vs Rank {wiki_reference_rank}")
+    wiki_axis.set_ylabel("wiki acc drop (reference - rank)")
+
+    code_axis = axes[1]
+    code_axis.plot(x_positions, code_retention, marker="o", linewidth=2.2, color="#1d4ed8")
+    finite_code = [value for value in code_retention if value is not None]
+    if finite_code:
+        y_min = min(finite_code + code_thresholds)
+        y_max = max(finite_code + code_thresholds)
+        y_pad = max((y_max - y_min) * 0.18, 0.35)
+        code_axis.set_ylim(y_min - y_pad, y_max + y_pad)
+    for threshold in code_thresholds:
+        code_axis.axhline(threshold, linestyle="--", linewidth=1.2, color="#6b7280", alpha=0.65)
+        code_axis.text(
+            len(x_positions) - 0.55,
+            threshold,
+            f"{threshold:g}%",
+            va="bottom",
+            ha="right",
+            fontsize=8,
+            color="#4b5563",
+            bbox={
+                "boxstyle": "round,pad=0.16",
+                "facecolor": "white",
+                "edgecolor": "none",
+                "alpha": 0.78,
+            },
+        )
+    for idx, (rank, value) in enumerate(zip(ranks, code_retention)):
+        if value is None:
+            continue
+        vertical_offset = 11 if idx % 2 == 0 else -17
+        va = "bottom" if vertical_offset > 0 else "top"
+        code_axis.annotate(
+            f"{value:.2f}%",
+            (x_positions[idx], value),
+            textcoords="offset points",
+            xytext=(0, vertical_offset),
+            ha="center",
+            va=va,
+            fontsize=8,
+            bbox={
+                "boxstyle": "round,pad=0.18",
+                "facecolor": "white",
+                "edgecolor": "none",
+                "alpha": 0.78,
+            },
+        )
+    code_axis.set_title(f"Code Retention vs Rank {code_baseline_rank}")
+    code_axis.set_ylabel(f"code retention vs rank {code_baseline_rank} (%)")
+
+    for axis in axes:
+        axis.set_xlabel("Full-rank LoRA rank (equally spaced)")
         axis.grid(True, alpha=0.3)
         axis.set_xticks(x_positions)
         axis.set_xticklabels([str(rank) for rank in ranks])
@@ -410,6 +592,7 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path, default=Path("analysis_outputs/f2_rank_ablation"))
     parser.add_argument("--output-name", default="f2_rank_ablation_final_acc")
     parser.add_argument("--baseline-rank", type=int, default=1024)
+    parser.add_argument("--wiki-reference-rank", type=int, default=16)
     parser.add_argument("--retention-thresholds", nargs="*", type=float, default=[99.0, 99.5])
     args = parser.parse_args()
 
@@ -422,8 +605,17 @@ def main() -> None:
     png_path = args.output_dir / f"{args.output_name}.png"
     retention_csv_path = args.output_dir / f"{args.output_name}_retention_vs_{args.baseline_rank}.csv"
     retention_png_path = args.output_dir / f"{args.output_name}_retention_vs_{args.baseline_rank}.png"
+    tradeoff_csv_path = (
+        args.output_dir
+        / f"{args.output_name}_wiki_drop_vs_{args.wiki_reference_rank}_code_retention_vs_{args.baseline_rank}.csv"
+    )
+    tradeoff_png_path = (
+        args.output_dir
+        / f"{args.output_name}_wiki_drop_vs_{args.wiki_reference_rank}_code_retention_vs_{args.baseline_rank}.png"
+    )
     write_csv(results, csv_path)
     write_retention_csv(results, retention_csv_path, args.baseline_rank)
+    write_tradeoff_csv(results, tradeoff_csv_path, args.baseline_rank, args.wiki_reference_rank)
     plot_with_matplotlib(results, png_path)
     plot_retention_with_matplotlib(
         results,
@@ -431,11 +623,20 @@ def main() -> None:
         args.baseline_rank,
         args.retention_thresholds,
     )
+    plot_tradeoff_with_matplotlib(
+        results,
+        tradeoff_png_path,
+        args.baseline_rank,
+        args.wiki_reference_rank,
+        args.retention_thresholds,
+    )
 
     print(f"wrote csv: {csv_path}")
     print(f"wrote plot: {png_path}")
     print(f"wrote retention csv: {retention_csv_path}")
     print(f"wrote retention plot: {retention_png_path}")
+    print(f"wrote trade-off csv: {tradeoff_csv_path}")
+    print(f"wrote trade-off plot: {tradeoff_png_path}")
     print()
     print("rank\twiki_acc\tcode_acc\tlog")
     for row in results:
