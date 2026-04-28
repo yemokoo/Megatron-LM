@@ -141,6 +141,32 @@ Practical KT-server plan:
 6. `source scripts/miscellaneous/activate_kt_env.sh`
 7. run smoke tests before full training/eval
 
+GitHub credential restore for KT:
+- Use HTTPS remotes, not SSH, because KT often blocks or complicates SSH auth.
+- Use `credential.helper store` and write a personal access token once to `~/.git-credentials`.
+- Always unset code-server askpass variables before CLI git operations.
+
+```bash
+git config --global credential.helper store
+git config --global credential.useHttpPath false
+
+unset GIT_ASKPASS SSH_ASKPASS \
+  VSCODE_GIT_ASKPASS_NODE VSCODE_GIT_ASKPASS_EXTRA_ARGS \
+  VSCODE_GIT_IPC_HANDLE VSCODE_GIT_ASKPASS_MAIN
+
+read -p "GitHub username: " GITHUB_USER
+read -s -p "GitHub token: " GITHUB_TOKEN
+echo
+
+printf "https://%s:%s@github.com\n" "$GITHUB_USER" "$GITHUB_TOKEN" > ~/.git-credentials
+chmod 600 ~/.git-credentials
+unset GITHUB_TOKEN
+
+git remote set-url origin https://github.com/yemokoo/LLM-continual-learning.git
+GIT_TERMINAL_PROMPT=0 git pull origin slurm
+git submodule update --init --recursive
+```
+
 ## A100 Migration Priority
 
 When resuming on the KT server, the first questions to revisit are:

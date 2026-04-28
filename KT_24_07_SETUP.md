@@ -43,6 +43,45 @@ cd FLAME-MoE
 git checkout slurm
 ```
 
+## GitHub Credential Restore
+
+KT code-server often injects `GIT_ASKPASS` variables, which can make `git pull`
+hang or repeatedly ask for credentials. Use HTTPS plus Git's local credential
+store so each new KT session only needs one token registration.
+
+Run this once per recreated KT home directory:
+
+```bash
+git config --global credential.helper store
+git config --global credential.useHttpPath false
+
+unset GIT_ASKPASS SSH_ASKPASS \
+  VSCODE_GIT_ASKPASS_NODE VSCODE_GIT_ASKPASS_EXTRA_ARGS \
+  VSCODE_GIT_IPC_HANDLE VSCODE_GIT_ASKPASS_MAIN
+
+read -p "GitHub username: " GITHUB_USER
+read -s -p "GitHub token: " GITHUB_TOKEN
+echo
+
+printf "https://%s:%s@github.com\n" "$GITHUB_USER" "$GITHUB_TOKEN" > ~/.git-credentials
+chmod 600 ~/.git-credentials
+unset GITHUB_TOKEN
+
+git remote set-url origin https://github.com/yemokoo/LLM-continual-learning.git
+GIT_TERMINAL_PROMPT=0 git ls-remote origin >/tmp/git_auth_check.txt && tail -n 3 /tmp/git_auth_check.txt
+```
+
+After that, normal pulls should not ask again:
+
+```bash
+unset GIT_ASKPASS SSH_ASKPASS \
+  VSCODE_GIT_ASKPASS_NODE VSCODE_GIT_ASKPASS_EXTRA_ARGS \
+  VSCODE_GIT_IPC_HANDLE VSCODE_GIT_ASKPASS_MAIN
+
+git pull origin slurm
+git submodule update --init --recursive
+```
+
 If the platform reclaims low-utilization sessions, start a tiny GPU warmup in another pane before or during install:
 
 ```bash
