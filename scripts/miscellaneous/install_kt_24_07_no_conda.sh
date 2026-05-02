@@ -14,17 +14,33 @@ DATA_DIR="$REPO_DIR/data"
 echo "==> [1/8] Git 설정"
 git config --global user.email "yemokoo@gmail.com"
 git config --global user.name "yemokoo"
+git config --global credential.helper store
+git config --global credential.useHttpPath false
+
+# KT code-server injects askpass helpers that can make non-interactive git
+# operations hang. Use the stored PAT in ~/.git-credentials instead.
+unset GIT_ASKPASS SSH_ASKPASS \
+  VSCODE_GIT_ASKPASS_NODE VSCODE_GIT_ASKPASS_EXTRA_ARGS \
+  VSCODE_GIT_IPC_HANDLE VSCODE_GIT_ASKPASS_MAIN
+
+git_no_prompt() {
+  GIT_TERMINAL_PROMPT=0 git "$@"
+}
 
 # ── 2. Repo 클론 (이미 있으면 스킵) ──────────────────────────────────────────
 echo "==> [2/8] Repo 클론"
 if [ -d "$REPO_DIR/.git" ]; then
   echo "  repo 이미 존재 → git pull"
   cd "$REPO_DIR"
-  git pull --no-recurse-submodules || true
+  git remote set-url origin https://github.com/yemokoo/LLM-continual-learning.git
+  git_no_prompt pull --no-recurse-submodules origin slurm || {
+    echo "  git pull 스킵: ~/.git-credentials에 GitHub PAT가 없거나 네트워크가 불안정합니다."
+    echo "  필요하면 KT_24_07_SETUP.md의 GitHub Credential Restore를 먼저 실행하세요."
+  }
 else
   mkdir -p "$PROJECT_BASE"
   cd "$PROJECT_BASE"
-  git clone --recursive -b slurm https://github.com/yemokoo/LLM-continual-learning.git
+  git_no_prompt clone --recursive -b slurm https://github.com/yemokoo/LLM-continual-learning.git
   cd "$REPO_DIR"
 fi
 
@@ -32,11 +48,11 @@ fi
 echo "==> [3/8] Submodule 설정"
 # KT 복구 시에는 과거 고정 커밋으로 덮지 않고, 현재 root repo가 가리키는
 # submodule 상태를 그대로 복원한다. 그래야 최신 실험 코드와 맞는다.
-git submodule sync --recursive
-git submodule update --init --recursive Megatron-LM
-git submodule update --init --recursive apex
-git submodule update --init --recursive TransformerEngine
-git submodule update --init --recursive lm-evaluation-harness
+git_no_prompt submodule sync --recursive
+git_no_prompt submodule update --init --recursive Megatron-LM
+git_no_prompt submodule update --init --recursive apex
+git_no_prompt submodule update --init --recursive TransformerEngine
+git_no_prompt submodule update --init --recursive lm-evaluation-harness
 
 # ── 4. PYTHONPATH & bashrc 설정 ──────────────────────────────────────────────
 echo "==> [4/8] PYTHONPATH 설정"
@@ -125,7 +141,9 @@ fi
 
 # ── 8. flash-attn 설치 (--no-deps 필수! torch 덮어쓰기 방지) ────────────────
 echo "==> [8/8] flash-attn 설치"
-"$PYTHON_BIN" -m pip install flash-attn==2.4.2 --no-build-isolation --no-deps
+MAX_JOBS="${MAX_JOBS:-8}" "$PYTHON_BIN" -m pip install --user --force-reinstall --no-cache-dir \
+  --no-build-isolation --no-deps --no-binary flash-attn \
+  flash-attn==2.4.2
 
 # ── torch 버전 검증 ──────────────────────────────────────────────────────────
 INSTALLED_TORCH="$("$PYTHON_BIN" -c 'import torch; print(torch.__version__)')"
