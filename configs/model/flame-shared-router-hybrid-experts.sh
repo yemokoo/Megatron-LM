@@ -28,7 +28,6 @@ MODEL_ARGS=(
     --num-experts "${NUM_EXPERTS:-4}"
     --moe-router-topk "${MOE_ROUTER_TOPK:-2}"
     --moe-layer-freq "$MOE_LAYER_FREQ"
-    --moe-router-dtype fp32
     --moe-router-pre-softmax
     --moe-router-score-function softmax
     --moe-aux-loss-coeff "${MOE_AUX_LOSS_COEFF:-0.01}"
@@ -44,3 +43,23 @@ MODEL_ARGS=(
     --attn-full-rank-lora-targets "${ATTN_FULL_RANK_LORA_TARGETS:-qkvo}"
     --attn-full-rank-lora-active-targets "${ATTN_FULL_RANK_LORA_ACTIVE_TARGETS:-}"
 )
+
+if [ "${MOE_ROUTER_DTYPE:-fp32}" != "none" ]; then
+    MODEL_ARGS+=(--moe-router-dtype "${MOE_ROUTER_DTYPE:-fp32}")
+fi
+
+if [ "${MOE_GROUPED_GEMM:-0}" = "1" ]; then
+    MODEL_ARGS+=(--moe-grouped-gemm)
+fi
+
+if [ "${MOE_PERMUTE_FUSION:-0}" = "1" ]; then
+    MODEL_ARGS+=(--moe-permute-fusion)
+fi
+
+if [ -n "${MOE_EXPERT_CAPACITY_FACTOR:-}" ]; then
+    MODEL_ARGS+=(--moe-expert-capacity-factor "$MOE_EXPERT_CAPACITY_FACTOR")
+fi
+
+if [ "${MOE_PAD_EXPERT_INPUT_TO_CAPACITY:-0}" = "1" ]; then
+    MODEL_ARGS+=(--moe-pad-expert-input-to-capacity)
+fi

@@ -181,6 +181,11 @@ metadata = {
     'attn_full_rank_lora_alpha': float(os.environ.get('ATTN_FULL_RANK_LORA_ALPHA', '1.0')),
     'attn_full_rank_lora_targets': os.environ.get('ATTN_FULL_RANK_LORA_TARGETS', 'qkvo'),
     'attn_full_rank_lora_active_targets': os.environ.get('ATTN_FULL_RANK_LORA_ACTIVE_TARGETS', ''),
+    'moe_router_dtype': os.environ.get('MOE_ROUTER_DTYPE', 'fp32'),
+    'moe_grouped_gemm': os.environ.get('MOE_GROUPED_GEMM', '0') == '1',
+    'moe_permute_fusion': os.environ.get('MOE_PERMUTE_FUSION', '0') == '1',
+    'moe_expert_capacity_factor': os.environ.get('MOE_EXPERT_CAPACITY_FACTOR', ''),
+    'moe_pad_expert_input_to_capacity': os.environ.get('MOE_PAD_EXPERT_INPUT_TO_CAPACITY', '0') == '1',
     'shared_router_hybrid': True,
 }
 with open(os.environ['RUN_METADATA'], 'w', encoding='utf-8') as f:
