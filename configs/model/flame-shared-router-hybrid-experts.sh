@@ -52,6 +52,10 @@ if [ "${MOE_GROUPED_GEMM:-0}" = "1" ]; then
     MODEL_ARGS+=(--moe-grouped-gemm)
 fi
 
+if [ "${ATTN_LORA_GROUPED_GEMM:-0}" = "1" ]; then
+    MODEL_ARGS+=(--attn-lora-grouped-gemm)
+fi
+
 if [ "${MOE_PERMUTE_FUSION:-0}" = "1" ]; then
     MODEL_ARGS+=(--moe-permute-fusion)
 fi

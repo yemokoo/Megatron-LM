@@ -233,6 +233,7 @@ metadata = {
     'attn_full_rank_lora_alpha': float(os.environ.get('ATTN_FULL_RANK_LORA_ALPHA', '1.0')),
     'attn_full_rank_lora_targets': os.environ.get('ATTN_FULL_RANK_LORA_TARGETS', 'qkvo'),
     'attn_full_rank_lora_active_targets': os.environ.get('ATTN_FULL_RANK_LORA_ACTIVE_TARGETS', ''),
+    'attn_lora_grouped_gemm': os.environ.get('ATTN_LORA_GROUPED_GEMM', '0') == '1',
     'shared_router_hybrid': True,
     'train_new_experts_and_router_only': True,
 }
