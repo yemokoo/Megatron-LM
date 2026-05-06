@@ -16,6 +16,7 @@ from megatron.core.transformer.attention import (
 from megatron.core.transformer.identity_op import IdentityFuncOp, IdentityOp
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.moe.legacy_a2a_token_dispatcher import MoEAlltoAllSEQTokenDispatcher
+from megatron.core.transformer.moe import grouped_gemm_util as gg
 from megatron.core.transformer.moe.moe_layer import BaseMoELayer, MoESubmodules
 from megatron.core.transformer.moe.router import TopKRouter
 from megatron.core.transformer.moe.token_dispatcher import (
@@ -37,6 +38,9 @@ class SharedRoutingContext:
     scores: torch.Tensor
     routing_map: torch.Tensor
     expert_token_indices: Optional[Tuple[torch.Tensor, ...]] = None
+    tokens_per_expert: Optional[torch.Tensor] = None
+    sorted_token_indices: Optional[torch.Tensor] = None
+    permuted_scores: Optional[torch.Tensor] = None
 
 
 @dataclass
@@ -370,6 +374,9 @@ class SharedFullRankLoraExperts(MegatronModule):
 
         if config.perform_initialization:
             self.reset_parameters()
+        self.use_grouped_gemm = bool(config.attn_lora_grouped_gemm)
+        if self.use_grouped_gemm:
+            gg.assert_grouped_gemm_is_available()
 
     def reset_parameters(self):
         std = self.config.init_method_std
@@ -398,6 +405,42 @@ class SharedFullRankLoraExperts(MegatronModule):
     def has_output_adapter(self) -> bool:
         return self.proj_lora_a is not None and self.proj_lora_b is not None
 
+    def _can_use_grouped_gemm(self, routing_context: SharedRoutingContext) -> bool:
+        return (
+            self.use_grouped_gemm
+            and routing_context.tokens_per_expert is not None
+            and routing_context.sorted_token_indices is not None
+            and routing_context.permuted_scores is not None
+        )
+
+    def _grouped_lora_project(
+        self,
+        input_flat: torch.Tensor,
+        lora_a: torch.Tensor,
+        lora_b: torch.Tensor,
+        routing_context: SharedRoutingContext,
+        output_size: int,
+    ) -> torch.Tensor:
+        """Apply routed LoRA experts with two grouped GEMMs and scatter-add restore."""
+        tokens_per_expert = routing_context.tokens_per_expert
+        sorted_indices = routing_context.sorted_token_indices
+        permuted_scores = routing_context.permuted_scores
+        if tokens_per_expert is None or sorted_indices is None or permuted_scores is None:
+            raise ValueError("Grouped attention LoRA requires precomputed routing metadata.")
+
+        permuted_input = input_flat.index_select(0, sorted_indices)
+        low_rank = gg.ops.gmm(permuted_input, lora_a, tokens_per_expert, trans_b=False)
+        permuted_output = gg.ops.gmm(low_rank, lora_b, tokens_per_expert, trans_b=False)
+        permuted_output = permuted_output * (
+            permuted_scores.to(permuted_output.dtype).unsqueeze(-1) * self.scale
+        )
+
+        output_flat = input_flat.new_zeros((input_flat.shape[0], output_size))
+        output_flat.scatter_add_(
+            0, sorted_indices.unsqueeze(1).expand(-1, output_size), permuted_output
+        )
+        return output_flat
+
     def forward_qkv(
         self, hidden_states: torch.Tensor, routing_context: SharedRoutingContext
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -414,6 +457,31 @@ class SharedFullRankLoraExperts(MegatronModule):
         q_delta = hidden_flat.new_zeros((hidden_flat.shape[0], self.query_output_size))
         k_delta = hidden_flat.new_zeros((hidden_flat.shape[0], self.value_output_size))
         v_delta = hidden_flat.new_zeros((hidden_flat.shape[0], self.value_output_size))
+        if self.qkv_lora_a is not None and self._can_use_grouped_gemm(routing_context):
+            packed_delta = self._grouped_lora_project(
+                hidden_flat,
+                self.qkv_lora_a,
+                self.qkv_lora_b,
+                routing_context,
+                self.query_output_size + 2 * self.value_output_size,
+            )
+            q_out, k_out, v_out = torch.split(
+                packed_delta,
+                [self.query_output_size, self.value_output_size, self.value_output_size],
+                dim=-1,
+            )
+            if "q" in self.active_targets:
+                q_delta = q_out
+            if "k" in self.active_targets:
+                k_delta = k_out
+            if "v" in self.active_targets:
+                v_delta = v_out
+            return (
+                q_delta.reshape(*original_shape, self.query_output_size),
+                k_delta.reshape(*original_shape, self.value_output_size),
+                v_delta.reshape(*original_shape, self.value_output_size),
+            )
+
         expert_token_indices = routing_context.expert_token_indices
 
         for expert_id in range(self.num_experts):
@@ -482,6 +550,15 @@ class SharedFullRankLoraExperts(MegatronModule):
             )
 
         output_delta = core_attn_flat.new_zeros((core_attn_flat.shape[0], self.input_size))
+        if self._can_use_grouped_gemm(routing_context):
+            output_delta = self._grouped_lora_project(
+                core_attn_flat,
+                self.proj_lora_a,
+                self.proj_lora_b,
+                routing_context,
+                self.input_size,
+            )
+            return output_delta.reshape(*original_shape, self.input_size)
 
         for expert_id in range(self.num_experts):
             if expert_token_indices is not None:
@@ -870,14 +947,35 @@ class SharedRouterHybridTransformerLayer(MegatronModule, BaseTransformerLayer):
         if self.shared_expert_router is None:
             raise ValueError("Shared routing requested for a layer without shared experts.")
         scores, routing_map = self.shared_expert_router(hidden_states)
-        expert_token_indices = tuple(
-            torch.nonzero(routing_map[:, expert_id], as_tuple=False).flatten()
-            for expert_id in range(routing_map.shape[1])
-        )
+        tokens_per_expert = None
+        sorted_token_indices = None
+        permuted_scores = None
+        if self.config.attn_lora_grouped_gemm:
+            num_tokens, num_experts = routing_map.shape
+            tokens_per_expert = routing_map.sum(dim=0).long().cpu()
+            routing_map_t = routing_map.bool().T.contiguous()
+            token_indices = (
+                torch.arange(num_tokens, device=routing_map.device)
+                .unsqueeze(0)
+                .expand(num_experts, -1)
+            )
+            sorted_token_indices = token_indices.masked_select(routing_map_t)
+            permuted_scores = scores.T.contiguous().masked_select(routing_map_t)
+            expert_token_indices = tuple(
+                torch.split(sorted_token_indices, tokens_per_expert.tolist())
+            )
+        else:
+            expert_token_indices = tuple(
+                torch.nonzero(routing_map[:, expert_id], as_tuple=False).flatten()
+                for expert_id in range(routing_map.shape[1])
+            )
         return SharedRoutingContext(
             scores=scores,
             routing_map=routing_map,
             expert_token_indices=expert_token_indices,
+            tokens_per_expert=tokens_per_expert,
+            sorted_token_indices=sorted_token_indices,
+            permuted_scores=permuted_scores,
         )
 
     def forward(

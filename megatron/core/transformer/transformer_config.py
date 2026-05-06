@@ -166,6 +166,9 @@ class TransformerConfig(ModelParallelConfig):
     attn_full_rank_lora_active_targets: str = ""
     """Subset of instantiated full-rank LoRA projections to actually apply. Empty means use all instantiated targets."""
 
+    attn_lora_grouped_gemm: bool = False
+    """Use grouped GEMM for routed attention LoRA experts when possible."""
+
     ####################
     # initialization
     ####################
