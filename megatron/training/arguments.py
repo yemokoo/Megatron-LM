@@ -2402,6 +2402,18 @@ def _add_moe_args(parser):
                        help='Scale factor lambda for KL distillation from the pre-expansion MoE teacher model during continual learning.')
     group.add_argument('--moe-old-model-kl-temperature', type=float, default=1.0,
                        help='Temperature used for old-model logits distillation during continual learning.')
+    group.add_argument('--router-memory-data-path', nargs='*', default=None,
+                       help='Old-task memory dataset blend for periodic shared-router KL distillation. '
+                       'Format matches --data-path.')
+    group.add_argument('--router-memory-kl-coeff', type=float, default=0.0,
+                       help='Scale factor for periodic old-memory shared-router KL distillation.')
+    group.add_argument('--router-memory-interval', type=int, default=0,
+                       help='Run one old-memory router distillation optimizer step every N training '
+                       'iterations. If unset and --router-memory-fraction > 0, N is derived from '
+                       'round(1 / fraction).')
+    group.add_argument('--router-memory-fraction', type=float, default=0.0,
+                       help='Approximate old-memory global-batch ratio relative to new-task batches. '
+                       'For example, 0.05 derives an interval of 20 when interval is unset.')
     group.add_argument('--moe-permute-fusion', action='store_true',
                        help='Fuse token rearrangement ops during token dispatching.')
 

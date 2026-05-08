@@ -1,4 +1,5 @@
 import re
+from contextlib import contextmanager
 from typing import Any, Dict, List
 
 import torch
@@ -14,6 +15,24 @@ from megatron.core.transformer.shared_router_hybrid import (
 
 
 _EXPERT_SUFFIX_RE = re.compile(r"(?:weight|bias)(\d+)$")
+_ALLOW_EXISTING_ROUTER_GRADS = False
+
+
+@contextmanager
+def allow_existing_router_grads():
+    """Temporarily allow gradients for copied router rows.
+
+    Continual-learning code training normally freezes old router rows via a
+    gradient hook. Router-memory distillation needs to update all current router
+    rows, so the hook checks this context flag during that auxiliary step.
+    """
+    global _ALLOW_EXISTING_ROUTER_GRADS
+    previous = _ALLOW_EXISTING_ROUTER_GRADS
+    _ALLOW_EXISTING_ROUTER_GRADS = True
+    try:
+        yield
+    finally:
+        _ALLOW_EXISTING_ROUTER_GRADS = previous
 
 
 def _load_matching_state(dst_module, src_module):
@@ -150,6 +169,8 @@ def expand_moe_model(target_model, source_model, num_existing_experts):
 
 def _freeze_router(module, num_existing_experts):
     def _zero_existing_router_grads(grad):
+        if _ALLOW_EXISTING_ROUTER_GRADS:
+            return grad
         grad = grad.clone()
         grad[:num_existing_experts].zero_()
         return grad

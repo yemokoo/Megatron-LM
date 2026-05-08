@@ -34,7 +34,10 @@ from megatron.training.utils import (
 )
 from megatron.training.arguments import core_transformer_config_from_args
 from megatron.training.yaml_arguments import core_transformer_config_from_yaml
-from megatron.training.training import get_old_moe_distill_teacher
+from megatron.training.training import (
+    get_old_moe_distill_teacher,
+    run_shared_router_memory_distillation_step,
+)
 from megatron.training.global_vars import get_tensorboard_writer, get_wandb_writer
 from megatron.legacy.data.data_samplers import build_pretraining_data_loader
 from megatron.core.models.gpt.gpt_layer_specs import (
@@ -50,6 +53,8 @@ from megatron.core.models.gpt.full_rank_lora_layer_specs import (
 
 stimer = StragglerDetector()
 _PROBE_DATALOADER = None
+_ROUTER_MEMORY_DATALOADER = None
+_ROUTER_MEMORY_ITERATOR = None
 
 def model_provider(pre_process=True, post_process=True) -> Union[GPTModel, megatron.legacy.model.GPTModel]:
     """Builds the model.
@@ -427,6 +432,50 @@ def _build_probe_dataloader(probe_data_path, probe_eval_iters, cache_key):
     return _PROBE_DATALOADER[cache_key]
 
 
+def _get_router_memory_dataloader():
+    global _ROUTER_MEMORY_DATALOADER
+    args = get_args()
+    if _ROUTER_MEMORY_DATALOADER is not None:
+        return _ROUTER_MEMORY_DATALOADER
+    if not args.router_memory_data_path or args.router_memory_kl_coeff <= 0:
+        return None
+
+    interval = args.router_memory_interval
+    if interval <= 0 and args.router_memory_fraction > 0:
+        interval = max(1, int(round(1.0 / args.router_memory_fraction)))
+    memory_steps = max(1, math.ceil(max(1, args.train_iters) / max(1, interval)))
+    _ROUTER_MEMORY_DATALOADER = _build_probe_dataloader(
+        args.router_memory_data_path,
+        memory_steps,
+        "router_memory",
+    )
+    return _ROUTER_MEMORY_DATALOADER
+
+
+def _next_router_memory_batch():
+    global _ROUTER_MEMORY_ITERATOR
+    dataloader = _get_router_memory_dataloader()
+    if dataloader is None:
+        raise RuntimeError("Router-memory dataloader is not configured.")
+    if _ROUTER_MEMORY_ITERATOR is None:
+        _ROUTER_MEMORY_ITERATOR = iter(dataloader)
+    try:
+        return get_batch(_ROUTER_MEMORY_ITERATOR)
+    except StopIteration:
+        _ROUTER_MEMORY_ITERATOR = iter(dataloader)
+        return get_batch(_ROUTER_MEMORY_ITERATOR)
+
+
+def router_memory_step(model, optimizer, config, iteration):
+    return run_shared_router_memory_distillation_step(
+        model,
+        optimizer,
+        config,
+        _next_router_memory_batch,
+        iteration,
+    )
+
+
 def _align_logits(logits, labels):
     if logits.dim() != 3:
         raise RuntimeError(f"Unexpected logits shape {tuple(logits.shape)}")
@@ -561,5 +610,6 @@ if __name__ == "__main__":
         ModelType.encoder_or_decoder,
         forward_step,
         probe_eval_func=run_probe_evaluation,
+        router_memory_step_func=router_memory_step,
         args_defaults={'tokenizer_type': 'GPT2BPETokenizer'},
     )

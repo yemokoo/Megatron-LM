@@ -1,7 +1,8 @@
 # Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
 
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Dict, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import torch
 from torch.nn import Parameter
@@ -31,6 +32,20 @@ from megatron.core.transformer.transformer_layer import (
     get_transformer_layer_offset,
 )
 from megatron.core.utils import make_viewless_tensor
+
+
+_SHARED_ROUTER_INPUT_CAPTURE_STACK: List[list] = []
+
+
+@contextmanager
+def capture_shared_router_inputs():
+    """Capture detached inputs to each shared router during a forward pass."""
+    captured = []
+    _SHARED_ROUTER_INPUT_CAPTURE_STACK.append(captured)
+    try:
+        yield captured
+    finally:
+        _SHARED_ROUTER_INPUT_CAPTURE_STACK.pop()
 
 
 @dataclass
@@ -946,6 +961,10 @@ class SharedRouterHybridTransformerLayer(MegatronModule, BaseTransformerLayer):
     def _compute_shared_routing(self, hidden_states: torch.Tensor) -> SharedRoutingContext:
         if self.shared_expert_router is None:
             raise ValueError("Shared routing requested for a layer without shared experts.")
+        if _SHARED_ROUTER_INPUT_CAPTURE_STACK:
+            _SHARED_ROUTER_INPUT_CAPTURE_STACK[-1].append(
+                (self.layer_number, hidden_states.detach())
+            )
         scores, routing_map = self.shared_expert_router(hidden_states)
         tokens_per_expert = None
         sorted_token_indices = None
