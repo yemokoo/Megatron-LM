@@ -70,6 +70,7 @@ export DIRECT_LOCAL_SAVE="${DIRECT_LOCAL_SAVE:-1}"
 
 export SSD_MOUNT="${LOCAL_SSD_ROOT}/${RUN_ID}"
 export SSD_CODE_TRAIN="${SSD_MOUNT}/dataset/code_train"
+export SSD_ROUTER_MEMORY="${SSD_MOUNT}/dataset/router_memory"
 export SSD_SOURCE_WEIGHTS="${SSD_MOUNT}/source_weights"
 export SSD_TARGET_WEIGHTS="${SSD_MOUNT}/target_weights"
 
@@ -113,7 +114,7 @@ export TRAIN_DATASET="${TRAIN_DATASET:-$(dataset_dir_for_task code)}"
 export ROUTER_MEMORY_KL_COEFF="${ROUTER_MEMORY_KL_COEFF:-0.0}"
 export ROUTER_MEMORY_FRACTION="${ROUTER_MEMORY_FRACTION:-0.05}"
 export ROUTER_MEMORY_INTERVAL="${ROUTER_MEMORY_INTERVAL:-0}"
-export ROUTER_MEMORY_DATASET="${ROUTER_MEMORY_DATASET:-$(dataset_dir_for_task wiki)}"
+export ROUTER_MEMORY_DATASET="${ROUTER_MEMORY_DATASET:-$PROJECT_ROOT/data/wiki/router_memory_5pct}"
 export STAGE1_WEIGHTS_DIR="${STAGE1_WEIGHTS_DIR:-}"
 export STAGE1_SUBDIR="${STAGE1_SUBDIR:-a100/wiki-shared-router-hybrid-pretrain-local}"
 export SOURCE_REQUIRED_ITERS="${SOURCE_REQUIRED_ITERS:-1}"
@@ -156,7 +157,7 @@ if [ "$DIRECT_LOCAL_SAVE" = "1" ]; then
     export SSD_TARGET_WEIGHTS="$TRAIN_WEIGHTS"
 fi
 
-mkdir -p "$SSD_CODE_TRAIN" "$SSD_SOURCE_WEIGHTS" "$SSD_TARGET_WEIGHTS" "$TRAIN_WEIGHTS" "$LOG_DIR"
+mkdir -p "$SSD_CODE_TRAIN" "$SSD_ROUTER_MEMORY" "$SSD_SOURCE_WEIGHTS" "$SSD_TARGET_WEIGHTS" "$TRAIN_WEIGHTS" "$LOG_DIR"
 exec > >(
     tee -a "$RUN_LOG" | "$PYTHON_BIN" -u -c '
 import re, sys
@@ -193,6 +194,14 @@ rsync -rlptD \
     --exclude 'progress.txt' \
     "$STAGE1_WEIGHTS_DIR/" "$SSD_SOURCE_WEIGHTS/"
 rsync -rlptD --info=progress2 "$TRAIN_DATASET/" "$SSD_CODE_TRAIN/"
+if [ "$ROUTER_MEMORY_KL_COEFF" != "0" ] && [ "$ROUTER_MEMORY_KL_COEFF" != "0.0" ]; then
+    if ! compgen -G "$ROUTER_MEMORY_DATASET/*.bin" >/dev/null; then
+        echo "ERROR: fixed router-memory dataset not found: $ROUTER_MEMORY_DATASET" >&2
+        echo "Create it once with scripts/dataset/materialize_fixed_sample_stream.py." >&2
+        exit 1
+    fi
+    rsync -rlptD --info=progress2 "$ROUTER_MEMORY_DATASET/" "$SSD_ROUTER_MEMORY/"
+fi
 
 "$PYTHON_BIN" - <<'PY'
 import json
@@ -244,6 +253,7 @@ metadata = {
     'router_memory_fraction': float(os.environ.get('ROUTER_MEMORY_FRACTION', '0.0')),
     'router_memory_interval': int(os.environ.get('ROUTER_MEMORY_INTERVAL', '0')),
     'router_memory_dataset': os.environ.get('ROUTER_MEMORY_DATASET', ''),
+    'router_memory_ssd_dataset': os.environ.get('SSD_ROUTER_MEMORY', ''),
 }
 with open(os.environ['RUN_METADATA'], 'w', encoding='utf-8') as f:
     json.dump(metadata, f, indent=2)
@@ -284,7 +294,7 @@ if [ "$ROUTER_MEMORY_KL_COEFF" != "0" ] && [ "$ROUTER_MEMORY_KL_COEFF" != "0.0" 
         --router-memory-kl-coeff "$ROUTER_MEMORY_KL_COEFF"
         --router-memory-fraction "$ROUTER_MEMORY_FRACTION"
         --router-memory-interval "$ROUTER_MEMORY_INTERVAL"
-        --router-memory-data-path $(build_data_path "$ROUTER_MEMORY_DATASET")
+        --router-memory-data-path $(build_data_path "$SSD_ROUTER_MEMORY")
     )
 fi
 

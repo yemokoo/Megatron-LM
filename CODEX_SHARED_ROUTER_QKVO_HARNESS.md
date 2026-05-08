@@ -378,16 +378,34 @@ moe_router_topk=16
 ROUTER_MEMORY_KL_COEFF=0.1
 ROUTER_MEMORY_FRACTION=0.05
 ROUTER_MEMORY_INTERVAL=20
-ROUTER_MEMORY_DATASET="$PWD/data/wiki/train/train_text_document"
+ROUTER_MEMORY_DATASET="$PWD/data/wiki/router_memory_5pct"
 CODE_RUN_SUFFIX="-router-memory-kl0p1"
 ```
 
 주의:
 
-- 현재 5%는 fixed subset 5%가 아니라 old-memory global batch를 code batch 대비 약 5% 비율로 넣는 방식입니다.
-- `ROUTER_MEMORY_INTERVAL=20`이면 code 20 step마다 wiki router-memory KL step 1번입니다.
+- router-memory set은 4개 실험이 같은 old-memory examples를 보도록 고정된 별도 indexed dataset을 사용합니다.
+- 현재 기본 fixed memory 위치는 `data/wiki/router_memory_5pct`입니다.
+- `ROUTER_MEMORY_INTERVAL=20`이면 code 20 step마다 wiki router-memory KL step 1번이고, 총 memory token 수가 code 학습 token 수의 약 5%가 됩니다.
 - 기존 baseline checkpoint와 충돌하지 않게 `CODE_RUN_SUFFIX`를 반드시 붙입니다.
 - 로그 metric prefix는 `router_memory/...`입니다.
+
+fixed router-memory set 생성:
+
+```bash
+cd /home/work/Agent_HJ/30_flame_agent/LLM-continual-learning
+source scripts/miscellaneous/activate_kt_env.sh
+
+python scripts/dataset/materialize_fixed_sample_stream.py \
+  --input-dir data/wiki/train \
+  --output-dir data/wiki/router_memory_5pct \
+  --samples 207360 \
+  --sequence-length 512 \
+  --random-seed 1234 \
+  --output-prefix train_text_document
+```
+
+`207360 = 1800 * 2304 * 0.05`이므로, G1-G4 code stage가 모두 같은 5% router-memory pool을 공유합니다.
 
 ## 11. 실험 해석 메모
 
