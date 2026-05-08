@@ -110,6 +110,10 @@ export MODEL_CONFIG_SCRIPT="${MODEL_CONFIG_SCRIPT:-configs/model/flame-shared-ro
 export DATASET_SPLIT="${DATASET_SPLIT:-100,0,0}"
 
 export TRAIN_DATASET="${TRAIN_DATASET:-$(dataset_dir_for_task code)}"
+export ROUTER_MEMORY_KL_COEFF="${ROUTER_MEMORY_KL_COEFF:-0.0}"
+export ROUTER_MEMORY_FRACTION="${ROUTER_MEMORY_FRACTION:-0.05}"
+export ROUTER_MEMORY_INTERVAL="${ROUTER_MEMORY_INTERVAL:-0}"
+export ROUTER_MEMORY_DATASET="${ROUTER_MEMORY_DATASET:-$(dataset_dir_for_task wiki)}"
 export STAGE1_WEIGHTS_DIR="${STAGE1_WEIGHTS_DIR:-}"
 export STAGE1_SUBDIR="${STAGE1_SUBDIR:-a100/wiki-shared-router-hybrid-pretrain-local}"
 export SOURCE_REQUIRED_ITERS="${SOURCE_REQUIRED_ITERS:-1}"
@@ -159,7 +163,7 @@ import re, sys
 iter_re = re.compile(r"(\[[^]]+\]) iteration\s+(\d+)/\s*(\d+).*throughput per GPU \(TFLOP/s/GPU\):\s*([0-9.]+)")
 val_re = re.compile(r"validation loss at iteration\s+(\d+).*lm loss value:\s*([^|]+)")
 save_re = re.compile(r"saving checkpoint at iteration\s+(\d+)")
-keep_re = re.compile(r"shared-router hybrid|ERROR:|Traceback|failed \(exitcode|checkpoint at|probe |Expanded MoE checkpoint")
+keep_re = re.compile(r"shared-router hybrid|router memory|Router-memory|ERROR:|Traceback|failed \(exitcode|checkpoint at|probe |Expanded MoE checkpoint")
 for line in sys.stdin:
     line = line.rstrip("\n")
     m = iter_re.search(line)
@@ -236,6 +240,10 @@ metadata = {
     'attn_lora_grouped_gemm': os.environ.get('ATTN_LORA_GROUPED_GEMM', '0') == '1',
     'shared_router_hybrid': True,
     'train_new_experts_and_router_only': True,
+    'router_memory_kl_coeff': float(os.environ.get('ROUTER_MEMORY_KL_COEFF', '0.0')),
+    'router_memory_fraction': float(os.environ.get('ROUTER_MEMORY_FRACTION', '0.0')),
+    'router_memory_interval': int(os.environ.get('ROUTER_MEMORY_INTERVAL', '0')),
+    'router_memory_dataset': os.environ.get('ROUTER_MEMORY_DATASET', ''),
 }
 with open(os.environ['RUN_METADATA'], 'w', encoding='utf-8') as f:
     json.dump(metadata, f, indent=2)
@@ -268,6 +276,16 @@ fi
 INITIAL_PROBE_ARGS=()
 if [ "$RUN_INITIAL_PROBE_EVAL" = "1" ]; then
     INITIAL_PROBE_ARGS+=(--run-initial-probe-eval)
+fi
+
+ROUTER_MEMORY_ARGS=()
+if [ "$ROUTER_MEMORY_KL_COEFF" != "0" ] && [ "$ROUTER_MEMORY_KL_COEFF" != "0.0" ]; then
+    ROUTER_MEMORY_ARGS+=(
+        --router-memory-kl-coeff "$ROUTER_MEMORY_KL_COEFF"
+        --router-memory-fraction "$ROUTER_MEMORY_FRACTION"
+        --router-memory-interval "$ROUTER_MEMORY_INTERVAL"
+        --router-memory-data-path $(build_data_path "$ROUTER_MEMORY_DATASET")
+    )
 fi
 
 torchrun \
@@ -320,6 +338,7 @@ torchrun \
     --secondary-probe-eval-interval "$SECONDARY_PROBE_EVAL_INTERVAL" \
     --secondary-probe-step-offset "$SECONDARY_PROBE_STEP_OFFSET" \
     --secondary-probe-data-path $(build_data_path "$SECONDARY_PROBE_DATASET") \
+    "${ROUTER_MEMORY_ARGS[@]}" \
     "${WANDB_ARGS[@]}"
 
 if [ "$SSD_TARGET_WEIGHTS" != "$TRAIN_WEIGHTS" ]; then

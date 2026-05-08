@@ -19,6 +19,7 @@ export CODE_MICRO_BATCH_SIZE_G1="${CODE_MICRO_BATCH_SIZE_G1:-96}"
 export CODE_MICRO_BATCH_SIZE_G2="${CODE_MICRO_BATCH_SIZE_G2:-72}"
 export CODE_MICRO_BATCH_SIZE_G3="${CODE_MICRO_BATCH_SIZE_G3:-48}"
 export CODE_MICRO_BATCH_SIZE_G4="${CODE_MICRO_BATCH_SIZE_G4:-24}"
+export CODE_RUN_SUFFIX="${CODE_RUN_SUFFIX:-}"
 
 is_completed() {
     local run_dir="$1"
@@ -46,7 +47,7 @@ run_code_experiment() {
     local wiki_run_id="$9"
 
     local code_tag="g${exp_id}-top${topk}-e${source_experts}to${target_experts}-ffn${moe_ffn_hidden}-r${attn_rank}"
-    local code_run_id="${code_tag}-wiki-to-code-shared-router-qkvo-mha-a100-bf16-mb${code_micro_batch_size}-${TRAIN_ITERS}"
+    local code_run_id="${code_tag}-wiki-to-code-shared-router-qkvo-mha-a100-bf16-mb${code_micro_batch_size}${CODE_RUN_SUFFIX}-${TRAIN_ITERS}"
     local wiki_weights="${BASE_STAGE_DIR}/wiki/${wiki_run_id}"
     local code_weights="${BASE_STAGE_DIR}/code/${code_run_id}"
 
