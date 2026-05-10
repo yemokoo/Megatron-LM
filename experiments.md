@@ -239,3 +239,58 @@ projection variant 의미:
 - baseline은 나중에 [replay_full_history_to_wandb.py](/Users/yemokoo/miil/1.%20LLM-CL/LLM-continual-learning/analysis/replay_full_history_to_wandb.py)로 stitched replay 한다
 - hybrid / F-family 실험에서는 실제 entry script와 stage script를 먼저 확인하고 수정한다
 - 코드 변경 후에는 항상 `push/pull`까지 같이 진행한다
+
+## 9. Experimental Design Rules
+
+이번 라운드에서 확인한 가장 큰 문제:
+- 결과가 안 좋은 것보다, **비교축이 섞여서 해석이 불가능한 실험**이 더 치명적이다
+- `single vs hybrid`, `freeze vs unfreeze`, `QV vs QKVO`, `low-rank vs full-rank`가 동시에 바뀌면 결과를 보고도 원인을 특정할 수 없다
+- 따라서 앞으로는 "커맨드 작성"보다 먼저 **실험 질문과 대조군 정의**를 고정해야 한다
+
+앞으로 모든 실험은 아래 질문을 먼저 문서 기준으로 점검한다:
+- 이 실험으로 정확히 무엇을 증명하거나 반박하려는가
+- 대조군은 무엇인가
+- 이번 실험에서 **의도적으로 바꾸는 변수는 정확히 하나인가**
+- freeze / unfreeze, projection 위치, rank, router 수, top-k, KL 유무, wiki/code stage 학습 범위는 모두 고정되어 있는가
+- 결과가 좋아지거나 나빠졌을 때, 어디까지 해석할 수 있는가
+
+실험 카드 최소 템플릿:
+- 목적:
+- 대조군:
+- 바꾸는 변수:
+- 고정 변수:
+- 기대 해석:
+
+실험 제안이 들어오면 앞으로 아래 순서로 진행한다:
+1. 먼저 이 문서를 기준으로 `목적 / 대조군 / 바꾸는 변수 / 고정 변수 / 해석 가능 범위`를 짧게 정리한다
+2. 사용자가 그 비교축에 동의하면 그다음 코드 수정과 실행 커맨드를 만든다
+3. 실행 전에는 run name, trainable parameter 범위, probe 구성, baseline stitching 여부를 다시 확인한다
+4. 결과 해석도 반드시 처음 정의한 실험 질문 기준으로만 한다
+
+특히 주의할 confound:
+- `single`과 `hybrid`를 비교하면서 `freeze/unfreeze`까지 같이 바뀌는 경우
+- `QV`, `QVO`, `QKV`, `QKVO`처럼 projection 위치가 동시에 달라지는 경우
+- `rank 16`과 `rank 1024`처럼 adapter capacity가 동시에 달라지는 경우
+- `QKV packed`와 `Q/K/V separate`처럼 attention adapter의 내부 parameterization 자체가 같이 바뀌는 경우
+- `wiki stage full-train`과 `code stage freeze-train` 범위가 비교군마다 다른 경우
+- `KL on/off`가 비교군마다 다른 경우
+
+ablation 원칙:
+- projection ablation을 할 때는 가능하면 `targets=qk`, `targets=qv`처럼 단순히 target 문자열을 바꿔서 parameterization까지 함께 바꾸지 않는다
+- 특히 `QKV packed` 경로를 쓰는 실험에서는, `Q/K`만 보고 싶더라도 packed 구조는 유지하고 `V` 출력만 비활성화하는 식으로 **동일한 parameterization을 유지한 채** 비교하는 것을 기본 원칙으로 한다
+- 즉 앞으로 projection ablation은 "어느 출력을 사용하느냐"를 바꾸는 실험으로 설계하고, "adapter 내부 구조 자체가 separate로 바뀌는 실험"은 별도 실험으로 분리해서 해석한다
+
+run naming 규칙:
+- 이름만 보고도 비교축이 드러나야 한다
+- 최소한 아래 정보는 run name에 반영한다
+- `single` 또는 `hybrid`
+- `freeze` 또는 `unfreeze`
+- `QV/QVO/QKV/QKVO`
+- `lowrank/fullrank`
+- `mbXX`
+- `nobase` 여부
+
+실험 관련 질문에 대한 작업 원칙:
+- 앞으로 실험 설계, 비교, 해석 질문이 들어오면 **항상 이 문서를 먼저 참고해서 답변**한다
+- 사용자가 빠르게 커맨드를 원하더라도, 비교축이 섞이면 먼저 그 위험을 짚고 정리한 뒤 진행한다
+- 즉 실험 진행은 단순 실행이 아니라, **대조군과 변인 통제를 먼저 합의하는 과정**을 포함해야 한다

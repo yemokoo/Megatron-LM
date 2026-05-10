@@ -55,6 +55,7 @@ def add_args(parser):
     group = parser.add_argument_group(title="specialization-suite")
     group.add_argument("--output-root", type=str, required=True)
     group.add_argument("--compare-label", type=str, required=True)
+    group.add_argument("--experiment-name", type=str, default="")
     group.add_argument("--model-kind", type=str, required=True, choices=("ffn", "lora"))
     group.add_argument("--source-num-experts", type=int, default=4)
     group.add_argument("--total-num-experts", type=int, default=7)
@@ -327,10 +328,12 @@ def main():
     )
 
     output_root = Path(args.output_root)
-    top1_dir = output_root / "top1_vs_top2"
-    masks_dir = output_root / "expert_group_masks"
-    similarity_dir = output_root / "expert_output_similarity"
-    for path in (top1_dir, masks_dir, similarity_dir):
+    experiment_name = args.experiment_name or args.compare_label
+    top1_dir = output_root / "top1_vs_top2" / args.model_kind / experiment_name
+    masks_dir = output_root / "expert_group_masks" / args.model_kind / experiment_name
+    similarity_dir = output_root / "expert_output_similarity" / args.model_kind / experiment_name
+    manifest_dir = output_root / "specialization_suite" / args.model_kind / experiment_name
+    for path in (top1_dir, masks_dir, similarity_dir, manifest_dir):
         path.mkdir(parents=True, exist_ok=True)
 
     model_list = get_model(model_provider, wrap_with_ddp=False)
@@ -348,6 +351,7 @@ def main():
 
     manifest = {
         "compare_label": args.compare_label,
+        "experiment_name": experiment_name,
         "model_kind": args.model_kind,
         "load": args.load,
         "iteration": args.iteration,
@@ -454,7 +458,7 @@ def main():
 
     generate_summary_plots(top1_dir, "top1_vs_top2")
     generate_summary_plots(masks_dir, "group_masks")
-    write_json(output_root / "manifest.json", manifest)
+    write_json(manifest_dir / "manifest.json", manifest)
 
     if torch.distributed.get_rank() == 0:
         print(json.dumps(manifest, indent=2))

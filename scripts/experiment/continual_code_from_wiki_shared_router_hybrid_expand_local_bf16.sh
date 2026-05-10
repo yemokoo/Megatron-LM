@@ -71,6 +71,7 @@ export DIRECT_LOCAL_SAVE="${DIRECT_LOCAL_SAVE:-1}"
 export SSD_MOUNT="${LOCAL_SSD_ROOT}/${RUN_ID}"
 export SSD_CODE_TRAIN="${SSD_MOUNT}/dataset/code_train"
 export SSD_ROUTER_MEMORY="${SSD_MOUNT}/dataset/router_memory"
+export SSD_ROUTER_MEMORY_EVAL="${SSD_MOUNT}/dataset/router_memory_eval"
 export SSD_SOURCE_WEIGHTS="${SSD_MOUNT}/source_weights"
 export SSD_TARGET_WEIGHTS="${SSD_MOUNT}/target_weights"
 
@@ -115,6 +116,16 @@ export ROUTER_MEMORY_KL_COEFF="${ROUTER_MEMORY_KL_COEFF:-0.0}"
 export ROUTER_MEMORY_FRACTION="${ROUTER_MEMORY_FRACTION:-0.05}"
 export ROUTER_MEMORY_INTERVAL="${ROUTER_MEMORY_INTERVAL:-0}"
 export ROUTER_MEMORY_DATASET="${ROUTER_MEMORY_DATASET:-$PROJECT_ROOT/data/wiki/router_memory_5pct}"
+export ROUTER_MEMORY_EVAL_DATASET="${ROUTER_MEMORY_EVAL_DATASET:-$ROUTER_MEMORY_DATASET}"
+export ROUTER_MEMORY_EVAL_INTERVAL="${ROUTER_MEMORY_EVAL_INTERVAL:-0}"
+export ROUTER_MEMORY_EVAL_ITERS="${ROUTER_MEMORY_EVAL_ITERS:-1}"
+export ROUTER_KL_STOP_STEP="${ROUTER_KL_STOP_STEP:-}"
+export ROUTER_KL_EARLY_STOP_ENABLED="${ROUTER_KL_EARLY_STOP_ENABLED:-0}"
+export ROUTER_KL_EARLY_STOP_METRIC="${ROUTER_KL_EARLY_STOP_METRIC:-fixed_probe_kl}"
+export ROUTER_KL_PATIENCE="${ROUTER_KL_PATIENCE:-3}"
+export ROUTER_KL_MIN_DELTA="${ROUTER_KL_MIN_DELTA:-0.01}"
+export ROUTER_KL_WARMUP_STEPS="${ROUTER_KL_WARMUP_STEPS:-300}"
+export ROUTER_KL_SMOOTHING_WINDOW="${ROUTER_KL_SMOOTHING_WINDOW:-3}"
 export STAGE1_WEIGHTS_DIR="${STAGE1_WEIGHTS_DIR:-}"
 export STAGE1_SUBDIR="${STAGE1_SUBDIR:-a100/wiki-shared-router-hybrid-pretrain-local}"
 export SOURCE_REQUIRED_ITERS="${SOURCE_REQUIRED_ITERS:-1}"
@@ -157,7 +168,14 @@ if [ "$DIRECT_LOCAL_SAVE" = "1" ]; then
     export SSD_TARGET_WEIGHTS="$TRAIN_WEIGHTS"
 fi
 
-mkdir -p "$SSD_CODE_TRAIN" "$SSD_ROUTER_MEMORY" "$SSD_SOURCE_WEIGHTS" "$SSD_TARGET_WEIGHTS" "$TRAIN_WEIGHTS" "$LOG_DIR"
+mkdir -p \
+    "$SSD_CODE_TRAIN" \
+    "$SSD_ROUTER_MEMORY" \
+    "$SSD_ROUTER_MEMORY_EVAL" \
+    "$SSD_SOURCE_WEIGHTS" \
+    "$SSD_TARGET_WEIGHTS" \
+    "$TRAIN_WEIGHTS" \
+    "$LOG_DIR"
 exec > >(
     tee -a "$RUN_LOG" | "$PYTHON_BIN" -u -c '
 import re, sys
@@ -200,7 +218,13 @@ if [ "$ROUTER_MEMORY_KL_COEFF" != "0" ] && [ "$ROUTER_MEMORY_KL_COEFF" != "0.0" 
         echo "Create it once with scripts/dataset/materialize_fixed_sample_stream.py." >&2
         exit 1
     fi
+    if ! compgen -G "$ROUTER_MEMORY_EVAL_DATASET/*.bin" >/dev/null; then
+        echo "ERROR: fixed router-memory eval dataset not found: $ROUTER_MEMORY_EVAL_DATASET" >&2
+        echo "Create it once with scripts/dataset/materialize_fixed_sample_stream.py." >&2
+        exit 1
+    fi
     rsync -rlptD --info=progress2 "$ROUTER_MEMORY_DATASET/" "$SSD_ROUTER_MEMORY/"
+    rsync -rlptD --info=progress2 "$ROUTER_MEMORY_EVAL_DATASET/" "$SSD_ROUTER_MEMORY_EVAL/"
 fi
 
 "$PYTHON_BIN" - <<'PY'
@@ -254,6 +278,17 @@ metadata = {
     'router_memory_interval': int(os.environ.get('ROUTER_MEMORY_INTERVAL', '0')),
     'router_memory_dataset': os.environ.get('ROUTER_MEMORY_DATASET', ''),
     'router_memory_ssd_dataset': os.environ.get('SSD_ROUTER_MEMORY', ''),
+    'router_memory_eval_dataset': os.environ.get('ROUTER_MEMORY_EVAL_DATASET', ''),
+    'router_memory_eval_ssd_dataset': os.environ.get('SSD_ROUTER_MEMORY_EVAL', ''),
+    'router_memory_eval_interval': int(os.environ.get('ROUTER_MEMORY_EVAL_INTERVAL', '0')),
+    'router_memory_eval_iters': int(os.environ.get('ROUTER_MEMORY_EVAL_ITERS', '1')),
+    'router_kl_stop_step': os.environ.get('ROUTER_KL_STOP_STEP', ''),
+    'router_kl_early_stop_enabled': os.environ.get('ROUTER_KL_EARLY_STOP_ENABLED', '0') == '1',
+    'router_kl_early_stop_metric': os.environ.get('ROUTER_KL_EARLY_STOP_METRIC', 'fixed_probe_kl'),
+    'router_kl_patience': int(os.environ.get('ROUTER_KL_PATIENCE', '3')),
+    'router_kl_min_delta': float(os.environ.get('ROUTER_KL_MIN_DELTA', '0.01')),
+    'router_kl_warmup_steps': int(os.environ.get('ROUTER_KL_WARMUP_STEPS', '300')),
+    'router_kl_smoothing_window': int(os.environ.get('ROUTER_KL_SMOOTHING_WINDOW', '3')),
 }
 with open(os.environ['RUN_METADATA'], 'w', encoding='utf-8') as f:
     json.dump(metadata, f, indent=2)
@@ -295,7 +330,21 @@ if [ "$ROUTER_MEMORY_KL_COEFF" != "0" ] && [ "$ROUTER_MEMORY_KL_COEFF" != "0.0" 
         --router-memory-fraction "$ROUTER_MEMORY_FRACTION"
         --router-memory-interval "$ROUTER_MEMORY_INTERVAL"
         --router-memory-data-path $(build_data_path "$SSD_ROUTER_MEMORY")
+        --router-memory-eval-data-path $(build_data_path "$SSD_ROUTER_MEMORY_EVAL")
+        --router-memory-eval-interval "$ROUTER_MEMORY_EVAL_INTERVAL"
+        --router-memory-eval-iters "$ROUTER_MEMORY_EVAL_ITERS"
+        --router-kl-early-stop-metric "$ROUTER_KL_EARLY_STOP_METRIC"
+        --router-kl-patience "$ROUTER_KL_PATIENCE"
+        --router-kl-min-delta "$ROUTER_KL_MIN_DELTA"
+        --router-kl-warmup-steps "$ROUTER_KL_WARMUP_STEPS"
+        --router-kl-smoothing-window "$ROUTER_KL_SMOOTHING_WINDOW"
     )
+    if [ -n "$ROUTER_KL_STOP_STEP" ]; then
+        ROUTER_MEMORY_ARGS+=(--router-kl-stop-step "$ROUTER_KL_STOP_STEP")
+    fi
+    if [ "$ROUTER_KL_EARLY_STOP_ENABLED" = "1" ]; then
+        ROUTER_MEMORY_ARGS+=(--router-kl-early-stop-enabled)
+    fi
 fi
 
 torchrun \

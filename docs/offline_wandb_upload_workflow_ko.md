@@ -257,6 +257,193 @@ tail -n 100 /home/work/Agent_HJ/wandb/debug-cli.work.log
 - step `1900+` train metric 존재 여부
 - step `1900+` probe 존재 여부
 
+## Shared-Router QKVO Probe Relog
+
+`shared-router-granularity-qkvo` 실험에서는 KT 환경의 `wandb sync`가 아래 에러로 깨진 적이 있었다.
+
+```text
+AssertionError
+run <id> was previously created and deleted; try a new run id
+```
+
+이 경우에는 offline run 디렉토리를 sync하지 말고, `logs/run.log`의 probe line만 파싱해서 새 W&B run에 online relog한다.
+
+목표 형태:
+
+- Wiki run은 별도 run으로 업로드한다.
+- Code run도 별도 run으로 업로드한다.
+- Wiki run의 step은 `0 -> 1800` 그대로 둔다.
+- Code run은 step `1800`에 해당 G의 Wiki 최종 probe 값을 먼저 찍는다.
+- Code run의 local step `100 -> 1800`은 W&B step `1900 -> 3600`으로 올린다.
+- Code local step `0`의 expanded-model initial probe는 그래프 연결용 run에서는 제외한다.
+
+### W&B Token
+
+KT에서 token은 `~/.config/wandb/env`에 저장해두고 재사용한다.
+
+```bash
+cd /home/work/Agent_HJ/30_flame_agent/LLM-continual-learning
+
+echo -n "W&B token: "
+read -s WANDB_API_KEY
+echo
+
+mkdir -p ~/.config/wandb
+chmod 700 ~/.config/wandb
+printf 'export WANDB_API_KEY=%q\n' "$WANDB_API_KEY" > ~/.config/wandb/env
+chmod 600 ~/.config/wandb/env
+
+grep -q 'source ~/.config/wandb/env' ~/.bashrc || echo 'source ~/.config/wandb/env' >> ~/.bashrc
+source ~/.config/wandb/env
+```
+
+### 공통 Relog 스크립트
+
+```bash
+cd /home/work/Agent_HJ/30_flame_agent/LLM-continual-learning
+source ~/.config/wandb/env
+
+cat > /tmp/relog_probe_to_wandb.py <<'PY'
+import argparse
+import math
+import re
+import wandb
+
+pat = re.compile(
+    r"probe (code_probe|wiki_probe) at iteration\s+(\d+) \| local_iteration: (\d+) \| "
+    r"next_token_acc: ([0-9.]+) \| ppl: ([0-9.E+-]+)"
+)
+
+def parse(path):
+    rows = []
+    with open(path, "r", errors="ignore") as f:
+        for line in f:
+            m = pat.search(line)
+            if m:
+                probe, global_it, local_it, acc, ppl = m.groups()
+                rows.append((probe, int(local_it), float(acc), float(ppl)))
+    return rows
+
+def add_metric(by_step, step, probe, acc, ppl):
+    by_step.setdefault(step, {})[f"{probe}/next_token_accuracy"] = acc
+    by_step.setdefault(step, {})[f"{probe}/ppl"] = ppl
+    by_step.setdefault(step, {})[f"{probe}/ppl_log10"] = math.log10(ppl)
+
+ap = argparse.ArgumentParser()
+ap.add_argument("--mode", choices=["wiki", "code"], required=True)
+ap.add_argument("--run-id", required=True)
+ap.add_argument("--run-name", required=True)
+ap.add_argument("--wiki-log", required=True)
+ap.add_argument("--code-log")
+ap.add_argument("--project", default="flame-continual-top2-qv-lora")
+args = ap.parse_args()
+
+run = wandb.init(
+    project=args.project,
+    id=args.run_id,
+    name=args.run_name,
+    resume="allow",
+    config={"relog_source": "run.log", "mode": args.mode},
+)
+
+by_step = {}
+
+if args.mode == "wiki":
+    for probe, local_it, acc, ppl in parse(args.wiki_log):
+        add_metric(by_step, local_it, probe, acc, ppl)
+else:
+    if not args.code_log:
+        raise SystemExit("--code-log is required for code mode")
+
+    wiki_final = {}
+    for probe, local_it, acc, ppl in parse(args.wiki_log):
+        if local_it == 1800:
+            wiki_final[probe] = (acc, ppl)
+
+    for probe, (acc, ppl) in wiki_final.items():
+        add_metric(by_step, 1800, probe, acc, ppl)
+
+    for probe, local_it, acc, ppl in parse(args.code_log):
+        if local_it == 0:
+            continue
+        add_metric(by_step, 1800 + local_it, probe, acc, ppl)
+
+for step in sorted(by_step):
+    wandb.log(by_step[step], step=step)
+
+run.finish()
+print(f"uploaded: {args.run_name} ({args.run_id})")
+PY
+
+RUN_SUFFIX=$(date +%Y%m%d-%H%M%S)
+```
+
+### G1/G2/G3/G4 Naming Rule
+
+W&B run 이름은 아래 규칙을 따른다.
+
+```text
+G1 - 실험1 - wiki - expert top2
+G1 - 실험1 - wiki to code - expert top2
+G2 - 실험2 - wiki - expert top4
+G2 - 실험2 - wiki to code - expert top4
+G3 - 실험3 - wiki - expert top8
+G3 - 실험3 - wiki to code - expert top8
+G4 - 실험4 - wiki - expert top16
+G4 - 실험4 - wiki to code - expert top16
+```
+
+### G3 업로드 예시
+
+```bash
+WANDB_API_KEY="$WANDB_API_KEY" WANDB_MODE=online python /tmp/relog_probe_to_wandb.py \
+  --mode wiki \
+  --run-id "g3-exp3-wiki-expert-top8-${RUN_SUFFIX}" \
+  --run-name "G3 - 실험3 - wiki - expert top8" \
+  --wiki-log ".local/weights/a100/mha/shared-router-granularity-qkvo/wiki/g3-top8-e16-ffn176-r128-wiki-shared-router-qkvo-mha-a100-bf16-mb48-1800/logs/run.log"
+```
+
+```bash
+WANDB_API_KEY="$WANDB_API_KEY" WANDB_MODE=online python /tmp/relog_probe_to_wandb.py \
+  --mode code \
+  --run-id "g3-exp3-wiki-to-code-expert-top8-${RUN_SUFFIX}" \
+  --run-name "G3 - 실험3 - wiki to code - expert top8" \
+  --wiki-log ".local/weights/a100/mha/shared-router-granularity-qkvo/wiki/g3-top8-e16-ffn176-r128-wiki-shared-router-qkvo-mha-a100-bf16-mb48-1800/logs/run.log" \
+  --code-log ".local/weights/a100/mha/shared-router-granularity-qkvo/code/g3-top8-e16to32-ffn176-r128-wiki-to-code-shared-router-qkvo-mha-a100-bf16-mb48-1800/logs/run.log"
+```
+
+### G4 업로드 예시
+
+G4 code는 attention-LoRA grouped GEMM 최적화 run을 사용한다.
+
+```bash
+WANDB_API_KEY="$WANDB_API_KEY" WANDB_MODE=online python /tmp/relog_probe_to_wandb.py \
+  --mode wiki \
+  --run-id "g4-exp4-wiki-expert-top16-${RUN_SUFFIX}" \
+  --run-name "G4 - 실험4 - wiki - expert top16" \
+  --wiki-log ".local/weights/a100/mha/shared-router-granularity-qkvo/wiki/g4-top16-e32-ffn88-r64-wiki-shared-router-qkvo-mha-a100-bf16-mb32-groupedgemm-1800/logs/run.log"
+```
+
+```bash
+WANDB_API_KEY="$WANDB_API_KEY" WANDB_MODE=online python /tmp/relog_probe_to_wandb.py \
+  --mode code \
+  --run-id "g4-exp4-wiki-to-code-expert-top16-${RUN_SUFFIX}" \
+  --run-name "G4 - 실험4 - wiki to code - expert top16" \
+  --wiki-log ".local/weights/a100/mha/shared-router-granularity-qkvo/wiki/g4-top16-e32-ffn88-r64-wiki-shared-router-qkvo-mha-a100-bf16-mb32-groupedgemm-1800/logs/run.log" \
+  --code-log ".local/weights/a100/mha/shared-router-granularity-qkvo/code/g4-top16-e32to64-ffn88-r64-wiki-to-code-shared-router-qkvo-mha-a100-bf16-mb32-attn-groupedgemm-1800/logs/run.log"
+```
+
+### 업로드 확인
+
+각 code run에서 x축이 아래처럼 보여야 정상이다.
+
+```text
+step 1800: 해당 G의 wiki 최종 probe
+step 1900: code local_iteration 100
+...
+step 3600: code local_iteration 1800
+```
+
 ## 추천 운영 요약
 
 앞으로는 아래 순서를 기본 운영으로 둔다.

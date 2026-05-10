@@ -15,13 +15,17 @@ run_and_pause() {
 }
 
 export LOCAL_SSD_ROOT="${LOCAL_SSD_ROOT:-/tmp/flame-moe}"
-export E3_SOURCE_WEIGHTS_DIR="${E3_SOURCE_WEIGHTS_DIR:-$PROJECT_ROOT/.local/weights/a100/mha/wiki-shared-router-hybrid-pretrain-local/e3-wiki-ffn-attn-lora-r256-single-router-moe-mha-a100-bf16-mb96-1800}"
+export E3_WIKI_RUN_ID="${E3_WIKI_RUN_ID:-e3-wiki-ffn-attn-lora-r256-single-router-moe-mha-a100-bf16-mb96-1800}"
+export E3_CODE_RUN_ID="${E3_CODE_RUN_ID:-e3-wiki-to-code-ffn-attn-lora-r256-single-router-moe-mha-a100-bf16-mb48-1800}"
+export E3_WIKI_TRAIN_WEIGHTS="${E3_WIKI_TRAIN_WEIGHTS:-$PROJECT_ROOT/.local/weights/a100/mha/wiki-shared-router-hybrid-pretrain-local/$E3_WIKI_RUN_ID}"
+export E3_CODE_TRAIN_WEIGHTS="${E3_CODE_TRAIN_WEIGHTS:-$PROJECT_ROOT/.local/weights/a100/mha/code-from-wiki-shared-router-hybrid-expand-local/$E3_CODE_RUN_ID}"
+export E3_SOURCE_WEIGHTS_DIR="${E3_SOURCE_WEIGHTS_DIR:-$E3_WIKI_TRAIN_WEIGHTS}"
 
 run_and_pause "1_E3_wiki" env \
     WANDB_MODE=offline \
     DIRECT_LOCAL_SAVE=1 \
-    RUN_ID=e3-wiki-ffn-attn-lora-r256-single-router-moe-mha-a100-bf16-mb96-1800 \
-    TRAIN_WEIGHTS="$PROJECT_ROOT/.local/weights/a100/mha/wiki-shared-router-hybrid-pretrain-local/e3-wiki-ffn-attn-lora-r256-single-router-moe-mha-a100-bf16-mb96-1800" \
+    RUN_ID="$E3_WIKI_RUN_ID" \
+    TRAIN_WEIGHTS="$E3_WIKI_TRAIN_WEIGHTS" \
     WANDB_PROJECT=flame-continual-top2-qv-lora \
     WANDB_EXP_NAME="E3 - rank256 wiki" \
     MICRO_BATCH_SIZE=96 \
@@ -37,8 +41,8 @@ run_and_pause "1_E3_wiki" env \
 run_and_pause "2_E3_code" env \
     WANDB_MODE=offline \
     DIRECT_LOCAL_SAVE=1 \
-    RUN_ID=e3-wiki-to-code-ffn-attn-lora-r256-single-router-moe-mha-a100-bf16-mb48-1800 \
-    TRAIN_WEIGHTS="$PROJECT_ROOT/.local/weights/a100/mha/code-from-wiki-shared-router-hybrid-expand-local/e3-wiki-to-code-ffn-attn-lora-r256-single-router-moe-mha-a100-bf16-mb48-1800" \
+    RUN_ID="$E3_CODE_RUN_ID" \
+    TRAIN_WEIGHTS="$E3_CODE_TRAIN_WEIGHTS" \
     SOURCE_WEIGHTS_DIR="$E3_SOURCE_WEIGHTS_DIR" \
     WANDB_PROJECT=flame-continual-top2-qv-lora \
     WANDB_EXP_NAME="E3 - rank256 wiki to code" \

@@ -300,6 +300,7 @@ Megatron-LM/megatron/core/models/gpt/shared_router_hybrid_layer_specs.py
 ```text
 scripts/experiment/a100/offline_chain_shared_router_granularity_qkvo_wiki_only_mha.sh
 scripts/experiment/a100/offline_chain_shared_router_granularity_qkvo_code_only_mha.sh
+scripts/experiment/a100/offline_chain_shared_router_granularity_qkvo_code_router_memory_earlystop_mha.sh
 scripts/experiment/a100/offline_chain_shared_router_granularity_qkvo_mha.sh
 scripts/experiment/a100/pretrain_wiki_shared_router_hybrid_local_bf16.sh
 scripts/experiment/continual_code_from_wiki_shared_router_hybrid_expand_local_bf16.sh
@@ -370,6 +371,16 @@ moe_router_topk=16
 --router-memory-fraction
 --router-memory-interval
 --router-memory-data-path
+--router-memory-eval-data-path
+--router-memory-eval-interval
+--router-memory-eval-iters
+--router-kl-stop-step
+--router-kl-early-stop-enabled
+--router-kl-early-stop-metric
+--router-kl-patience
+--router-kl-min-delta
+--router-kl-warmup-steps
+--router-kl-smoothing-window
 ```
 
 스크립트 환경변수:
@@ -379,6 +390,15 @@ ROUTER_MEMORY_KL_COEFF=0.1
 ROUTER_MEMORY_FRACTION=0.05
 ROUTER_MEMORY_INTERVAL=20
 ROUTER_MEMORY_DATASET="$PWD/data/wiki/router_memory_5pct"
+ROUTER_MEMORY_EVAL_DATASET="$PWD/data/wiki/router_memory_5pct"
+ROUTER_MEMORY_EVAL_INTERVAL=0
+ROUTER_MEMORY_EVAL_ITERS=1
+ROUTER_KL_EARLY_STOP_ENABLED=1
+ROUTER_KL_EARLY_STOP_METRIC=fixed_probe_kl
+ROUTER_KL_WARMUP_STEPS=300
+ROUTER_KL_PATIENCE=3
+ROUTER_KL_MIN_DELTA=0.01
+ROUTER_KL_SMOOTHING_WINDOW=3
 CODE_RUN_SUFFIX="-router-memory-kl0p1"
 ```
 
@@ -388,7 +408,14 @@ CODE_RUN_SUFFIX="-router-memory-kl0p1"
 - 현재 기본 fixed memory 위치는 `data/wiki/router_memory_5pct`입니다.
 - `ROUTER_MEMORY_INTERVAL=20`이면 code 20 step마다 wiki router-memory KL step 1번이고, 총 memory token 수가 code 학습 token 수의 약 5%가 됩니다.
 - 기존 baseline checkpoint와 충돌하지 않게 `CODE_RUN_SUFFIX`를 반드시 붙입니다.
-- 로그 metric prefix는 `router_memory/...`입니다.
+- 로그 metric prefix `router_memory/...`는 실제 optimizer update에 사용되는 train-memory KL입니다.
+- 로그 metric prefix `router_memory_eval/...`는 매번 같은 fixed Wiki probe batch로 측정하는 diagnostic KL입니다.
+- early-stop은 기본적으로 `router_memory_eval/kl`의 smoothed 값이 다시 상승하는지 보고 KL step을 끊습니다.
+- KL이 stopped 상태가 되어도 code LM 학습 step 수는 줄지 않고 그대로 진행됩니다.
+- stopped 이후에는 optimizer update용 wiki memory batch를 더 소비하지 않으며, fixed-probe eval은 동일 샘플을 반복 측정하는 진단용입니다.
+- `SAVE_INTERVAL=300`을 지정하면 early-stop 변형은 300 step마다 checkpoint를 남깁니다.
+- 주요 상태 로그는 `router_memory/kl_enabled`, `router_memory/kl_stopped`, `router_memory/kl_skipped_early_stop`, `router_memory/stop_reason_code`입니다.
+- `router_memory_eval/new_expert_prob_mass`, `router_memory_eval/topk_overlap_with_old_router`, layer별 expert usage도 같이 기록됩니다.
 
 fixed router-memory set 생성:
 
