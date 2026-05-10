@@ -35,6 +35,7 @@ from megatron.training.utils import (
 from megatron.training.arguments import core_transformer_config_from_args
 from megatron.training.yaml_arguments import core_transformer_config_from_yaml
 from megatron.training.training import (
+    evaluate_shared_router_memory_kl,
     get_old_moe_distill_teacher,
     run_shared_router_memory_distillation_step,
 )
@@ -55,6 +56,8 @@ stimer = StragglerDetector()
 _PROBE_DATALOADER = None
 _ROUTER_MEMORY_DATALOADER = None
 _ROUTER_MEMORY_ITERATOR = None
+_ROUTER_MEMORY_EVAL_DATALOADER = None
+_ROUTER_MEMORY_EVAL_ITERATOR = None
 
 def model_provider(pre_process=True, post_process=True) -> Union[GPTModel, megatron.legacy.model.GPTModel]:
     """Builds the model.
@@ -476,6 +479,56 @@ def router_memory_step(model, optimizer, config, iteration):
     )
 
 
+def _get_router_memory_eval_dataloader():
+    global _ROUTER_MEMORY_EVAL_DATALOADER
+    args = get_args()
+    if _ROUTER_MEMORY_EVAL_DATALOADER is not None:
+        return _ROUTER_MEMORY_EVAL_DATALOADER
+    if args.router_memory_kl_coeff <= 0:
+        return None
+
+    eval_data_path = args.router_memory_eval_data_path or args.router_memory_data_path
+    if not eval_data_path:
+        return None
+
+    _ROUTER_MEMORY_EVAL_DATALOADER = _build_probe_dataloader(
+        eval_data_path,
+        max(1, args.router_memory_eval_iters),
+        "router_memory_eval",
+    )
+    return _ROUTER_MEMORY_EVAL_DATALOADER
+
+
+def _reset_router_memory_eval_iterator():
+    global _ROUTER_MEMORY_EVAL_ITERATOR
+    dataloader = _get_router_memory_eval_dataloader()
+    if dataloader is None:
+        raise RuntimeError("Router-memory fixed-probe dataloader is not configured.")
+    # Reset on every diagnostic call so fixed-probe KL is measured on the same samples.
+    _ROUTER_MEMORY_EVAL_ITERATOR = iter(dataloader)
+
+
+def _next_router_memory_eval_batch():
+    global _ROUTER_MEMORY_EVAL_ITERATOR
+    if _ROUTER_MEMORY_EVAL_ITERATOR is None:
+        _reset_router_memory_eval_iterator()
+    try:
+        return get_batch(_ROUTER_MEMORY_EVAL_ITERATOR)
+    except StopIteration:
+        _reset_router_memory_eval_iterator()
+        return get_batch(_ROUTER_MEMORY_EVAL_ITERATOR)
+
+
+def router_memory_eval(model, config, iteration):
+    _reset_router_memory_eval_iterator()
+    return evaluate_shared_router_memory_kl(
+        model,
+        config,
+        _next_router_memory_eval_batch,
+        iteration,
+    )
+
+
 def _align_logits(logits, labels):
     if logits.dim() != 3:
         raise RuntimeError(f"Unexpected logits shape {tuple(logits.shape)}")
@@ -611,5 +664,6 @@ if __name__ == "__main__":
         forward_step,
         probe_eval_func=run_probe_evaluation,
         router_memory_step_func=router_memory_step,
+        router_memory_eval_func=router_memory_eval,
         args_defaults={'tokenizer_type': 'GPT2BPETokenizer'},
     )

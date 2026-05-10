@@ -11,6 +11,7 @@ import logging
 import math
 import os
 import sys
+from contextlib import nullcontext
 from typing import List
 
 import torch.distributed
@@ -258,14 +259,20 @@ def _router_logits(router, hidden_states):
     return F.linear(hidden_states.to(router_dtype), router.weight.to(router_dtype))
 
 
-def run_shared_router_memory_distillation_step(
-    model, optimizer, config, get_memory_batch_func, iteration
+def _run_shared_router_memory_batches(
+    model,
+    config,
+    get_memory_batch_func,
+    metric_prefix,
+    num_microbatches,
+    backward_coeff=None,
 ):
-    """Run one router-only old-memory distillation optimizer step.
+    """Compute router KL metrics on old-memory batches.
 
-    The current model is used only to produce hidden states for old-memory
-    tokens. Those hidden states are detached before router KL computation, so
-    gradients update only current shared-router parameters.
+    The current model produces the hidden states that it actually sees for old
+    inputs. Those hidden states are detached before both old/current router
+    projections. When ``backward_coeff`` is set, only current router weights get
+    gradients; otherwise this is a fixed-probe diagnostic pass.
     """
     args = get_args()
     teacher = get_shared_router_memory_teacher()
@@ -278,18 +285,14 @@ def run_shared_router_memory_distillation_step(
             "Router-memory KL currently supports pipeline-model-parallel-size=1."
         )
 
-    num_microbatches = get_num_microbatches()
     routers = _collect_current_shared_routers(model)
     if not routers:
         raise RuntimeError("Router-memory KL could not find current shared-router modules.")
 
-    for model_chunk in model:
-        model_chunk.zero_grad_buffer()
-    optimizer.zero_grad()
-
     totals = {}
     hist_totals = {}
     num_batches = 0
+    do_backward = backward_coeff is not None
 
     for _ in range(num_microbatches):
         tokens, labels, loss_mask, attention_mask, position_ids = get_memory_batch_func()
@@ -300,6 +303,10 @@ def run_shared_router_memory_distillation_step(
             del output
 
         layer_losses = []
+        layer_old_fractions = []
+        layer_new_fractions = []
+        layer_new_prob_masses = []
+        layer_topk_overlaps = []
         for layer_number, hidden_states in captured:
             if layer_number not in teacher or layer_number not in routers:
                 continue
@@ -309,20 +316,24 @@ def run_shared_router_memory_distillation_step(
             num_existing = teacher_state["num_existing_experts"]
             hidden_flat = hidden_states.detach().reshape(-1, hidden_states.shape[-1])
 
-            current_logits = _router_logits(current_router, hidden_flat)
-            old_weight = teacher_state["weight"].to(device=hidden_flat.device)
-            old_router_dtype = hidden_flat.dtype
-            if args.moe_router_dtype == 'fp32':
-                old_router_dtype = torch.float32
-            elif args.moe_router_dtype == 'fp64':
-                old_router_dtype = torch.float64
-            old_logits = F.linear(hidden_flat.to(old_router_dtype), old_weight.to(old_router_dtype))
+            grad_context = nullcontext() if do_backward else torch.no_grad()
+            with grad_context:
+                current_logits = _router_logits(current_router, hidden_flat)
+                old_weight = teacher_state["weight"].to(device=hidden_flat.device)
+                old_router_dtype = hidden_flat.dtype
+                if args.moe_router_dtype == 'fp32':
+                    old_router_dtype = torch.float32
+                elif args.moe_router_dtype == 'fp64':
+                    old_router_dtype = torch.float64
+                old_logits = F.linear(
+                    hidden_flat.to(old_router_dtype), old_weight.to(old_router_dtype)
+                )
 
-            old_probs = torch.softmax(old_logits.float(), dim=-1)
-            current_log_probs = torch.log_softmax(current_logits.float(), dim=-1)
-            target = torch.zeros_like(current_log_probs)
-            target[:, :num_existing] = old_probs
-            layer_kl = F.kl_div(current_log_probs, target, reduction="batchmean")
+                old_probs = torch.softmax(old_logits.float(), dim=-1)
+                current_log_probs = torch.log_softmax(current_logits.float(), dim=-1)
+                target = torch.zeros_like(current_log_probs)
+                target[:, :num_existing] = old_probs
+                layer_kl = F.kl_div(current_log_probs, target, reduction="batchmean")
             layer_losses.append(layer_kl)
 
             with torch.no_grad():
@@ -330,13 +341,25 @@ def run_shared_router_memory_distillation_step(
                 expert_idx = torch.topk(current_log_probs, k=topk, dim=-1).indices
                 old_fraction = (expert_idx < num_existing).float().mean()
                 new_fraction = 1.0 - old_fraction
+                current_probs = current_log_probs.exp()
+                new_prob_mass = current_probs[:, num_existing:].sum(dim=-1).mean()
+                old_topk = min(topk, old_logits.shape[-1])
+                old_expert_idx = torch.topk(old_logits.float(), k=old_topk, dim=-1).indices
+                overlap_hits = (
+                    expert_idx.unsqueeze(-1) == old_expert_idx.unsqueeze(-2)
+                ).any(dim=-1).float().sum(dim=-1)
+                topk_overlap = (overlap_hits / float(max(1, old_topk))).mean()
                 hist = torch.bincount(
                     expert_idx.reshape(-1),
                     minlength=current_log_probs.shape[-1],
                 ).float()
                 hist = hist / hist.sum().clamp_min(1.0)
+                layer_old_fractions.append(old_fraction)
+                layer_new_fractions.append(new_fraction)
+                layer_new_prob_masses.append(new_prob_mass)
+                layer_topk_overlaps.append(topk_overlap)
 
-            prefix = f"router_memory/layer_{layer_number}"
+            prefix = f"{metric_prefix}/layer_{layer_number}"
             totals[f"{prefix}/kl"] = totals.get(f"{prefix}/kl", 0.0) + layer_kl.detach()
             totals[f"{prefix}/old_expert_fraction"] = (
                 totals.get(f"{prefix}/old_expert_fraction", 0.0) + old_fraction.detach()
@@ -344,31 +367,48 @@ def run_shared_router_memory_distillation_step(
             totals[f"{prefix}/new_expert_fraction"] = (
                 totals.get(f"{prefix}/new_expert_fraction", 0.0) + new_fraction.detach()
             )
+            totals[f"{prefix}/new_expert_prob_mass"] = (
+                totals.get(f"{prefix}/new_expert_prob_mass", 0.0) + new_prob_mass.detach()
+            )
+            totals[f"{prefix}/topk_overlap_with_old_router"] = (
+                totals.get(f"{prefix}/topk_overlap_with_old_router", 0.0)
+                + topk_overlap.detach()
+            )
             hist_totals[layer_number] = hist_totals.get(layer_number, 0.0) + hist.detach()
 
         if not layer_losses:
             continue
 
         router_kl = torch.stack(layer_losses).mean()
-        totals["router_memory/kl"] = totals.get("router_memory/kl", 0.0) + router_kl.detach()
-        loss = args.router_memory_kl_coeff * router_kl / num_microbatches
-        with allow_existing_router_grads():
-            if config.grad_scale_func is not None:
-                loss = config.grad_scale_func(loss)
-            loss.backward()
+        totals[f"{metric_prefix}/kl"] = (
+            totals.get(f"{metric_prefix}/kl", 0.0) + router_kl.detach()
+        )
+        totals[f"{metric_prefix}/old_expert_fraction"] = (
+            totals.get(f"{metric_prefix}/old_expert_fraction", 0.0)
+            + torch.stack(layer_old_fractions).mean().detach()
+        )
+        totals[f"{metric_prefix}/new_expert_fraction"] = (
+            totals.get(f"{metric_prefix}/new_expert_fraction", 0.0)
+            + torch.stack(layer_new_fractions).mean().detach()
+        )
+        totals[f"{metric_prefix}/new_expert_prob_mass"] = (
+            totals.get(f"{metric_prefix}/new_expert_prob_mass", 0.0)
+            + torch.stack(layer_new_prob_masses).mean().detach()
+        )
+        totals[f"{metric_prefix}/topk_overlap_with_old_router"] = (
+            totals.get(f"{metric_prefix}/topk_overlap_with_old_router", 0.0)
+            + torch.stack(layer_topk_overlaps).mean().detach()
+        )
+        if do_backward:
+            loss = backward_coeff * router_kl / num_microbatches
+            with allow_existing_router_grads():
+                if config.grad_scale_func is not None:
+                    loss = config.grad_scale_func(loss)
+                loss.backward()
         num_batches += 1
 
     if num_batches == 0:
         raise RuntimeError("Router-memory KL did not capture any shared-router layer inputs.")
-
-    finalize_model_grads(model, None)
-
-    timers = get_timers()
-    timers('optimizer', log_level=1).start(barrier=args.barrier_with_L1_time)
-    update_successful, grad_norm, num_zeros_in_grad = optimizer.step()
-    timers('optimizer').stop()
-    update_successful = logical_and_across_model_parallel_group(update_successful)
-    grad_norm = reduce_max_stat_across_model_parallel_group(grad_norm)
 
     reporting = {}
     denom = float(num_batches)
@@ -383,7 +423,59 @@ def run_shared_router_memory_distillation_step(
         torch.distributed.all_reduce(hist, group=mpu.get_data_parallel_group())
         hist = hist / mpu.get_data_parallel_world_size()
         for expert_idx, value in enumerate(hist):
-            reporting[f"router_memory/layer_{layer_number}/expert_{expert_idx}_usage"] = value
+            reporting[f"{metric_prefix}/layer_{layer_number}/expert_{expert_idx}_usage"] = value
+
+    return reporting, num_batches
+
+
+def evaluate_shared_router_memory_kl(model, config, get_memory_batch_func, iteration):
+    """Evaluate fixed-probe router KL without optimizer updates."""
+    args = get_args()
+    reporting, num_batches = _run_shared_router_memory_batches(
+        model,
+        config,
+        get_memory_batch_func,
+        "router_memory_eval",
+        max(1, args.router_memory_eval_iters) * get_num_microbatches(),
+        backward_coeff=None,
+    )
+
+    if torch.distributed.get_rank() == 0 and iteration % args.log_interval == 0:
+        kl_value = reporting["router_memory_eval/kl"].item()
+        print_rank_0(
+            f"router memory fixed-probe eval at iteration {iteration} | "
+            f"kl: {kl_value:.6E} | batches: {num_batches}"
+        )
+    return reporting
+
+
+def run_shared_router_memory_distillation_step(
+    model, optimizer, config, get_memory_batch_func, iteration
+):
+    """Run one router-only old-memory distillation optimizer step."""
+    args = get_args()
+
+    for model_chunk in model:
+        model_chunk.zero_grad_buffer()
+    optimizer.zero_grad()
+
+    reporting, num_batches = _run_shared_router_memory_batches(
+        model,
+        config,
+        get_memory_batch_func,
+        "router_memory",
+        get_num_microbatches(),
+        backward_coeff=args.router_memory_kl_coeff,
+    )
+
+    finalize_model_grads(model, None)
+
+    timers = get_timers()
+    timers('optimizer', log_level=1).start(barrier=args.barrier_with_L1_time)
+    update_successful, grad_norm, num_zeros_in_grad = optimizer.step()
+    timers('optimizer').stop()
+    update_successful = logical_and_across_model_parallel_group(update_successful)
+    grad_norm = reduce_max_stat_across_model_parallel_group(grad_norm)
 
     if torch.distributed.get_rank() == 0 and iteration % args.log_interval == 0:
         kl_value = reporting["router_memory/kl"].item()
@@ -569,6 +661,7 @@ def pretrain(
     get_position_embedding_ranks=None,
     non_loss_data_func=None,
     router_memory_step_func=None,
+    router_memory_eval_func=None,
 ):
     """Main training program.
 
@@ -741,7 +834,7 @@ def pretrain(
                 model, optimizer, opt_param_scheduler,
                 train_data_iterator, valid_data_iterator,
                 probe_eval_func, process_non_loss_data_func, config, checkpointing_context,
-                non_loss_data_func, router_memory_step_func)
+                non_loss_data_func, router_memory_step_func, router_memory_eval_func)
 
         print_datetime('after training is done')
 
@@ -2143,7 +2236,7 @@ def checkpoint_and_decide_exit(model, optimizer, opt_param_scheduler, iteration,
 def train(forward_step_func, model, optimizer, opt_param_scheduler,
           train_data_iterator, valid_data_iterator,
           probe_eval_func, process_non_loss_data_func, config, checkpointing_context,
-          non_loss_data_func, router_memory_step_func=None):
+          non_loss_data_func, router_memory_step_func=None, router_memory_eval_func=None):
     """Training function: run train_step desired number of times, run validation, checkpoint."""
     args = get_args()
     timers = get_timers()
@@ -2315,6 +2408,98 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
             f"coeff={args.router_memory_kl_coeff}, interval={router_memory_interval}, "
             f"data_path={args.router_memory_data_path}"
         )
+    router_memory_eval_interval = args.router_memory_eval_interval
+    if router_memory_eval_interval <= 0:
+        router_memory_eval_interval = router_memory_interval
+    router_memory_eval_enabled = (
+        router_memory_eval_func is not None
+        and args.router_memory_kl_coeff > 0.0
+        and (args.router_memory_eval_data_path is not None or args.router_memory_data_path is not None)
+        and router_memory_eval_interval > 0
+    )
+    if router_memory_eval_enabled:
+        print_rank_0(
+            "Router-memory fixed-probe KL enabled: "
+            f"interval={router_memory_eval_interval}, "
+            f"eval_iters={args.router_memory_eval_iters}, "
+            f"data_path={args.router_memory_eval_data_path or args.router_memory_data_path}"
+        )
+    if (
+        args.router_kl_early_stop_enabled
+        and args.router_kl_early_stop_metric == "fixed_probe_kl"
+        and not router_memory_eval_enabled
+    ):
+        raise RuntimeError(
+            "router_kl_early_stop_metric=fixed_probe_kl requires router-memory fixed-probe eval."
+        )
+
+    # This scheduler tests whether old-router distillation has an early validity
+    # window: as Code training drifts the Wiki hidden distribution, the frozen
+    # old router can become a stale teacher, so future Wiki KL steps are gated.
+    router_kl_stopped = False
+    router_kl_stop_step_actual = -1
+    router_kl_stop_reason = "none"
+    router_kl_stop_reason_code = 0  # none=0, fixed_step=1, kl_rise=2
+    router_kl_bad_count = 0
+    router_kl_best_smoothed = None
+    router_kl_recent_values = []
+
+    def _router_memory_scalar(value):
+        return torch.as_tensor(float(value), dtype=torch.float, device='cuda')
+
+    def _set_router_kl_stopped(step, reason, reason_code):
+        nonlocal router_kl_stopped
+        nonlocal router_kl_stop_step_actual
+        nonlocal router_kl_stop_reason
+        nonlocal router_kl_stop_reason_code
+        if router_kl_stopped:
+            return
+        router_kl_stopped = True
+        router_kl_stop_step_actual = int(step)
+        router_kl_stop_reason = reason
+        router_kl_stop_reason_code = int(reason_code)
+        print_rank_0(
+            f"Router-memory KL stopped at iteration {step} "
+            f"(reason={reason}). Code training continues."
+        )
+
+    def _maybe_stop_router_kl_on_rise(metric_value, step, metric_name):
+        nonlocal router_kl_bad_count
+        nonlocal router_kl_best_smoothed
+        nonlocal router_kl_recent_values
+        if not args.router_kl_early_stop_enabled or router_kl_stopped:
+            return
+
+        router_kl_recent_values.append(float(metric_value))
+        window = max(1, int(args.router_kl_smoothing_window))
+        router_kl_recent_values = router_kl_recent_values[-window:]
+        smoothed = sum(router_kl_recent_values) / float(len(router_kl_recent_values))
+
+        if step < args.router_kl_warmup_steps:
+            return
+
+        if router_kl_best_smoothed is None:
+            router_kl_best_smoothed = smoothed
+            router_kl_bad_count = 0
+            return
+
+        if smoothed < router_kl_best_smoothed - args.router_kl_min_delta:
+            router_kl_best_smoothed = smoothed
+            router_kl_bad_count = 0
+            return
+
+        if smoothed > router_kl_best_smoothed + args.router_kl_min_delta:
+            router_kl_bad_count += 1
+        else:
+            router_kl_bad_count = 0
+
+        if router_kl_bad_count >= args.router_kl_patience:
+            print_rank_0(
+                f"Router-memory KL early-stop triggered by {metric_name}: "
+                f"smoothed={smoothed:.6E}, best={router_kl_best_smoothed:.6E}, "
+                f"bad_count={router_kl_bad_count}."
+            )
+            _set_router_kl_stopped(step, "kl_rise", 2)
 
     # Run training iterations till done.
     while iteration < args.train_iters:
@@ -2377,22 +2562,87 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
         if should_exit:
             break
 
+        current_step = iteration + 1
         if (
             router_memory_enabled
-            and not skipped_iter
-            and (iteration + 1) % router_memory_interval == 0
+            and not router_kl_stopped
+            and args.router_kl_stop_step is not None
+            and current_step >= args.router_kl_stop_step
         ):
+            _set_router_kl_stopped(current_step, "fixed_step", 1)
+
+        router_memory_due = (
+            router_memory_enabled
+            and not skipped_iter
+            and current_step % router_memory_interval == 0
+        )
+        router_memory_eval_due = (
+            router_memory_eval_enabled
+            and not skipped_iter
+            and current_step % router_memory_eval_interval == 0
+        )
+
+        if router_memory_eval_due:
+            eval_loss_dict = router_memory_eval_func(model, config, current_step)
+            loss_dict.update(eval_loss_dict)
+            if args.router_kl_early_stop_metric == "fixed_probe_kl":
+                _maybe_stop_router_kl_on_rise(
+                    eval_loss_dict["router_memory_eval/kl"].item(),
+                    current_step,
+                    "fixed_probe_kl",
+                )
+
+        if router_memory_due and not router_kl_stopped:
             memory_loss_dict, memory_update_successful, memory_grad_norm, _ = router_memory_step_func(
-                model, optimizer, config, iteration + 1
+                model, optimizer, config, current_step
             )
             loss_dict.update(memory_loss_dict)
+            if args.router_kl_early_stop_metric == "train_memory_kl":
+                _maybe_stop_router_kl_on_rise(
+                    memory_loss_dict["router_memory/kl"].item(),
+                    current_step,
+                    "train_memory_kl",
+                )
             if memory_grad_norm is not None:
                 loss_dict["router_memory/grad_norm"] = torch.as_tensor(
                     memory_grad_norm, dtype=torch.float, device='cuda'
                 )
             if not memory_update_successful:
                 print_rank_0(
-                    f"WARNING: router-memory optimizer step was skipped at iteration {iteration + 1}."
+                    f"WARNING: router-memory optimizer step was skipped at iteration {current_step}."
+                )
+        elif router_memory_due and router_kl_stopped:
+            if torch.distributed.get_rank() == 0 and current_step % args.log_interval == 0:
+                print_rank_0(
+                    f"router memory distill skipped at iteration {current_step} "
+                    f"because early-stop is active (reason={router_kl_stop_reason})."
+                )
+
+        if router_memory_enabled:
+            loss_dict["router_memory/kl_enabled"] = _router_memory_scalar(
+                1.0 if not router_kl_stopped else 0.0
+            )
+            loss_dict["router_memory/kl_stopped"] = _router_memory_scalar(
+                1.0 if router_kl_stopped else 0.0
+            )
+            loss_dict["router_memory/kl_interval_due"] = _router_memory_scalar(
+                1.0 if router_memory_due else 0.0
+            )
+            loss_dict["router_memory/kl_skipped_early_stop"] = _router_memory_scalar(
+                1.0 if router_memory_due and router_kl_stopped else 0.0
+            )
+            loss_dict["router_memory/stop_step_actual"] = _router_memory_scalar(
+                router_kl_stop_step_actual
+            )
+            loss_dict["router_memory/stop_reason_code"] = _router_memory_scalar(
+                router_kl_stop_reason_code
+            )
+            loss_dict["router_memory/early_stop_bad_count"] = _router_memory_scalar(
+                router_kl_bad_count
+            )
+            if router_kl_best_smoothed is not None:
+                loss_dict["router_memory/early_stop_best_smoothed_kl"] = (
+                    _router_memory_scalar(router_kl_best_smoothed)
                 )
 
         # Enable forward pre-hooks after first set of forward and backward passes.

@@ -2414,6 +2414,30 @@ def _add_moe_args(parser):
     group.add_argument('--router-memory-fraction', type=float, default=0.0,
                        help='Approximate old-memory global-batch ratio relative to new-task batches. '
                        'For example, 0.05 derives an interval of 20 when interval is unset.')
+    group.add_argument('--router-memory-eval-data-path', nargs='*', default=None,
+                       help='Fixed old-task probe dataset blend for router KL diagnostics. '
+                       'If unset, --router-memory-data-path is reused.')
+    group.add_argument('--router-memory-eval-interval', type=int, default=0,
+                       help='Evaluate fixed-probe router KL every N training iterations. '
+                       'If unset, the router-memory training interval is reused.')
+    group.add_argument('--router-memory-eval-iters', type=int, default=1,
+                       help='Number of fixed-probe global batches used for router KL diagnostics.')
+    group.add_argument('--router-kl-stop-step', type=int, default=None,
+                       help='Stop applying router-memory KL once the training step is >= this value. '
+                       'Code LM training continues normally.')
+    group.add_argument('--router-kl-early-stop-enabled', action='store_true',
+                       help='Stop future router-memory KL steps when the selected router KL metric rises.')
+    group.add_argument('--router-kl-early-stop-metric', type=str, default='fixed_probe_kl',
+                       choices=['fixed_probe_kl', 'train_memory_kl'],
+                       help='Metric used for router KL early stopping.')
+    group.add_argument('--router-kl-patience', type=int, default=3,
+                       help='Number of consecutive bad smoothed KL evaluations before stopping.')
+    group.add_argument('--router-kl-min-delta', type=float, default=0.01,
+                       help='Minimum smoothed KL increase over the best value that counts as bad.')
+    group.add_argument('--router-kl-warmup-steps', type=int, default=300,
+                       help='Do not trigger router KL early stopping before this many Code steps.')
+    group.add_argument('--router-kl-smoothing-window', type=int, default=3,
+                       help='Number of recent KL values averaged for early-stop decisions.')
     group.add_argument('--moe-permute-fusion', action='store_true',
                        help='Fuse token rearrangement ops during token dispatching.')
 
