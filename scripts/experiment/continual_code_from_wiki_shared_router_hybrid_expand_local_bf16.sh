@@ -126,6 +126,8 @@ export ROUTER_KL_PATIENCE="${ROUTER_KL_PATIENCE:-3}"
 export ROUTER_KL_MIN_DELTA="${ROUTER_KL_MIN_DELTA:-0.01}"
 export ROUTER_KL_WARMUP_STEPS="${ROUTER_KL_WARMUP_STEPS:-300}"
 export ROUTER_KL_SMOOTHING_WINDOW="${ROUTER_KL_SMOOTHING_WINDOW:-3}"
+export SHARED_ROUTER_TRAIN_MASK_EXISTING_EXPERTS="${SHARED_ROUTER_TRAIN_MASK_EXISTING_EXPERTS:-0}"
+export SHARED_ROUTER_TRAIN_MASK_EXISTING_EXPERTS_FROM_NUM_EXPERTS="${SHARED_ROUTER_TRAIN_MASK_EXISTING_EXPERTS_FROM_NUM_EXPERTS:-$SOURCE_NUM_EXPERTS}"
 export STAGE1_WEIGHTS_DIR="${STAGE1_WEIGHTS_DIR:-}"
 export STAGE1_SUBDIR="${STAGE1_SUBDIR:-a100/wiki-shared-router-hybrid-pretrain-local}"
 export SOURCE_REQUIRED_ITERS="${SOURCE_REQUIRED_ITERS:-1}"
@@ -272,6 +274,8 @@ metadata = {
     'attn_full_rank_lora_active_targets': os.environ.get('ATTN_FULL_RANK_LORA_ACTIVE_TARGETS', ''),
     'attn_lora_grouped_gemm': os.environ.get('ATTN_LORA_GROUPED_GEMM', '0') == '1',
     'shared_router_hybrid': True,
+    'shared_router_train_mask_existing_experts': os.environ.get('SHARED_ROUTER_TRAIN_MASK_EXISTING_EXPERTS', '0') == '1',
+    'shared_router_train_mask_existing_experts_from_num_experts': int(os.environ.get('SHARED_ROUTER_TRAIN_MASK_EXISTING_EXPERTS_FROM_NUM_EXPERTS', '0')),
     'train_new_experts_and_router_only': True,
     'router_memory_kl_coeff': float(os.environ.get('ROUTER_MEMORY_KL_COEFF', '0.0')),
     'router_memory_fraction': float(os.environ.get('ROUTER_MEMORY_FRACTION', '0.0')),

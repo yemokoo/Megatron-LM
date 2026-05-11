@@ -56,6 +56,13 @@ if [ "${ATTN_LORA_GROUPED_GEMM:-0}" = "1" ]; then
     MODEL_ARGS+=(--attn-lora-grouped-gemm)
 fi
 
+if [ "${SHARED_ROUTER_TRAIN_MASK_EXISTING_EXPERTS:-0}" = "1" ]; then
+    MODEL_ARGS+=(
+        --shared-router-train-mask-existing-experts
+        --shared-router-train-mask-existing-experts-from-num-experts "${SHARED_ROUTER_TRAIN_MASK_EXISTING_EXPERTS_FROM_NUM_EXPERTS:-${SOURCE_NUM_EXPERTS:-0}}"
+    )
+fi
+
 if [ "${MOE_PERMUTE_FUSION:-0}" = "1" ]; then
     MODEL_ARGS+=(--moe-permute-fusion)
 fi

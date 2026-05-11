@@ -434,7 +434,42 @@ python scripts/dataset/materialize_fixed_sample_stream.py \
 
 `207360 = 1800 * 2304 * 0.05`이므로, G1-G4 code stage가 모두 같은 5% router-memory pool을 공유합니다.
 
-## 11. 실험 해석 메모
+## 11. Code-Train Wiki Expert Mask 실험
+
+목적:
+
+- Wiki checkpoint에서 Code continual learning을 할 때, 학습 중 Code token이 기존 Wiki expert로 라우팅되는 것을 막습니다.
+- train step에서만 기존 expert `0..SOURCE_NUM_EXPERTS-1`를 shared-router top-k 후보에서 제외합니다.
+- probe/eval/inference에서는 mask를 끄고 Wiki expert와 Code expert 전체를 다시 열어둡니다.
+- 따라서 실험 질문은 “Code 학습 동안만 Code expert 사용을 강제하면, 최종 전체 expert routing에서 retention/plasticity가 어떻게 바뀌는가”입니다.
+
+핵심 옵션:
+
+```text
+--shared-router-train-mask-existing-experts
+--shared-router-train-mask-existing-experts-from-num-experts
+```
+
+스크립트 환경변수:
+
+```bash
+SHARED_ROUTER_TRAIN_MASK_EXISTING_EXPERTS=1
+SHARED_ROUTER_TRAIN_MASK_EXISTING_EXPERTS_FROM_NUM_EXPERTS="$SOURCE_NUM_EXPERTS"
+```
+
+G1/G2 실행 wrapper:
+
+```text
+scripts/experiment/a100/offline_chain_shared_router_granularity_qkvo_code_train_mask_wiki_experts_g1_g2_mha.sh
+```
+
+주의:
+
+- mask는 `TopKRouter` 내부에서 `self.training`일 때만 적용됩니다.
+- `model.eval()`로 도는 code/wiki probe에서는 전체 expert가 선택 가능합니다.
+- router replay/KL과는 별개 실험이며, 기본 wrapper는 router-memory KL을 켜지 않습니다.
+
+## 12. 실험 해석 메모
 
 expert 수가 커져도 항상 느려지는 것은 아니고, 실제 active compute는 주로 `topk`에 의해 커집니다. 하지만 이번 granularity sweep은 expert 수와 topk를 같이 키웠습니다.
 
@@ -455,7 +490,7 @@ G4: topk 16
 
 교수님께 설명할 때는 “파라미터 수가 비슷해도, 학습 시간은 파라미터 수만이 아니라 active expert path 수, routing/dispatch overhead, small GEMM 효율에 크게 좌우된다”고 말하면 정확합니다.
 
-## 12. 새 세션에서 가장 먼저 볼 것
+## 13. 새 세션에서 가장 먼저 볼 것
 
 1. 이 파일을 읽습니다.
 2. KT에서는 `source scripts/miscellaneous/activate_kt_env.sh` 후 import check를 합니다.
