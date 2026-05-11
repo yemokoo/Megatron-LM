@@ -169,6 +169,12 @@ class TransformerConfig(ModelParallelConfig):
     attn_lora_grouped_gemm: bool = False
     """Use grouped GEMM for routed attention LoRA experts when possible."""
 
+    shared_router_train_mask_existing_experts: bool = False
+    """During training only, mask copied old experts out of shared-router top-k selection."""
+
+    shared_router_train_mask_existing_experts_from_num_experts: Optional[int] = None
+    """Number of copied old experts to mask when training with code-only expert routing."""
+
     ####################
     # initialization
     ####################

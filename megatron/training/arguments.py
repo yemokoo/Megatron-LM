@@ -2438,6 +2438,13 @@ def _add_moe_args(parser):
                        help='Do not trigger router KL early stopping before this many Code steps.')
     group.add_argument('--router-kl-smoothing-window', type=int, default=3,
                        help='Number of recent KL values averaged for early-stop decisions.')
+    group.add_argument('--shared-router-train-mask-existing-experts', action='store_true',
+                       help='During training only, mask copied old experts out of shared-router '
+                       'top-k selection. Evaluation/probe runs keep all experts available.')
+    group.add_argument('--shared-router-train-mask-existing-experts-from-num-experts',
+                       type=int, default=None,
+                       help='Number of copied old experts to mask when '
+                       '--shared-router-train-mask-existing-experts is enabled.')
     group.add_argument('--moe-permute-fusion', action='store_true',
                        help='Fuse token rearrangement ops during token dispatching.')
 

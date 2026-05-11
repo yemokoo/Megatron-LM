@@ -280,6 +280,33 @@ class TopKRouter(Router):
             )
         return logits
 
+    def apply_train_mask_existing_experts(self, logits: torch.Tensor):
+        """Mask old experts only during training for code-only expert routing.
+
+        This experiment forces Code batches to train and route through newly
+        added experts, while evaluation/probe runs keep all experts available.
+        """
+        if not self.training or not self.config.shared_router_train_mask_existing_experts:
+            return logits
+
+        num_existing = self.config.shared_router_train_mask_existing_experts_from_num_experts
+        if num_existing is None or num_existing <= 0:
+            return logits
+        if num_existing >= logits.shape[-1]:
+            raise ValueError(
+                "shared_router_train_mask_existing_experts_from_num_experts must be "
+                f"smaller than num experts ({logits.shape[-1]}), got {num_existing}."
+            )
+        if logits.shape[-1] - num_existing < self.topk:
+            raise ValueError(
+                "Code-only expert routing leaves fewer unmasked experts than top-k: "
+                f"num_experts={logits.shape[-1]}, masked={num_existing}, topk={self.topk}."
+            )
+
+        logits = logits.clone()
+        logits[:, :num_existing] = torch.finfo(logits.dtype).min
+        return logits
+
     def apply_input_jitter(self, input: torch.Tensor):
         """Add noise to the input tensor.
         Refer to https://arxiv.org/abs/2101.03961.
@@ -314,6 +341,10 @@ class TopKRouter(Router):
         """
         seq_length, bsz = logits.shape[:2]
         logits = logits.view(-1, self.config.num_moe_experts)
+
+        # Train-only code expert masking: Code continual batches cannot route to
+        # copied Wiki experts, but eval/probe/inference can still use all experts.
+        logits = self.apply_train_mask_existing_experts(logits)
 
         # Apply Z-Loss
         logits = self.apply_z_loss(logits)
