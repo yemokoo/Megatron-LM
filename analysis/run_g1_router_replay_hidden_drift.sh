@@ -19,6 +19,13 @@ make_step_load_dir() {
   ln -sfn "$source_dir/$iter_name" "$output_dir/$iter_name"
 }
 
+discover_code_steps() {
+  find "$CODE_RUN_DIR" -maxdepth 1 -type d -name 'iter_*' -print \
+    | sed -E 's/.*iter_0*([0-9]+)$/\1/' \
+    | sort -n \
+    | tr '\n' ' '
+}
+
 run_dump() {
   local load_dir="$1"
   local step_label="$2"
@@ -109,9 +116,24 @@ export WIKI_RUN_DIR="${WIKI_RUN_DIR:-$BASE_STAGE_DIR/wiki/g1-top2-e4-ffn704-r512
 export CODE_RUN_DIR="${CODE_RUN_DIR:-$BASE_STAGE_DIR/code/g1-top2-e4to8-ffn704-r512-wiki-to-code-shared-router-qkvo-mha-a100-bf16-mb96-router-memory-fixed5-kl0p1-1800}"
 export ROUTER_MEMORY_PREFIX="${ROUTER_MEMORY_PREFIX:-$PROJECT_ROOT/data/wiki/router_memory_5pct/train_text_document}"
 export OUTPUT_ROOT="${OUTPUT_ROOT:-$PROJECT_ROOT/analysis_outputs/g1_router_replay_hidden_drift}"
-export STEPS="${STEPS:-300 600 900 1200 1500 1800}"
+export STEPS="${STEPS:-auto}"
+export SKIP_MISSING_CHECKPOINTS="${SKIP_MISSING_CHECKPOINTS:-1}"
 
 mkdir -p "$OUTPUT_ROOT/dumps" "$OUTPUT_ROOT/load_views"
+
+if [ "$STEPS" = "auto" ]; then
+  STEPS="$(discover_code_steps)"
+  if [ -z "$STEPS" ] && [ -f "$CODE_RUN_DIR/latest_checkpointed_iteration.txt" ]; then
+    STEPS="$(tr -d '\n\r[:space:]' < "$CODE_RUN_DIR/latest_checkpointed_iteration.txt")"
+  fi
+fi
+
+if [ -z "$STEPS" ]; then
+  echo "ERROR: no code checkpoints found under $CODE_RUN_DIR" >&2
+  exit 1
+fi
+
+echo "[hidden-drift] code checkpoint steps: $STEPS"
 
 echo "[hidden-drift] dumping Wiki baseline"
 run_dump \
@@ -128,8 +150,13 @@ idx=1
 for step in $STEPS; do
   iter_name=$(printf "iter_%07d" "$step")
   if [ ! -d "$CODE_RUN_DIR/$iter_name" ]; then
-    echo "ERROR: missing checkpoint $CODE_RUN_DIR/$iter_name" >&2
-    exit 1
+    if [ "$SKIP_MISSING_CHECKPOINTS" = "1" ]; then
+      echo "WARNING: skipping missing checkpoint $CODE_RUN_DIR/$iter_name" >&2
+      continue
+    else
+      echo "ERROR: missing checkpoint $CODE_RUN_DIR/$iter_name" >&2
+      exit 1
+    fi
   fi
   step_load_dir="$OUTPUT_ROOT/load_views/code_${step}"
   make_step_load_dir "$CODE_RUN_DIR" "$step" "$step_load_dir"
