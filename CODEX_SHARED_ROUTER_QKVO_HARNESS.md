@@ -434,6 +434,27 @@ python scripts/dataset/materialize_fixed_sample_stream.py \
 
 `207360 = 1800 * 2304 * 0.05`이므로, G1-G4 code stage가 모두 같은 5% router-memory pool을 공유합니다.
 
+50% router-memory replay 변형:
+
+- G1 기준으로 `ROUTER_MEMORY_INTERVAL=2`를 사용하면 code 2 step마다 wiki router-memory KL step 1번이고, 총 memory token 수가 code 학습 token 수의 약 50%가 됩니다.
+- 이 경우 fixed memory pool도 10배 커야 하므로 `data/wiki/router_memory_50pct`를 별도로 사용합니다.
+- `ROUTER_MEMORY_EVAL_INTERVAL=100`으로 두면 같은 fixed mini-set에 대한 diagnostic KL을 100 code step마다 반복 측정합니다.
+
+```bash
+cd /home/work/Agent_HJ/30_flame_agent/LLM-continual-learning
+source scripts/miscellaneous/activate_kt_env.sh
+
+python scripts/dataset/materialize_fixed_sample_stream.py \
+  --input-dir data/wiki/train \
+  --output-dir data/wiki/router_memory_50pct \
+  --samples 2073600 \
+  --sequence-length 512 \
+  --random-seed 1234 \
+  --output-prefix train_text_document
+```
+
+`2073600 = 1800 * 2304 * 0.5`이므로, G1 50% replay run이 같은 샘플을 과도하게 재사용하지 않습니다.
+
 ## 11. Code-Train Wiki Expert Mask 실험
 
 목적:
