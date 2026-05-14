@@ -118,6 +118,7 @@ from . import ft_integration
 stimer = StragglerDetector()
 _OLD_MOE_DISTILL_TEACHER = None
 _SHARED_ROUTER_MEMORY_TEACHER = None
+_SHARED_ROUTER_MEMORY_FULL_TEACHER = None
 
 
 def set_old_moe_distill_teacher(model):
@@ -239,9 +240,30 @@ def get_shared_router_memory_teacher():
     return _SHARED_ROUTER_MEMORY_TEACHER
 
 
+def set_shared_router_memory_full_teacher(model):
+    """Keep the full old model resident for teacher-student router KD."""
+    global _SHARED_ROUTER_MEMORY_FULL_TEACHER
+    _SHARED_ROUTER_MEMORY_FULL_TEACHER = model
+
+
+def get_shared_router_memory_full_teacher():
+    return _SHARED_ROUTER_MEMORY_FULL_TEACHER
+
+
 def _collect_current_shared_routers(model):
     routers = {}
     for shard in unwrap_model(model[0:1]):
+        for module in shard.modules():
+            router = getattr(module, "shared_expert_router", None)
+            layer_number = getattr(module, "layer_number", None)
+            if router is not None and layer_number is not None:
+                routers[layer_number] = router
+    return routers
+
+
+def _collect_shared_routers(model):
+    routers = {}
+    for shard in unwrap_model(model):
         for module in shard.modules():
             router = getattr(module, "shared_expert_router", None)
             layer_number = getattr(module, "layer_number", None)
@@ -428,6 +450,199 @@ def _run_shared_router_memory_batches(
     return reporting, num_batches
 
 
+def accumulate_shared_router_teacher_student_memory_kl(
+    model,
+    config,
+    get_memory_batch_func,
+    iteration,
+):
+    """Accumulate full-teacher/full-student router KD gradients.
+
+    The same old-task tokens are forwarded through the frozen old model and the
+    current expanded student. Each model therefore produces router inputs from
+    its own hidden trajectory. We then match token-wise, layer-wise router
+    distributions after zero-padding the teacher distribution to the expanded
+    student expert dimension. Hidden states are detached before router
+    projections, so the KD loss updates only student router parameters.
+    """
+    args = get_args()
+    teacher = get_shared_router_memory_full_teacher()
+    if teacher is None:
+        raise RuntimeError(
+            "Teacher-student router KD is enabled, but the full old teacher model is not loaded."
+        )
+    if args.pipeline_model_parallel_size != 1:
+        raise NotImplementedError(
+            "Teacher-student router KD currently supports pipeline-model-parallel-size=1."
+        )
+
+    student_routers = _collect_current_shared_routers(model)
+    teacher_routers = _collect_shared_routers(teacher)
+    if not student_routers or not teacher_routers:
+        raise RuntimeError("Teacher-student router KD could not find shared-router modules.")
+
+    metric_prefix = "router_memory_teacher_student"
+    totals = {}
+    hist_totals = {}
+    num_batches = 0
+    num_microbatches = get_num_microbatches()
+
+    for _ in range(num_microbatches):
+        tokens, labels, loss_mask, attention_mask, position_ids = get_memory_batch_func()
+        del labels, loss_mask
+
+        with torch.no_grad(), capture_shared_router_inputs() as teacher_captured:
+            teacher_output = teacher[0](tokens, position_ids, attention_mask, labels=None)
+            del teacher_output
+
+        with torch.no_grad(), capture_shared_router_inputs() as student_captured:
+            student_output = model[0](tokens, position_ids, attention_mask, labels=None)
+            del student_output
+
+        teacher_hidden = {
+            int(layer_number): hidden_states.detach()
+            for layer_number, hidden_states in teacher_captured
+        }
+        student_hidden = {
+            int(layer_number): hidden_states.detach()
+            for layer_number, hidden_states in student_captured
+        }
+
+        layer_losses = []
+        layer_old_fractions = []
+        layer_new_fractions = []
+        layer_new_prob_masses = []
+        layer_topk_overlaps = []
+
+        common_layers = sorted(set(teacher_hidden) & set(student_hidden))
+        for layer_number in common_layers:
+            if layer_number not in teacher_routers or layer_number not in student_routers:
+                continue
+
+            teacher_router = teacher_routers[layer_number]
+            student_router = student_routers[layer_number]
+            teacher_flat = teacher_hidden[layer_number].reshape(
+                -1, teacher_hidden[layer_number].shape[-1]
+            )
+            student_flat = student_hidden[layer_number].reshape(
+                -1, student_hidden[layer_number].shape[-1]
+            )
+
+            with torch.no_grad():
+                teacher_logits = _router_logits(teacher_router, teacher_flat)
+                teacher_probs = torch.softmax(teacher_logits.float(), dim=-1)
+
+            with allow_existing_router_grads():
+                student_logits = _router_logits(student_router, student_flat)
+                student_log_probs = torch.log_softmax(student_logits.float(), dim=-1)
+                target = torch.zeros_like(student_log_probs)
+                num_teacher_experts = teacher_probs.shape[-1]
+                target[:, :num_teacher_experts] = teacher_probs
+                layer_kl = F.kl_div(student_log_probs, target, reduction="batchmean")
+            layer_losses.append(layer_kl)
+
+            with torch.no_grad():
+                topk = min(args.moe_router_topk, student_log_probs.shape[-1])
+                student_expert_idx = torch.topk(student_log_probs, k=topk, dim=-1).indices
+                old_fraction = (student_expert_idx < num_teacher_experts).float().mean()
+                new_fraction = 1.0 - old_fraction
+                student_probs = student_log_probs.exp()
+                new_prob_mass = student_probs[:, num_teacher_experts:].sum(dim=-1).mean()
+                teacher_topk = min(topk, teacher_logits.shape[-1])
+                teacher_expert_idx = torch.topk(
+                    teacher_logits.float(), k=teacher_topk, dim=-1
+                ).indices
+                overlap_hits = (
+                    student_expert_idx.unsqueeze(-1) == teacher_expert_idx.unsqueeze(-2)
+                ).any(dim=-1).float().sum(dim=-1)
+                topk_overlap = (overlap_hits / float(max(1, teacher_topk))).mean()
+                hist = torch.bincount(
+                    student_expert_idx.reshape(-1),
+                    minlength=student_log_probs.shape[-1],
+                ).float()
+                hist = hist / hist.sum().clamp_min(1.0)
+
+                layer_old_fractions.append(old_fraction)
+                layer_new_fractions.append(new_fraction)
+                layer_new_prob_masses.append(new_prob_mass)
+                layer_topk_overlaps.append(topk_overlap)
+
+            prefix = f"{metric_prefix}/layer_{layer_number}"
+            totals[f"{prefix}/kl"] = totals.get(f"{prefix}/kl", 0.0) + layer_kl.detach()
+            totals[f"{prefix}/old_expert_fraction"] = (
+                totals.get(f"{prefix}/old_expert_fraction", 0.0) + old_fraction.detach()
+            )
+            totals[f"{prefix}/new_expert_fraction"] = (
+                totals.get(f"{prefix}/new_expert_fraction", 0.0) + new_fraction.detach()
+            )
+            totals[f"{prefix}/new_expert_prob_mass"] = (
+                totals.get(f"{prefix}/new_expert_prob_mass", 0.0) + new_prob_mass.detach()
+            )
+            totals[f"{prefix}/topk_overlap_with_teacher"] = (
+                totals.get(f"{prefix}/topk_overlap_with_teacher", 0.0)
+                + topk_overlap.detach()
+            )
+            hist_totals[layer_number] = hist_totals.get(layer_number, 0.0) + hist.detach()
+
+        if not layer_losses:
+            continue
+
+        router_kl = torch.stack(layer_losses).mean()
+        loss = args.router_memory_kl_coeff * router_kl / num_microbatches
+        if config.grad_scale_func is not None:
+            loss = config.grad_scale_func(loss)
+        with allow_existing_router_grads():
+            loss.backward()
+
+        totals[f"{metric_prefix}/kl"] = (
+            totals.get(f"{metric_prefix}/kl", 0.0) + router_kl.detach()
+        )
+        totals[f"{metric_prefix}/old_expert_fraction"] = (
+            totals.get(f"{metric_prefix}/old_expert_fraction", 0.0)
+            + torch.stack(layer_old_fractions).mean().detach()
+        )
+        totals[f"{metric_prefix}/new_expert_fraction"] = (
+            totals.get(f"{metric_prefix}/new_expert_fraction", 0.0)
+            + torch.stack(layer_new_fractions).mean().detach()
+        )
+        totals[f"{metric_prefix}/new_expert_prob_mass"] = (
+            totals.get(f"{metric_prefix}/new_expert_prob_mass", 0.0)
+            + torch.stack(layer_new_prob_masses).mean().detach()
+        )
+        totals[f"{metric_prefix}/topk_overlap_with_teacher"] = (
+            totals.get(f"{metric_prefix}/topk_overlap_with_teacher", 0.0)
+            + torch.stack(layer_topk_overlaps).mean().detach()
+        )
+        num_batches += 1
+
+    if num_batches == 0:
+        raise RuntimeError("Teacher-student router KD did not capture any shared-router inputs.")
+
+    reporting = {}
+    denom = float(num_batches)
+    for key, value in totals.items():
+        tensor = value / denom
+        torch.distributed.all_reduce(tensor, group=mpu.get_data_parallel_group())
+        tensor = tensor / mpu.get_data_parallel_world_size()
+        reporting[key] = tensor
+
+    for layer_number, hist in hist_totals.items():
+        hist = hist / denom
+        torch.distributed.all_reduce(hist, group=mpu.get_data_parallel_group())
+        hist = hist / mpu.get_data_parallel_world_size()
+        for expert_idx, value in enumerate(hist):
+            reporting[f"{metric_prefix}/layer_{layer_number}/expert_{expert_idx}_usage"] = value
+
+    if torch.distributed.get_rank() == 0 and iteration % args.log_interval == 0:
+        kl_value = reporting[f"{metric_prefix}/kl"].item()
+        print_rank_0(
+            f"teacher-student router memory KD at iteration {iteration} | "
+            f"kl: {kl_value:.6E} | batches: {num_batches}"
+        )
+
+    return reporting, num_batches
+
+
 def evaluate_shared_router_memory_kl(model, config, get_memory_batch_func, iteration):
     """Evaluate fixed-probe router KL without optimizer updates."""
     args = get_args()
@@ -491,6 +706,7 @@ def destroy_global_state():
     set_old_moe_distill_teacher(None)
     global _SHARED_ROUTER_MEMORY_TEACHER
     _SHARED_ROUTER_MEMORY_TEACHER = None
+    set_shared_router_memory_full_teacher(None)
     destroy_global_vars()
     destroy_num_microbatches_calculator()
     destroy_global_memory_buffer()
@@ -662,6 +878,7 @@ def pretrain(
     non_loss_data_func=None,
     router_memory_step_func=None,
     router_memory_eval_func=None,
+    router_memory_accum_func=None,
 ):
     """Main training program.
 
@@ -834,7 +1051,8 @@ def pretrain(
                 model, optimizer, opt_param_scheduler,
                 train_data_iterator, valid_data_iterator,
                 probe_eval_func, process_non_loss_data_func, config, checkpointing_context,
-                non_loss_data_func, router_memory_step_func, router_memory_eval_func)
+                non_loss_data_func, router_memory_step_func, router_memory_eval_func,
+                router_memory_accum_func)
 
         print_datetime('after training is done')
 
@@ -1368,7 +1586,17 @@ def setup_model_and_optimizer(model_provider_func,
             args.shared_router_hybrid_expand_from_num_experts,
         )
         source_unwrapped_model = unwrap_model(source_model)
-        if args.router_memory_kl_coeff > 0:
+        if args.router_memory_kl_coeff > 0 and args.router_memory_teacher_student_kl:
+            for teacher_shard in source_model:
+                teacher_shard.eval()
+                for param in teacher_shard.parameters():
+                    param.requires_grad = False
+            set_shared_router_memory_full_teacher(source_model)
+            print_rank_0(
+                "Loaded full old shared-router hybrid teacher for teacher-student "
+                "router KD."
+            )
+        elif args.router_memory_kl_coeff > 0:
             set_shared_router_memory_teacher_from_model(
                 source_unwrapped_model,
                 args.shared_router_hybrid_expand_from_num_experts,
@@ -1415,7 +1643,9 @@ def setup_model_and_optimizer(model_provider_func,
                         indent=2,
                     )
 
-        del source_model
+        if not (args.router_memory_kl_coeff > 0 and args.router_memory_teacher_student_kl):
+            del source_model
+            set_shared_router_memory_full_teacher(None)
         set_old_moe_distill_teacher(None)
         args.iteration = 0 if args.finetune else 1
         if (args.fp16 or args.bf16) and optimizer is not None:
@@ -1666,8 +1896,16 @@ def dummy_train_step(data_iterator):
         batch = get_batch_on_this_cp_rank(batch)
 
 
-def train_step(forward_step_func, data_iterator,
-               model, optimizer, opt_param_scheduler, config):
+def train_step(
+    forward_step_func,
+    data_iterator,
+    model,
+    optimizer,
+    opt_param_scheduler,
+    config,
+    router_memory_accum_func=None,
+    router_memory_iteration=None,
+):
     """Single training step."""
     args = get_args()
     timers = get_timers()
@@ -1690,6 +1928,16 @@ def train_step(forward_step_func, data_iterator,
             micro_batch_size=args.micro_batch_size,
             decoder_seq_length=args.decoder_seq_length,
             forward_only=False)
+        router_memory_loss_dict = {}
+        if router_memory_accum_func is not None:
+            router_memory_loss_dict, _ = router_memory_accum_func(
+                model, config, router_memory_iteration
+            )
+            # The Code forward-backward path has already finalized its gradients.
+            # The teacher-student router KD backward is manual, so finalize again
+            # to synchronize the newly added router gradients before one joint
+            # optimizer step. Already-averaged Code grads are unchanged by this.
+            finalize_model_grads(model, None)
     should_checkpoint, should_exit, exit_code = rerun_state_machine.should_checkpoint_and_exit()
     if should_exit:
         return {}, True, should_checkpoint, should_exit, exit_code, None, None
@@ -1756,8 +2004,9 @@ def train_step(forward_step_func, data_iterator,
                     numerator += val
                     denominator += 1
             loss_reduced[key] = numerator / denominator
+        loss_reduced.update(router_memory_loss_dict)
         return loss_reduced, skipped_iter, should_checkpoint, should_exit, exit_code, grad_norm, num_zeros_in_grad
-    return {}, skipped_iter, should_checkpoint, should_exit, exit_code, grad_norm, num_zeros_in_grad
+    return router_memory_loss_dict, skipped_iter, should_checkpoint, should_exit, exit_code, grad_norm, num_zeros_in_grad
 
 
 def training_log(loss_dict, total_loss_dict, learning_rate, decoupled_learning_rate, iteration,
@@ -2236,7 +2485,8 @@ def checkpoint_and_decide_exit(model, optimizer, opt_param_scheduler, iteration,
 def train(forward_step_func, model, optimizer, opt_param_scheduler,
           train_data_iterator, valid_data_iterator,
           probe_eval_func, process_non_loss_data_func, config, checkpointing_context,
-          non_loss_data_func, router_memory_step_func=None, router_memory_eval_func=None):
+          non_loss_data_func, router_memory_step_func=None, router_memory_eval_func=None,
+          router_memory_accum_func=None):
     """Training function: run train_step desired number of times, run validation, checkpoint."""
     args = get_args()
     timers = get_timers()
@@ -2408,6 +2658,26 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
             f"coeff={args.router_memory_kl_coeff}, interval={router_memory_interval}, "
             f"data_path={args.router_memory_data_path}"
         )
+    if args.router_memory_teacher_student_kl:
+        if not args.router_memory_joint_update:
+            raise RuntimeError(
+                "--router-memory-teacher-student-kl requires --router-memory-joint-update "
+                "so Code LM and Wiki router KD gradients are applied in one iteration."
+            )
+        if router_memory_accum_func is None:
+            raise RuntimeError(
+                "--router-memory-teacher-student-kl requires a router_memory_accum_func."
+            )
+    router_memory_joint_enabled = (
+        router_memory_enabled
+        and args.router_memory_teacher_student_kl
+        and args.router_memory_joint_update
+    )
+    if router_memory_joint_enabled:
+        print_rank_0(
+            "Teacher-student router-memory joint update enabled: "
+            "one Code LM backward plus one Wiki router KD backward before each optimizer step."
+        )
     router_memory_eval_interval = args.router_memory_eval_interval
     if router_memory_eval_interval <= 0:
         router_memory_eval_interval = router_memory_interval
@@ -2416,6 +2686,7 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
         and args.router_memory_kl_coeff > 0.0
         and (args.router_memory_eval_data_path is not None or args.router_memory_data_path is not None)
         and router_memory_eval_interval > 0
+        and not args.router_memory_teacher_student_kl
     )
     if router_memory_eval_enabled:
         print_rank_0(
@@ -2543,25 +2814,6 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
             args.skipped_train_samples += batch_size
             continue
 
-        # Run training step.
-        args.curr_iteration = iteration
-        ft_integration.on_training_step_start()
-        loss_dict, skipped_iter, should_checkpoint, should_exit, exit_code, grad_norm, num_zeros_in_grad = \
-            train_step(forward_step_func,
-                       train_data_iterator,
-                       model,
-                       optimizer,
-                       opt_param_scheduler,
-                       config)
-        ft_integration.on_training_step_end()
-        if should_checkpoint:
-            save_checkpoint_and_time(iteration, model, optimizer,
-                                     opt_param_scheduler,
-                                     num_floating_point_operations_so_far,
-                                     checkpointing_context, train_data_iterator=train_data_iterator)
-        if should_exit:
-            break
-
         current_step = iteration + 1
         if (
             router_memory_enabled
@@ -2571,10 +2823,41 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
         ):
             _set_router_kl_stopped(current_step, "fixed_step", 1)
 
-        router_memory_due = (
+        router_memory_interval_due = (
             router_memory_enabled
-            and not skipped_iter
             and current_step % router_memory_interval == 0
+        )
+        joint_router_memory_accum_func = (
+            router_memory_accum_func
+            if router_memory_joint_enabled and router_memory_interval_due and not router_kl_stopped
+            else None
+        )
+
+        # Run training step. In teacher-student joint mode this computes Code LM
+        # gradients, then Wiki router KD gradients, then applies one optimizer step.
+        args.curr_iteration = iteration
+        ft_integration.on_training_step_start()
+        loss_dict, skipped_iter, should_checkpoint, should_exit, exit_code, grad_norm, num_zeros_in_grad = \
+            train_step(forward_step_func,
+                       train_data_iterator,
+                       model,
+                       optimizer,
+                       opt_param_scheduler,
+                       config,
+                       router_memory_accum_func=joint_router_memory_accum_func,
+                       router_memory_iteration=current_step)
+        ft_integration.on_training_step_end()
+        if should_checkpoint:
+            save_checkpoint_and_time(iteration, model, optimizer,
+                                     opt_param_scheduler,
+                                     num_floating_point_operations_so_far,
+                                     checkpointing_context, train_data_iterator=train_data_iterator)
+        if should_exit:
+            break
+
+        router_memory_due = (
+            router_memory_interval_due
+            and not skipped_iter
         )
         router_memory_eval_due = (
             router_memory_eval_enabled
@@ -2592,7 +2875,7 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
                     "fixed_probe_kl",
                 )
 
-        if router_memory_due and not router_kl_stopped:
+        if router_memory_due and not router_kl_stopped and not router_memory_joint_enabled:
             memory_loss_dict, memory_update_successful, memory_grad_norm, _ = router_memory_step_func(
                 model, optimizer, config, current_step
             )

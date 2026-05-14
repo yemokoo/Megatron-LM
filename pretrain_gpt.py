@@ -35,6 +35,7 @@ from megatron.training.utils import (
 from megatron.training.arguments import core_transformer_config_from_args
 from megatron.training.yaml_arguments import core_transformer_config_from_yaml
 from megatron.training.training import (
+    accumulate_shared_router_teacher_student_memory_kl,
     evaluate_shared_router_memory_kl,
     get_old_moe_distill_teacher,
     run_shared_router_memory_distillation_step,
@@ -479,6 +480,15 @@ def router_memory_step(model, optimizer, config, iteration):
     )
 
 
+def router_memory_accum_step(model, config, iteration):
+    return accumulate_shared_router_teacher_student_memory_kl(
+        model,
+        config,
+        _next_router_memory_batch,
+        iteration,
+    )
+
+
 def _get_router_memory_eval_dataloader():
     global _ROUTER_MEMORY_EVAL_DATALOADER
     args = get_args()
@@ -665,5 +675,6 @@ if __name__ == "__main__":
         probe_eval_func=run_probe_evaluation,
         router_memory_step_func=router_memory_step,
         router_memory_eval_func=router_memory_eval,
+        router_memory_accum_func=router_memory_accum_step,
         args_defaults={'tokenizer_type': 'GPT2BPETokenizer'},
     )

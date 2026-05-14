@@ -2407,6 +2407,15 @@ def _add_moe_args(parser):
                        'Format matches --data-path.')
     group.add_argument('--router-memory-kl-coeff', type=float, default=0.0,
                        help='Scale factor for periodic old-memory shared-router KL distillation.')
+    group.add_argument('--router-memory-teacher-student-kl', action='store_true',
+                       help='Use full old teacher and current student forwards on the same '
+                       'old-task tokens, then distill teacher router distributions from the '
+                       'teacher hidden trajectory into student router distributions from the '
+                       'student hidden trajectory.')
+    group.add_argument('--router-memory-joint-update', action='store_true',
+                       help='Accumulate old-memory router KD gradients in the same training '
+                       'iteration as the new-task LM gradients, then apply one optimizer '
+                       'step. Only supported with --router-memory-teacher-student-kl.')
     group.add_argument('--router-memory-interval', type=int, default=0,
                        help='Run one old-memory router distillation optimizer step every N training '
                        'iterations. If unset and --router-memory-fraction > 0, N is derived from '
