@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Tuple
 
-from megatron.training.global_vars import get_wandb_writer
+from megatron.training.global_vars import get_args, get_wandb_writer
 from megatron.training.utils import print_rank_last
 
 
@@ -26,8 +26,11 @@ def on_save_checkpoint_success(checkpoint_path: str, tracker_filename: str, save
         iteration (int): iteration of the checkpoint
     """
 
-    wandb_writer = get_wandb_writer()
+    args = get_args()
+    if not getattr(args, "wandb_log_checkpoints", False):
+        return
 
+    wandb_writer = get_wandb_writer()
     if wandb_writer:
         metadata = {"iteration": iteration}
         artifact_name, artifact_version = _get_artifact_name_and_version(Path(save_dir), Path(checkpoint_path))
@@ -47,6 +50,10 @@ def on_load_checkpoint_success(checkpoint_path: str, load_dir: str) -> None:
         load_dir (str): path of the root save folder for all checkpoints
         iteration (int): iteration of the checkpoint
     """
+
+    args = get_args()
+    if not getattr(args, "wandb_log_checkpoints", False):
+        return
 
     wandb_writer = get_wandb_writer()
     

@@ -1280,6 +1280,9 @@ def _add_logging_args(parser):
     group.add_argument('--wandb-resume', type=str, default='never',
                        choices=['never', 'allow', 'must', 'auto'],
                        help='Resume policy passed to wandb.init when --wandb-run-id is set.')
+    group.add_argument('--wandb-log-checkpoints', action='store_true',
+                       help='Log saved checkpoints as W&B model artifacts. Disabled by default '
+                            'so online W&B can be used for scalar metrics without large uploads.')
     group.add_argument('--probe-data-path', nargs='*', default=None,
                        help='Optional probe dataset blend used for periodic evaluation. '
                        'Format matches --data-path.')
