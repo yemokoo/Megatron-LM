@@ -1615,7 +1615,7 @@ def setup_model_and_optimizer(model_provider_func,
                     target_shard,
                     args.shared_router_hybrid_expand_from_num_experts,
                     freeze_existing_experts=True,
-                    freeze_existing_router=True,
+                    freeze_existing_router=not args.shared_router_hybrid_train_all_router_rows,
                 )
             else:
                 freeze_preexisting_moe_params(
@@ -1822,7 +1822,7 @@ def setup_model_and_optimizer(model_provider_func,
                         target_shard,
                         args.shared_router_hybrid_resume_from_num_experts,
                         freeze_existing_experts=True,
-                        freeze_existing_router=True,
+                        freeze_existing_router=not args.shared_router_hybrid_train_all_router_rows,
                     )
                 else:
                     freeze_preexisting_moe_params(
