@@ -327,12 +327,12 @@ if [ "$TRAIN_LOG_STEP_TIME_ONLY" = "1" ]; then
     LOG_STYLE_ARGS+=(--train-log-step-time-only)
 fi
 
-SAVE_ARGS=()
-if [ "$SAVE_CHECKPOINTS" = "1" ]; then
-    SAVE_ARGS+=(
-        --save "$SSD_TARGET_WEIGHTS"
-        --save-interval "$SAVE_INTERVAL"
-    )
+SAVE_ARGS=(
+    --save "$SSD_TARGET_WEIGHTS"
+    --save-interval "$SAVE_INTERVAL"
+)
+if [ "$SAVE_CHECKPOINTS" != "1" ]; then
+    SAVE_ARGS+=(--skip-train-end-save)
 fi
 
 SHARED_ROUTER_ARGS=()
