@@ -99,6 +99,7 @@ export PRECISION="bf16"
 
 export TRAIN_ITERS="${TRAIN_ITERS:-1800}"
 export SAVE_INTERVAL="${SAVE_INTERVAL:-300}"
+export SAVE_CHECKPOINTS="${SAVE_CHECKPOINTS:-1}"
 export EVAL_INTERVAL="${EVAL_INTERVAL:-1000}"
 export LOG_INTERVAL="${LOG_INTERVAL:-10}"
 export TRAIN_LOG_STEP_TIME_ONLY="${TRAIN_LOG_STEP_TIME_ONLY:-1}"
@@ -261,6 +262,7 @@ metadata = {
     'dataset_source': os.environ['DATASET_SOURCE'],
     'train_dataset': {'path': str(dataset_dir), 'tokens': total_tokens, 'documents': total_documents, 'shards': shards},
     'train_iters': int(os.environ['TRAIN_ITERS']),
+    'save_checkpoints': os.environ.get('SAVE_CHECKPOINTS', '1') == '1',
     'micro_batch_size': int(os.environ['MICRO_BATCH_SIZE']),
     'global_batch_size': int(os.environ['GLOBAL_BATCH_SIZE']),
     'num_layers': int(os.environ['NUM_LAYERS']),
@@ -323,6 +325,14 @@ fi
 LOG_STYLE_ARGS=()
 if [ "$TRAIN_LOG_STEP_TIME_ONLY" = "1" ]; then
     LOG_STYLE_ARGS+=(--train-log-step-time-only)
+fi
+
+SAVE_ARGS=()
+if [ "$SAVE_CHECKPOINTS" = "1" ]; then
+    SAVE_ARGS+=(
+        --save "$SSD_TARGET_WEIGHTS"
+        --save-interval "$SAVE_INTERVAL"
+    )
 fi
 
 SHARED_ROUTER_ARGS=()
@@ -401,8 +411,7 @@ torchrun \
     --log-throughput \
     --log-progress \
     "${LOG_STYLE_ARGS[@]}" \
-    --save "$SSD_TARGET_WEIGHTS" \
-    --save-interval "$SAVE_INTERVAL" \
+    "${SAVE_ARGS[@]}" \
     --load "$SSD_SOURCE_WEIGHTS" \
     --eval-interval "$EVAL_INTERVAL" \
     --tensorboard-dir "$SSD_TARGET_WEIGHTS" \

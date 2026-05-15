@@ -9,8 +9,12 @@ export LOCAL_SSD_ROOT="${LOCAL_SSD_ROOT:-/tmp/flame-moe}"
 export WANDB_PROJECT="${WANDB_PROJECT:-flame-continual-top2-qv-lora}"
 export WANDB_MODE="${WANDB_MODE:-offline}"
 export TRAIN_ITERS="${TRAIN_ITERS:-1800}"
+export STAGE1_REQUIRED_ITERS="${STAGE1_REQUIRED_ITERS:-1800}"
 export SAVE_INTERVAL="${SAVE_INTERVAL:-300}"
+export SAVE_CHECKPOINTS="${SAVE_CHECKPOINTS:-1}"
 export EVAL_INTERVAL="${EVAL_INTERVAL:-1800}"
+export LOG_INTERVAL="${LOG_INTERVAL:-10}"
+export USE_GUARD="${USE_GUARD:-1}"
 export GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-2304}"
 export BASE_STAGE_DIR="${BASE_STAGE_DIR:-$PROJECT_ROOT/.local/weights/a100/mha/shared-router-granularity-qkvo}"
 
@@ -48,8 +52,15 @@ is_completed() {
     [ -f "$latest_file" ] && [ "$(tr -d '\n\r[:space:]' < "$latest_file")" = "$TRAIN_ITERS" ]
 }
 
-if ! is_completed "$STAGE1_WEIGHTS_DIR"; then
-    echo "[ERROR] missing completed G2 wiki checkpoint ${TRAIN_ITERS}: ${STAGE1_WEIGHTS_DIR}" >&2
+has_checkpoint_at_least() {
+    local run_dir="$1"
+    local required_iters="$2"
+    local latest_file="${run_dir}/latest_checkpointed_iteration.txt"
+    [ -f "$latest_file" ] && [ "$(tr -d '\n\r[:space:]' < "$latest_file")" -ge "$required_iters" ]
+}
+
+if ! has_checkpoint_at_least "$STAGE1_WEIGHTS_DIR" "$STAGE1_REQUIRED_ITERS"; then
+    echo "[ERROR] missing completed G2 wiki checkpoint >=${STAGE1_REQUIRED_ITERS}: ${STAGE1_WEIGHTS_DIR}" >&2
     exit 1
 fi
 
@@ -78,15 +89,18 @@ env \
     STAGE1_WEIGHTS_DIR="$STAGE1_WEIGHTS_DIR" \
     WANDB_PROJECT="$WANDB_PROJECT" \
     WANDB_EXP_NAME="${WANDB_EXP_NAME:-G2 - teacher-student router KD fullwiki all-router kl0p1 - wiki to code}" \
-    LOG_SOURCE_PROBE_BASELINE_BEFORE_EXPAND=0 \
-    RUN_INITIAL_PROBE_EVAL=1 \
-    PROBE_EVAL_INTERVAL=100 \
-    SECONDARY_PROBE_EVAL_INTERVAL=100 \
+    LOG_SOURCE_PROBE_BASELINE_BEFORE_EXPAND="${LOG_SOURCE_PROBE_BASELINE_BEFORE_EXPAND:-0}" \
+    RUN_INITIAL_PROBE_EVAL="${RUN_INITIAL_PROBE_EVAL:-1}" \
+    PROBE_EVAL_INTERVAL="${PROBE_EVAL_INTERVAL:-100}" \
+    SECONDARY_PROBE_EVAL_INTERVAL="${SECONDARY_PROBE_EVAL_INTERVAL:-100}" \
     MICRO_BATCH_SIZE="${MICRO_BATCH_SIZE:-72}" \
     GLOBAL_BATCH_SIZE="$GLOBAL_BATCH_SIZE" \
     TRAIN_ITERS="$TRAIN_ITERS" \
+    SOURCE_REQUIRED_ITERS="$STAGE1_REQUIRED_ITERS" \
     SAVE_INTERVAL="$SAVE_INTERVAL" \
+    SAVE_CHECKPOINTS="$SAVE_CHECKPOINTS" \
     EVAL_INTERVAL="$EVAL_INTERVAL" \
+    LOG_INTERVAL="$LOG_INTERVAL" \
     SOURCE_NUM_EXPERTS=8 \
     NUM_EXPERTS=16 \
     MOE_ROUTER_TOPK=4 \
@@ -117,7 +131,8 @@ env \
     ROUTER_KL_EARLY_STOP_ENABLED="$ROUTER_KL_EARLY_STOP_ENABLED" \
     ROUTER_KL_STOP_STEP="$ROUTER_KL_STOP_STEP" \
     MASTER_PORT="${MASTER_PORT:-29732}" \
-    "$SCRIPT_DIR/run_guarded_training.sh" \
-    bash "$SCRIPT_DIR/code_from_wiki_e6_fullrank_qkvo_expert_mha_a100_bf16.sh"
+    USE_GUARD="$USE_GUARD" \
+    SCRIPT_DIR="$SCRIPT_DIR" \
+    bash -lc 'if [ "$USE_GUARD" = "1" ]; then exec "$SCRIPT_DIR/run_guarded_training.sh" bash "$SCRIPT_DIR/code_from_wiki_e6_fullrank_qkvo_expert_mha_a100_bf16.sh"; else exec bash "$SCRIPT_DIR/code_from_wiki_e6_fullrank_qkvo_expert_mha_a100_bf16.sh"; fi'
 
 echo "[DONE] G2 teacher-student router KD fullwiki $(date)"
