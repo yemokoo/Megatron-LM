@@ -21,6 +21,7 @@ export SECONDARY_PROBE_EVAL_INTERVAL="${SECONDARY_PROBE_EVAL_INTERVAL:-999999}"
 export TRAIN_LOG_STEP_TIME_ONLY="${TRAIN_LOG_STEP_TIME_ONLY:-0}"
 export WANDB_MODE="${WANDB_MODE:-offline}"
 export SHARED_ROUTER_HYBRID_TRAIN_ALL_ROUTER_ROWS="${SHARED_ROUTER_HYBRID_TRAIN_ALL_ROUTER_ROWS:-1}"
+export LOG_ROUTER_GRAD_NORM_SOURCES="${LOG_ROUTER_GRAD_NORM_SOURCES:-1}"
 
 BASE_STAGE_DIR="${BASE_STAGE_DIR:-$PROJECT_ROOT/.local/weights/a100/mha/shared-router-granularity-qkvo}"
 RUN_PREFIX="${RUN_PREFIX:-g2-ts-routerkd-allrouter-losscalib}"
@@ -59,6 +60,7 @@ for lambda in $LAMBDA_SWEEP; do
     MICRO_BATCH_SIZE="$MICRO_BATCH_SIZE" \
     ROUTER_MEMORY_KL_COEFF="$lambda" \
     SHARED_ROUTER_HYBRID_TRAIN_ALL_ROUTER_ROWS="$SHARED_ROUTER_HYBRID_TRAIN_ALL_ROUTER_ROWS" \
+    LOG_ROUTER_GRAD_NORM_SOURCES="$LOG_ROUTER_GRAD_NORM_SOURCES" \
     bash "$SCRIPT_DIR/run_g2_teacher_student_router_kd_fullwiki_mha.sh" \
         > "$log_file" 2>&1
 
@@ -79,6 +81,12 @@ tags = [
     "router_memory_teacher_student/lm_to_raw_kl",
     "router_memory_teacher_student/lm_to_scaled_kl",
     "combined/lm_plus_router_kd",
+    "router_grad_norm/from_lm",
+    "router_grad_norm/from_kd_raw",
+    "router_grad_norm/from_kd_scaled",
+    "router_grad_norm/lm_to_kd_raw",
+    "router_grad_norm/lm_to_kd_scaled",
+    "router_grad_norm/combined_lm_plus_scaled_kd",
 ]
 
 print("\n[SUMMARY] latest loss-calibration runs")

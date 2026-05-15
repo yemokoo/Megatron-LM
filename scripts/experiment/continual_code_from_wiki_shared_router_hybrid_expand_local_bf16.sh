@@ -122,6 +122,7 @@ export ROUTER_MEMORY_EVAL_INTERVAL="${ROUTER_MEMORY_EVAL_INTERVAL:-0}"
 export ROUTER_MEMORY_EVAL_ITERS="${ROUTER_MEMORY_EVAL_ITERS:-1}"
 export ROUTER_MEMORY_TEACHER_STUDENT_KL="${ROUTER_MEMORY_TEACHER_STUDENT_KL:-0}"
 export ROUTER_MEMORY_JOINT_UPDATE="${ROUTER_MEMORY_JOINT_UPDATE:-0}"
+export LOG_ROUTER_GRAD_NORM_SOURCES="${LOG_ROUTER_GRAD_NORM_SOURCES:-0}"
 export ROUTER_KL_STOP_STEP="${ROUTER_KL_STOP_STEP:-}"
 export ROUTER_KL_EARLY_STOP_ENABLED="${ROUTER_KL_EARLY_STOP_ENABLED:-0}"
 export ROUTER_KL_EARLY_STOP_METRIC="${ROUTER_KL_EARLY_STOP_METRIC:-fixed_probe_kl}"
@@ -296,6 +297,7 @@ metadata = {
     'router_memory_eval_iters': int(os.environ.get('ROUTER_MEMORY_EVAL_ITERS', '1')),
     'router_memory_teacher_student_kl': os.environ.get('ROUTER_MEMORY_TEACHER_STUDENT_KL', '0') == '1',
     'router_memory_joint_update': os.environ.get('ROUTER_MEMORY_JOINT_UPDATE', '0') == '1',
+    'log_router_grad_norm_sources': os.environ.get('LOG_ROUTER_GRAD_NORM_SOURCES', '0') == '1',
     'router_kl_stop_step': os.environ.get('ROUTER_KL_STOP_STEP', ''),
     'router_kl_early_stop_enabled': os.environ.get('ROUTER_KL_EARLY_STOP_ENABLED', '0') == '1',
     'router_kl_early_stop_metric': os.environ.get('ROUTER_KL_EARLY_STOP_METRIC', 'fixed_probe_kl'),
@@ -377,6 +379,9 @@ if [ "$ROUTER_MEMORY_KL_COEFF" != "0" ] && [ "$ROUTER_MEMORY_KL_COEFF" != "0.0" 
     fi
     if [ "$ROUTER_MEMORY_JOINT_UPDATE" = "1" ]; then
         ROUTER_MEMORY_ARGS+=(--router-memory-joint-update)
+    fi
+    if [ "$LOG_ROUTER_GRAD_NORM_SOURCES" = "1" ]; then
+        ROUTER_MEMORY_ARGS+=(--log-router-grad-norm-sources)
     fi
 fi
 
