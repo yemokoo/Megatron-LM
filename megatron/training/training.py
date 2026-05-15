@@ -281,6 +281,64 @@ def _router_logits(router, hidden_states):
     return F.linear(hidden_states.to(router_dtype), router.weight.to(router_dtype))
 
 
+def _current_router_params(model):
+    seen = set()
+    for router in _collect_current_shared_routers(model).values():
+        param = router.weight
+        if id(param) in seen:
+            continue
+        seen.add(id(param))
+        yield param
+
+
+def _param_grad_tensor(param):
+    grad = getattr(param, 'main_grad', None)
+    if grad is None:
+        grad = param.grad
+    return grad
+
+
+def _router_grad_norm_from_tensors(tensors):
+    device = torch.device('cuda', torch.cuda.current_device()) if torch.cuda.is_available() else torch.device('cpu')
+    total = torch.zeros((), dtype=torch.float32, device=device)
+    for tensor in tensors:
+        if tensor is None:
+            continue
+        total = total + tensor.detach().float().pow(2).sum()
+    if torch.distributed.is_available() and torch.distributed.is_initialized() and mpu.model_parallel_is_initialized():
+        torch.distributed.all_reduce(total, group=mpu.get_model_parallel_group())
+    return torch.sqrt(total.clamp_min(0.0))
+
+
+def _snapshot_router_grads(model):
+    snapshot = {}
+    for param in _current_router_params(model):
+        grad = _param_grad_tensor(param)
+        if grad is not None:
+            snapshot[id(param)] = grad.detach().clone()
+    return snapshot
+
+
+def _router_grad_norm_from_snapshot(snapshot):
+    return _router_grad_norm_from_tensors(snapshot.values())
+
+
+def _router_grad_delta_norm(model, before_snapshot):
+    deltas = []
+    for param in _current_router_params(model):
+        current = _param_grad_tensor(param)
+        before = before_snapshot.get(id(param))
+        if current is None and before is None:
+            continue
+        if current is None:
+            deltas.append(-before)
+        elif before is None:
+            deltas.append(current.detach())
+        else:
+            deltas.append(current.detach() - before.to(device=current.device, dtype=current.dtype))
+    return _router_grad_norm_from_tensors(deltas)
+
+
 def _run_shared_router_memory_batches(
     model,
     config,
@@ -1938,7 +1996,14 @@ def train_step(
             decoder_seq_length=args.decoder_seq_length,
             forward_only=False)
         router_memory_loss_dict = {}
+        router_lm_grad_snapshot = None
+        router_grad_metrics = {}
         if router_memory_accum_func is not None:
+            if args.log_router_grad_norm_sources:
+                router_lm_grad_snapshot = _snapshot_router_grads(model)
+                router_grad_metrics['router_grad_norm/from_lm'] = (
+                    _router_grad_norm_from_snapshot(router_lm_grad_snapshot)
+                )
             router_memory_loss_dict, _ = router_memory_accum_func(
                 model, config, router_memory_iteration
             )
@@ -1947,6 +2012,25 @@ def train_step(
             # to synchronize the newly added router gradients before one joint
             # optimizer step. Already-averaged Code grads are unchanged by this.
             finalize_model_grads(model, None)
+            if args.log_router_grad_norm_sources:
+                kd_scaled_norm = _router_grad_delta_norm(model, router_lm_grad_snapshot)
+                coeff = kd_scaled_norm.new_tensor(max(abs(args.router_memory_kl_coeff), 1.0e-12))
+                kd_raw_norm = kd_scaled_norm / coeff
+                lm_norm = router_grad_metrics['router_grad_norm/from_lm']
+                router_grad_metrics['router_grad_norm/from_kd_scaled'] = kd_scaled_norm
+                router_grad_metrics['router_grad_norm/from_kd_raw'] = kd_raw_norm
+                router_grad_metrics['router_grad_norm/lm_to_kd_scaled'] = (
+                    lm_norm / kd_scaled_norm.clamp_min(1.0e-12)
+                )
+                router_grad_metrics['router_grad_norm/lm_to_kd_raw'] = (
+                    lm_norm / kd_raw_norm.clamp_min(1.0e-12)
+                )
+                router_grad_metrics['router_grad_norm/combined_lm_plus_scaled_kd'] = (
+                    _router_grad_norm_from_tensors(
+                        [_param_grad_tensor(param) for param in _current_router_params(model)]
+                    )
+                )
+                router_memory_loss_dict.update(router_grad_metrics)
     should_checkpoint, should_exit, exit_code = rerun_state_machine.should_checkpoint_and_exit()
     if should_exit:
         return {}, True, should_checkpoint, should_exit, exit_code, None, None

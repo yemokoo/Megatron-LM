@@ -2418,6 +2418,9 @@ def _add_moe_args(parser):
                        help='Accumulate old-memory router KD gradients in the same training '
                        'iteration as the new-task LM gradients, then apply one optimizer '
                        'step. Only supported with --router-memory-teacher-student-kl.')
+    group.add_argument('--log-router-grad-norm-sources', action='store_true',
+                       help='During joint router-memory training, log router gradient norm '
+                       'contributions from the LM loss and from the router KD loss separately.')
     group.add_argument('--router-memory-interval', type=int, default=0,
                        help='Run one old-memory router distillation optimizer step every N training '
                        'iterations. If unset and --router-memory-fraction > 0, N is derived from '
