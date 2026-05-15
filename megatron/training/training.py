@@ -439,6 +439,10 @@ def _run_shared_router_memory_batches(
         torch.distributed.all_reduce(tensor, group=mpu.get_data_parallel_group())
         tensor = tensor / mpu.get_data_parallel_world_size()
         reporting[key] = tensor
+    if f"{metric_prefix}/kl" in reporting:
+        reporting[f"{metric_prefix}/scaled_kl"] = (
+            reporting[f"{metric_prefix}/kl"] * args.router_memory_kl_coeff
+        )
 
     for layer_number, hist in hist_totals.items():
         hist = hist / denom
@@ -625,6 +629,10 @@ def accumulate_shared_router_teacher_student_memory_kl(
         torch.distributed.all_reduce(tensor, group=mpu.get_data_parallel_group())
         tensor = tensor / mpu.get_data_parallel_world_size()
         reporting[key] = tensor
+    if f"{metric_prefix}/kl" in reporting:
+        reporting[f"{metric_prefix}/scaled_kl"] = (
+            reporting[f"{metric_prefix}/kl"] * args.router_memory_kl_coeff
+        )
 
     for layer_number, hist in hist_totals.items():
         hist = hist / denom
@@ -2005,6 +2013,18 @@ def train_step(
                     denominator += 1
             loss_reduced[key] = numerator / denominator
         loss_reduced.update(router_memory_loss_dict)
+        lm_loss = loss_reduced.get('lm loss')
+        router_kl = loss_reduced.get('router_memory_teacher_student/kl')
+        scaled_router_kl = loss_reduced.get('router_memory_teacher_student/scaled_kl')
+        if lm_loss is not None and router_kl is not None:
+            loss_reduced['router_memory_teacher_student/lm_to_raw_kl'] = (
+                lm_loss / router_kl.clamp_min(1.0e-12)
+            )
+        if lm_loss is not None and scaled_router_kl is not None:
+            loss_reduced['router_memory_teacher_student/lm_to_scaled_kl'] = (
+                lm_loss / scaled_router_kl.clamp_min(1.0e-12)
+            )
+            loss_reduced['combined/lm_plus_router_kd'] = lm_loss + scaled_router_kl
         return loss_reduced, skipped_iter, should_checkpoint, should_exit, exit_code, grad_norm, num_zeros_in_grad
     return router_memory_loss_dict, skipped_iter, should_checkpoint, should_exit, exit_code, grad_norm, num_zeros_in_grad
 
