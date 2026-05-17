@@ -654,6 +654,13 @@ def _finalize_probe_router_usage(totals, hist_totals, denom):
         for expert_idx, value in enumerate(hist):
             reporting[f"layer_{layer_number}/expert_{expert_idx}_usage"] = value
 
+    if hist_totals:
+        overall_hist = torch.stack([hist / denom for hist in hist_totals.values()]).mean(dim=0)
+        torch.distributed.all_reduce(overall_hist, group=mpu.get_data_parallel_group())
+        overall_hist = overall_hist / mpu.get_data_parallel_world_size()
+        for expert_idx, value in enumerate(overall_hist):
+            reporting[f"expert_{expert_idx}_usage"] = value
+
     return reporting
 
 
