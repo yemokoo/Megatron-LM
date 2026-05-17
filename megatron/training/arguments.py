@@ -2412,6 +2412,10 @@ def _add_moe_args(parser):
                        'Format matches --data-path.')
     group.add_argument('--router-memory-kl-coeff', type=float, default=0.0,
                        help='Scale factor for periodic old-memory shared-router KL distillation.')
+    group.add_argument('--router-memory-force-enable-zero-coeff', action='store_true',
+                       help='Run router-memory distillation/probing even when '
+                       '--router-memory-kl-coeff is zero. Useful for validating that '
+                       'the distillation code path has no effect when its loss weight is zero.')
     group.add_argument('--router-memory-teacher-student-kl', action='store_true',
                        help='Use full old teacher and current student forwards on the same '
                        'old-task tokens, then distill teacher router distributions from the '

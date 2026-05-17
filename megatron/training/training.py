@@ -1653,7 +1653,11 @@ def setup_model_and_optimizer(model_provider_func,
             args.shared_router_hybrid_expand_from_num_experts,
         )
         source_unwrapped_model = unwrap_model(source_model)
-        if args.router_memory_kl_coeff > 0 and args.router_memory_teacher_student_kl:
+        router_memory_requested_for_setup = (
+            args.router_memory_kl_coeff > 0
+            or args.router_memory_force_enable_zero_coeff
+        )
+        if router_memory_requested_for_setup and args.router_memory_teacher_student_kl:
             for teacher_shard in source_model:
                 teacher_shard.eval()
                 for param in teacher_shard.parameters():
@@ -1663,7 +1667,7 @@ def setup_model_and_optimizer(model_provider_func,
                 "Loaded full old shared-router hybrid teacher for teacher-student "
                 "router KD."
             )
-        elif args.router_memory_kl_coeff > 0:
+        elif router_memory_requested_for_setup:
             set_shared_router_memory_teacher_from_model(
                 source_unwrapped_model,
                 args.shared_router_hybrid_expand_from_num_experts,
@@ -1710,7 +1714,7 @@ def setup_model_and_optimizer(model_provider_func,
                         indent=2,
                     )
 
-        if not (args.router_memory_kl_coeff > 0 and args.router_memory_teacher_student_kl):
+        if not (router_memory_requested_for_setup and args.router_memory_teacher_student_kl):
             del source_model
             set_shared_router_memory_full_teacher(None)
         set_old_moe_distill_teacher(None)
@@ -2753,7 +2757,7 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
         router_memory_interval = max(1, int(round(1.0 / args.router_memory_fraction)))
     router_memory_enabled = (
         router_memory_step_func is not None
-        and args.router_memory_kl_coeff > 0.0
+        and (args.router_memory_kl_coeff > 0.0 or args.router_memory_force_enable_zero_coeff)
         and args.router_memory_data_path is not None
         and router_memory_interval > 0
     )
@@ -2788,7 +2792,7 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
         router_memory_eval_interval = router_memory_interval
     router_memory_eval_enabled = (
         router_memory_eval_func is not None
-        and args.router_memory_kl_coeff > 0.0
+        and (args.router_memory_kl_coeff > 0.0 or args.router_memory_force_enable_zero_coeff)
         and (args.router_memory_eval_data_path is not None or args.router_memory_data_path is not None)
         and router_memory_eval_interval > 0
         and not args.router_memory_teacher_student_kl

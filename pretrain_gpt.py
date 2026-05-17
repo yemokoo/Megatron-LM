@@ -441,7 +441,10 @@ def _get_router_memory_dataloader():
     args = get_args()
     if _ROUTER_MEMORY_DATALOADER is not None:
         return _ROUTER_MEMORY_DATALOADER
-    if not args.router_memory_data_path or args.router_memory_kl_coeff <= 0:
+    if (
+        not args.router_memory_data_path
+        or (args.router_memory_kl_coeff <= 0 and not args.router_memory_force_enable_zero_coeff)
+    ):
         return None
 
     interval = args.router_memory_interval
@@ -494,7 +497,7 @@ def _get_router_memory_eval_dataloader():
     args = get_args()
     if _ROUTER_MEMORY_EVAL_DATALOADER is not None:
         return _ROUTER_MEMORY_EVAL_DATALOADER
-    if args.router_memory_kl_coeff <= 0:
+    if args.router_memory_kl_coeff <= 0 and not args.router_memory_force_enable_zero_coeff:
         return None
 
     eval_data_path = args.router_memory_eval_data_path or args.router_memory_data_path
