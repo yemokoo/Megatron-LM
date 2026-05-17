@@ -80,3 +80,26 @@ def test_allow_existing_router_grads_temporarily_bypasses_existing_row_mask():
     grad = model.router.weight.grad.detach()
 
     assert torch.all(grad == 1)
+
+
+def test_zero_weight_router_kd_does_not_change_accumulated_lm_router_grads():
+    model = RouterOnlyModel()
+
+    freeze_all_but_new_moe_params(
+        model,
+        num_existing_experts=2,
+        freeze_existing_experts=True,
+        freeze_existing_router=True,
+    )
+
+    model.zero_grad(set_to_none=True)
+    model.router.weight.sum().backward()
+    lm_grad = model.router.weight.grad.detach().clone()
+
+    with allow_existing_router_grads():
+        (model.router.weight.sum() * 0.0).backward()
+    grad_after_zero_weight_kd = model.router.weight.grad.detach()
+
+    assert torch.equal(grad_after_zero_weight_kd, lm_grad)
+    assert torch.count_nonzero(grad_after_zero_weight_kd[:2]) == 0
+    assert torch.all(grad_after_zero_weight_kd[2:] == 1)
