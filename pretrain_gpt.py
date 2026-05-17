@@ -27,6 +27,7 @@ from megatron.core.models.gpt import GPTModel
 from megatron.training import pretrain
 from megatron.core.utils import StragglerDetector
 from megatron.core.transformer.spec_utils import import_module
+from megatron.core.transformer.shared_router_hybrid import capture_shared_router_inputs
 from megatron.training.utils import (
     get_batch_on_this_cp_rank,
     get_batch_on_this_tp_rank,
@@ -35,6 +36,8 @@ from megatron.training.utils import (
 from megatron.training.arguments import core_transformer_config_from_args
 from megatron.training.yaml_arguments import core_transformer_config_from_yaml
 from megatron.training.training import (
+    _collect_current_shared_routers,
+    _router_logits,
     accumulate_shared_router_teacher_student_memory_kl,
     evaluate_shared_router_memory_kl,
     get_old_moe_distill_teacher,
@@ -552,6 +555,108 @@ def _align_logits(logits, labels):
     raise RuntimeError(f"Could not align logits {tuple(logits.shape)} and labels {tuple(labels.shape)}")
 
 
+def _probe_router_usage_num_existing_experts(args):
+    explicit = getattr(args, "probe_router_usage_num_existing_experts", None)
+    if explicit is not None:
+        return int(explicit)
+    for attr in (
+        "shared_router_hybrid_resume_from_num_experts",
+        "shared_router_hybrid_expand_from_num_experts",
+        "attn_lora_resume_from_num_experts",
+        "attn_lora_expand_from_num_experts",
+    ):
+        value = getattr(args, attr, None)
+        if value is not None:
+            return int(value)
+    if getattr(args, "num_experts", None):
+        return max(0, int(args.num_experts) // 2)
+    return 0
+
+
+def _accumulate_probe_router_usage(captured, routers, num_existing_experts, args, totals, hist_totals):
+    layer_old_fractions = []
+    layer_new_fractions = []
+    layer_new_prob_masses = []
+    captured_any = False
+
+    for layer_number, hidden_states in captured:
+        layer_number = int(layer_number)
+        router = routers.get(layer_number)
+        if router is None:
+            continue
+
+        captured_any = True
+        flat_hidden = hidden_states.detach().reshape(-1, hidden_states.shape[-1])
+        router_logits = _router_logits(router, flat_hidden)
+        router_log_probs = torch.log_softmax(router_logits.float(), dim=-1)
+        router_probs = router_log_probs.exp()
+
+        num_experts = router_log_probs.shape[-1]
+        num_existing = min(max(0, int(num_existing_experts)), num_experts)
+        topk = min(args.moe_router_topk, num_experts)
+        expert_idx = torch.topk(router_log_probs, k=topk, dim=-1).indices
+
+        old_fraction = (expert_idx < num_existing).float().mean()
+        new_fraction = 1.0 - old_fraction
+        new_prob_mass = router_probs[:, num_existing:].sum(dim=-1).mean()
+        hist = torch.bincount(expert_idx.reshape(-1), minlength=num_experts).float()
+        hist = hist / hist.sum().clamp_min(1.0)
+
+        prefix = f"layer_{layer_number}"
+        totals[f"{prefix}/old_expert_fraction"] = (
+            totals.get(f"{prefix}/old_expert_fraction", 0.0) + old_fraction.detach()
+        )
+        totals[f"{prefix}/new_expert_fraction"] = (
+            totals.get(f"{prefix}/new_expert_fraction", 0.0) + new_fraction.detach()
+        )
+        totals[f"{prefix}/new_expert_prob_mass"] = (
+            totals.get(f"{prefix}/new_expert_prob_mass", 0.0) + new_prob_mass.detach()
+        )
+        hist_totals[layer_number] = hist_totals.get(layer_number, 0.0) + hist.detach()
+
+        layer_old_fractions.append(old_fraction)
+        layer_new_fractions.append(new_fraction)
+        layer_new_prob_masses.append(new_prob_mass)
+
+    if layer_old_fractions:
+        totals["old_expert_fraction"] = (
+            totals.get("old_expert_fraction", 0.0)
+            + torch.stack(layer_old_fractions).mean().detach()
+        )
+        totals["new_expert_fraction"] = (
+            totals.get("new_expert_fraction", 0.0)
+            + torch.stack(layer_new_fractions).mean().detach()
+        )
+        totals["new_expert_prob_mass"] = (
+            totals.get("new_expert_prob_mass", 0.0)
+            + torch.stack(layer_new_prob_masses).mean().detach()
+        )
+
+    return captured_any
+
+
+def _finalize_probe_router_usage(totals, hist_totals, denom):
+    reporting = {}
+    if denom <= 0:
+        return reporting
+
+    denom = float(denom)
+    for key, value in totals.items():
+        tensor = value / denom
+        torch.distributed.all_reduce(tensor, group=mpu.get_data_parallel_group())
+        tensor = tensor / mpu.get_data_parallel_world_size()
+        reporting[key] = tensor
+
+    for layer_number, hist in hist_totals.items():
+        hist = hist / denom
+        torch.distributed.all_reduce(hist, group=mpu.get_data_parallel_group())
+        hist = hist / mpu.get_data_parallel_world_size()
+        for expert_idx, value in enumerate(hist):
+            reporting[f"layer_{layer_number}/expert_{expert_idx}_usage"] = value
+
+    return reporting
+
+
 def _run_single_probe_evaluation(
     model,
     iteration,
@@ -583,17 +688,44 @@ def _run_single_probe_evaluation(
     loss_total = torch.zeros(1, device="cuda", dtype=torch.float64)
     correct_total = torch.zeros(1, device="cuda", dtype=torch.float64)
     token_total = torch.zeros(1, device="cuda", dtype=torch.float64)
+    router_usage_enabled = bool(getattr(args, "probe_router_usage", False))
+    router_usage_totals = {}
+    router_usage_hist_totals = {}
+    router_usage_batches = 0
+    router_usage_existing_experts = _probe_router_usage_num_existing_experts(args)
+    routers = _collect_current_shared_routers(modules) if router_usage_enabled else {}
+    if router_usage_enabled and not routers:
+        print_rank_0("Probe router usage requested, but no shared-router modules were found.")
 
     with torch.no_grad():
         for _ in range(probe_eval_iters):
             tokens, labels, loss_mask, attention_mask, position_ids = get_batch(probe_iterator)
-            logits = modules[0](
-                tokens,
-                position_ids,
-                attention_mask,
-                labels=None,
-                runtime_gather_output=True,
-            )
+            if router_usage_enabled and routers:
+                with capture_shared_router_inputs() as captured_router_inputs:
+                    logits = modules[0](
+                        tokens,
+                        position_ids,
+                        attention_mask,
+                        labels=None,
+                        runtime_gather_output=True,
+                    )
+                if _accumulate_probe_router_usage(
+                    captured_router_inputs,
+                    routers,
+                    router_usage_existing_experts,
+                    args,
+                    router_usage_totals,
+                    router_usage_hist_totals,
+                ):
+                    router_usage_batches += 1
+            else:
+                logits = modules[0](
+                    tokens,
+                    position_ids,
+                    attention_mask,
+                    labels=None,
+                    runtime_gather_output=True,
+                )
             logits = _align_logits(logits.float(), labels)
             flat_loss = F.cross_entropy(
                 logits.view(-1, logits.shape[-1]),
@@ -615,26 +747,39 @@ def _run_single_probe_evaluation(
     loss_value = (stats[0] / stats[2].clamp_min(1.0)).item()
     accuracy = (stats[1] / stats[2].clamp_min(1.0)).item()
     ppl = math.exp(min(20, loss_value))
+    router_usage = _finalize_probe_router_usage(
+        router_usage_totals, router_usage_hist_totals, router_usage_batches
+    )
 
     writer = get_tensorboard_writer()
     if writer:
         writer.add_scalar(f"{probe_name}/next_token_accuracy", accuracy, logged_iteration)
         writer.add_scalar(f"{probe_name}/ppl", ppl, logged_iteration)
+        for key, value in router_usage.items():
+            writer.add_scalar(f"{probe_name}/router/{key}", value.item(), logged_iteration)
 
     wandb_writer = get_wandb_writer()
     if wandb_writer and torch.distributed.get_rank() == (args.world_size - 1):
-        wandb_writer.log(
-            {
-                f"{probe_name}/next_token_accuracy": accuracy,
-                f"{probe_name}/ppl": ppl,
-            },
-            logged_iteration,
+        metrics = {
+            f"{probe_name}/next_token_accuracy": accuracy,
+            f"{probe_name}/ppl": ppl,
+        }
+        metrics.update(
+            {f"{probe_name}/router/{key}": value.item() for key, value in router_usage.items()}
         )
+        wandb_writer.log(metrics, logged_iteration)
 
     print_rank_last(
         f"probe {probe_name} at iteration {logged_iteration} | local_iteration: {iteration} "
         f"| next_token_acc: {accuracy:.6f} | ppl: {ppl:.6E}"
     )
+    if router_usage:
+        print_rank_last(
+            f"probe {probe_name} router usage at iteration {logged_iteration} | "
+            f"old_expert_fraction: {router_usage['old_expert_fraction'].item():.6f} | "
+            f"new_expert_fraction: {router_usage['new_expert_fraction'].item():.6f} | "
+            f"new_expert_prob_mass: {router_usage['new_expert_prob_mass'].item():.6f}"
+        )
 
 
 def run_probe_evaluation(model, iteration):

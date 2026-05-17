@@ -2593,6 +2593,12 @@ def _add_experimental_args(parser):
     group.add_argument('--shared-router-hybrid-resume-from-num-experts', type=int, default=None,
                        help='When resuming from an expanded shared-router hybrid checkpoint, '
                             're-apply continual-learning freezing using this many original experts.')
+    group.add_argument('--probe-router-usage', action='store_true',
+                       help='During probe evaluation, log shared-router top-k expert usage and '
+                            'old/new expert probability mass on the probe batches.')
+    group.add_argument('--probe-router-usage-num-existing-experts', type=int, default=None,
+                       help='Number of old/source experts for probe router usage metrics. '
+                            'Defaults to the shared-router resume/expand expert count when available.')
     group.add_argument('--train-log-step-time-only', action='store_true',
                        help='Print compact training progress logs with only step progress and '
                             'iteration timing, while keeping tensorboard/W&B logging unchanged.')

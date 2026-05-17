@@ -1137,6 +1137,8 @@ def pretrain(
         print_rank_0('skipping training (--skip-train is on) ...')
 
         iteration = args.iteration
+        if args.run_initial_probe_eval and probe_eval_func is not None:
+            probe_eval_func(model, iteration)
 
     if args.do_valid:
         prefix = f'iteration {iteration} on validation set'
