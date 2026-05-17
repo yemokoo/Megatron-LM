@@ -114,6 +114,7 @@ export DATASET_SPLIT="${DATASET_SPLIT:-100,0,0}"
 
 export TRAIN_DATASET="${TRAIN_DATASET:-$(dataset_dir_for_task code)}"
 export ROUTER_MEMORY_KL_COEFF="${ROUTER_MEMORY_KL_COEFF:-0.0}"
+export ROUTER_MEMORY_FORCE_ENABLE_ZERO_COEFF="${ROUTER_MEMORY_FORCE_ENABLE_ZERO_COEFF:-0}"
 export ROUTER_MEMORY_FRACTION="${ROUTER_MEMORY_FRACTION:-0.05}"
 export ROUTER_MEMORY_INTERVAL="${ROUTER_MEMORY_INTERVAL:-0}"
 export ROUTER_MEMORY_DATASET="${ROUTER_MEMORY_DATASET:-$PROJECT_ROOT/data/wiki/router_memory_5pct}"
@@ -165,6 +166,12 @@ export WANDB_LOG_CHECKPOINTS="${WANDB_LOG_CHECKPOINTS:-0}"
 
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
 export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=true
+
+router_memory_requested() {
+    [ "$ROUTER_MEMORY_FORCE_ENABLE_ZERO_COEFF" = "1" ] || {
+        [ "$ROUTER_MEMORY_KL_COEFF" != "0" ] && [ "$ROUTER_MEMORY_KL_COEFF" != "0.0" ]
+    }
+}
 
 export STAGE1_WEIGHTS_DIR="$(resolve_stage1_dir)"
 export PROBE_STEP_OFFSET="${PROBE_STEP_OFFSET:-$(read_stage1_train_iters)}"
@@ -219,7 +226,7 @@ rsync -rlptD \
     --exclude 'progress.txt' \
     "$STAGE1_WEIGHTS_DIR/" "$SSD_SOURCE_WEIGHTS/"
 rsync -rlptD --info=progress2 "$TRAIN_DATASET/" "$SSD_CODE_TRAIN/"
-if [ "$ROUTER_MEMORY_KL_COEFF" != "0" ] && [ "$ROUTER_MEMORY_KL_COEFF" != "0.0" ]; then
+if router_memory_requested; then
     if ! compgen -G "$ROUTER_MEMORY_DATASET/*.bin" >/dev/null; then
         echo "ERROR: fixed router-memory dataset not found: $ROUTER_MEMORY_DATASET" >&2
         echo "Create it once with scripts/dataset/materialize_fixed_sample_stream.py." >&2
@@ -287,6 +294,7 @@ metadata = {
     'train_new_experts_and_router_only': True,
     'shared_router_hybrid_train_all_router_rows': os.environ.get('SHARED_ROUTER_HYBRID_TRAIN_ALL_ROUTER_ROWS', '0') == '1',
     'router_memory_kl_coeff': float(os.environ.get('ROUTER_MEMORY_KL_COEFF', '0.0')),
+    'router_memory_force_enable_zero_coeff': os.environ.get('ROUTER_MEMORY_FORCE_ENABLE_ZERO_COEFF', '0') == '1',
     'router_memory_fraction': float(os.environ.get('ROUTER_MEMORY_FRACTION', '0.0')),
     'router_memory_interval': int(os.environ.get('ROUTER_MEMORY_INTERVAL', '0')),
     'router_memory_dataset': os.environ.get('ROUTER_MEMORY_DATASET', ''),
@@ -356,7 +364,7 @@ if [ "$RUN_INITIAL_PROBE_EVAL" = "1" ]; then
 fi
 
 ROUTER_MEMORY_ARGS=()
-if [ "$ROUTER_MEMORY_KL_COEFF" != "0" ] && [ "$ROUTER_MEMORY_KL_COEFF" != "0.0" ]; then
+if router_memory_requested; then
     ROUTER_MEMORY_ARGS+=(
         --router-memory-kl-coeff "$ROUTER_MEMORY_KL_COEFF"
         --router-memory-fraction "$ROUTER_MEMORY_FRACTION"
@@ -376,6 +384,9 @@ if [ "$ROUTER_MEMORY_KL_COEFF" != "0" ] && [ "$ROUTER_MEMORY_KL_COEFF" != "0.0" 
     fi
     if [ "$ROUTER_KL_EARLY_STOP_ENABLED" = "1" ]; then
         ROUTER_MEMORY_ARGS+=(--router-kl-early-stop-enabled)
+    fi
+    if [ "$ROUTER_MEMORY_FORCE_ENABLE_ZERO_COEFF" = "1" ]; then
+        ROUTER_MEMORY_ARGS+=(--router-memory-force-enable-zero-coeff)
     fi
     if [ "$ROUTER_MEMORY_TEACHER_STUDENT_KL" = "1" ]; then
         ROUTER_MEMORY_ARGS+=(--router-memory-teacher-student-kl)
