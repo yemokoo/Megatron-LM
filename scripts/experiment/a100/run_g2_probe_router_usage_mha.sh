@@ -83,7 +83,7 @@ torchrun \
     --lr-decay-iters 1 \
     --lr-warmup-fraction 0.01 \
     --lr-wsd-decay-iters 1 \
-    --train-iters 0 \
+    --train-iters 1 \
     --skip-train \
     --shared-router-hybrid-resume-from-num-experts "$SOURCE_NUM_EXPERTS" \
     --shared-router-hybrid-train-new-experts-and-router-only \
@@ -92,7 +92,7 @@ torchrun \
     --split 100,0,0 \
     --log-interval 1 \
     --load "$CHECKPOINT_DIR" \
-    --eval-interval 0 \
+    --eval-interval 1 \
     --eval-iters 0 \
     --tensorboard-dir "$OUTPUT_DIR" \
     --no-load-optim \
