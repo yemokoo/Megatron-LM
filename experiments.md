@@ -116,6 +116,28 @@ projection variant 의미:
 - `F-QKV`: `Q/K/V`
 - `F-QV`: `Q/V`
 
+### 3.5 G2-Matched FFN Baselines
+
+목적:
+- 기존 A/F 계열과 G2 shared-router 계열의 비교축이 섞이지 않도록, FFN expert granularity를 G2와 맞춘다.
+- 고정 변수는 `topk=4`, `wiki experts=8`, `code experts=16`, `moe_ffn_hidden_size=352`, `micro_batch_size=72`, `global_batch_size=2304`이다.
+- 의도적으로 바꾸는 변수는 code continual stage의 attention adaptation뿐이다.
+
+비교군:
+- `attn-freeze`: FFN-MoE만 사용한다. code stage에서 새 FFN experts와 router rows만 학습하고 attention/base trunk는 freeze한다.
+- `attn-fullrank-lora`: 같은 FFN-MoE 설정에 single dense full-rank LoRA를 attention Q/K/V/O에 추가한다. base attention weight는 freeze하고 LoRA parameter만 학습한다.
+
+Entry points:
+- Wiki source, G2-matched FFN-MoE: [wiki_ffn_moe_g2matched_mha_a100_bf16.sh](/Users/yemokoo/miil/1.%20LLM-CL/LLM-continual-learning/scripts/experiment/a100/wiki_ffn_moe_g2matched_mha_a100_bf16.sh)
+- Code continual, attention freeze: [code_from_wiki_ffn_moe_g2matched_attn_freeze_mha_a100_bf16.sh](/Users/yemokoo/miil/1.%20LLM-CL/LLM-continual-learning/scripts/experiment/a100/code_from_wiki_ffn_moe_g2matched_attn_freeze_mha_a100_bf16.sh)
+- Code continual, attention full-rank LoRA: [code_from_wiki_ffn_moe_g2matched_attn_full_rank_lora_mha_a100_bf16.sh](/Users/yemokoo/miil/1.%20LLM-CL/LLM-continual-learning/scripts/experiment/a100/code_from_wiki_ffn_moe_g2matched_attn_full_rank_lora_mha_a100_bf16.sh)
+- Sequential launcher for all three stages: [run_g2matched_ffn_attention_baselines_mha.sh](/Users/yemokoo/miil/1.%20LLM-CL/LLM-continual-learning/scripts/experiment/a100/run_g2matched_ffn_attention_baselines_mha.sh)
+
+해석 가능 범위:
+- 두 code runs의 차이는 attention adaptation을 아예 주지 않았을 때와 single full-rank LoRA를 줬을 때의 차이로 해석한다.
+- 이 비교는 shared-router hybrid G2와 완전히 같은 구조 비교는 아니다. G2는 FFN과 attention expert가 router decision을 공유하지만, 이 baseline은 FFN-MoE router와 dense attention LoRA를 분리해서 본다.
+- `ATTN_FULL_RANK_LORA_RANK` 기본값은 기존 F-family의 full-rank 의미를 따라 `1024`이다. capacity-matched ablation이 필요하면 실행 시 `ATTN_FULL_RANK_LORA_RANK=256`으로 바꾼다.
+
 ## 4. Analysis Scripts
 
 ### 4.1 Replay and W&B Fix-up

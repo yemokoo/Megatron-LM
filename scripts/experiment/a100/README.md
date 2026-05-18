@@ -28,6 +28,10 @@ Experiment entrypoints:
 - `A -> B freeze`: [a_to_b_freeze_a100_bf16.sh](/Users/yemokoo/miil/1.%20LLM-CL/LLM-continual-learning/scripts/experiment/a100/a_to_b_freeze_a100_bf16.sh)
 - `B -> A`: [b_to_a_a100_bf16.sh](/Users/yemokoo/miil/1.%20LLM-CL/LLM-continual-learning/scripts/experiment/a100/b_to_a_a100_bf16.sh)
 - `B -> A freeze`: [b_to_a_freeze_a100_bf16.sh](/Users/yemokoo/miil/1.%20LLM-CL/LLM-continual-learning/scripts/experiment/a100/b_to_a_freeze_a100_bf16.sh)
+- `G2-matched FFN wiki`: [wiki_ffn_moe_g2matched_mha_a100_bf16.sh](/Users/yemokoo/miil/1.%20LLM-CL/LLM-continual-learning/scripts/experiment/a100/wiki_ffn_moe_g2matched_mha_a100_bf16.sh)
+- `G2-matched FFN attention freeze`: [code_from_wiki_ffn_moe_g2matched_attn_freeze_mha_a100_bf16.sh](/Users/yemokoo/miil/1.%20LLM-CL/LLM-continual-learning/scripts/experiment/a100/code_from_wiki_ffn_moe_g2matched_attn_freeze_mha_a100_bf16.sh)
+- `G2-matched FFN attention full-rank LoRA`: [code_from_wiki_ffn_moe_g2matched_attn_full_rank_lora_mha_a100_bf16.sh](/Users/yemokoo/miil/1.%20LLM-CL/LLM-continual-learning/scripts/experiment/a100/code_from_wiki_ffn_moe_g2matched_attn_full_rank_lora_mha_a100_bf16.sh)
+- `G2-matched FFN attention baseline chain`: [run_g2matched_ffn_attention_baselines_mha.sh](/Users/yemokoo/miil/1.%20LLM-CL/LLM-continual-learning/scripts/experiment/a100/run_g2matched_ffn_attention_baselines_mha.sh)
 
 Default continual rules:
 - expansion: `4 -> 7`
