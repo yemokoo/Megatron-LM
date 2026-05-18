@@ -120,7 +120,8 @@ projection variant 의미:
 
 목적:
 - 기존 A/F 계열과 G2 shared-router 계열의 비교축이 섞이지 않도록, FFN expert granularity를 G2와 맞춘다.
-- 고정 변수는 `topk=4`, `wiki experts=8`, `code experts=16`, `moe_ffn_hidden_size=352`, `micro_batch_size=72`, `global_batch_size=2304`이다.
+- 고정 변수는 `topk=4`, `wiki experts=8`, `code experts=16`, `moe_ffn_hidden_size=352`, `global_batch_size=2304`이다.
+- 기본 실행은 wiki source를 `micro_batch_size=128`, code continual baselines를 `micro_batch_size=96`으로 둔다.
 - 의도적으로 바꾸는 변수는 code continual stage의 attention adaptation뿐이다.
 
 비교군:
@@ -131,6 +132,7 @@ Entry points:
 - Wiki source, G2-matched FFN-MoE: [wiki_ffn_moe_g2matched_mha_a100_bf16.sh](/Users/yemokoo/miil/1.%20LLM-CL/LLM-continual-learning/scripts/experiment/a100/wiki_ffn_moe_g2matched_mha_a100_bf16.sh)
 - Code continual, attention freeze: [code_from_wiki_ffn_moe_g2matched_attn_freeze_mha_a100_bf16.sh](/Users/yemokoo/miil/1.%20LLM-CL/LLM-continual-learning/scripts/experiment/a100/code_from_wiki_ffn_moe_g2matched_attn_freeze_mha_a100_bf16.sh)
 - Code continual, attention full-rank LoRA: [code_from_wiki_ffn_moe_g2matched_attn_full_rank_lora_mha_a100_bf16.sh](/Users/yemokoo/miil/1.%20LLM-CL/LLM-continual-learning/scripts/experiment/a100/code_from_wiki_ffn_moe_g2matched_attn_full_rank_lora_mha_a100_bf16.sh)
+- Code-only sequential launcher after wiki source is complete: [run_g2matched_ffn_attention_code_baselines_mha.sh](/Users/yemokoo/miil/1.%20LLM-CL/LLM-continual-learning/scripts/experiment/a100/run_g2matched_ffn_attention_code_baselines_mha.sh)
 - Sequential launcher for all three stages: [run_g2matched_ffn_attention_baselines_mha.sh](/Users/yemokoo/miil/1.%20LLM-CL/LLM-continual-learning/scripts/experiment/a100/run_g2matched_ffn_attention_baselines_mha.sh)
 
 해석 가능 범위:
