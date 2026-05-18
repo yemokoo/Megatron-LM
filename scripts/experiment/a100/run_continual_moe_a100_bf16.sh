@@ -198,16 +198,53 @@ trap cleanup EXIT INT TERM
 
 exec > >(
     tee -a "$RUN_LOG" | "$PYTHON_BIN" -u -c '
+from datetime import datetime, timedelta
 import re, sys
-iter_re = re.compile(r"(\[[^]]+\]) iteration\s+(\d+)/\s*(\d+).*throughput per GPU \(TFLOP/s/GPU\):\s*([0-9.]+)")
+iter_re = re.compile(r"(\[[^]]+\]) iteration\s+(\d+)/\s*(\d+)")
+elapsed_re = re.compile(r"elapsed time per iteration \(ms\):\s*([0-9.]+)")
+tflops_re = re.compile(r"throughput per GPU \(TFLOP/s/GPU\):\s*([0-9.]+)")
 val_re = re.compile(r"validation loss at iteration\s+(\d+).*lm loss value:\s*([^|]+)")
 save_re = re.compile(r"saving checkpoint at iteration\s+(\d+)")
 keep_re = re.compile(r"a100 bf16 continual|ERROR:|Traceback|failed \(exitcode|checkpoint at|probe |Expanded MoE checkpoint")
+
+def parse_timestamp(value):
+    try:
+        return datetime.strptime(value.strip("[]"), "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+
+def format_duration(seconds):
+    seconds = max(0, int(round(seconds)))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h{minutes:02d}m"
+    if minutes:
+        return f"{minutes}m{secs:02d}s"
+    return f"{secs}s"
+
 for line in sys.stdin:
     line = line.rstrip("\n")
     m = iter_re.search(line)
     if m:
-        print(f"{m.group(1)} step {m.group(2)}/{m.group(3)} | GPU {m.group(4)} TFLOP/s", flush=True)
+        step = int(m.group(2))
+        total = int(m.group(3))
+        parts = [f"{m.group(1)} step {step}/{total}"]
+        elapsed = elapsed_re.search(line)
+        if elapsed:
+            seconds_per_iter = float(elapsed.group(1)) / 1000.0
+            remaining_seconds = max(0, total - step) * seconds_per_iter
+            parts.append(f"{seconds_per_iter:.1f}s/it")
+            if step < total:
+                parts.append(f"ETA {format_duration(remaining_seconds)}")
+                ts = parse_timestamp(m.group(1))
+                if ts is not None:
+                    end_at = ts + timedelta(seconds=remaining_seconds)
+                    parts.append(f"end {end_at:%Y-%m-%d %H:%M:%S}")
+        tflops = tflops_re.search(line)
+        if tflops:
+            parts.append(f"GPU {float(tflops.group(1)):.1f} TFLOP/s")
+        print(" | ".join(parts), flush=True)
         continue
     m = val_re.search(line)
     if m:

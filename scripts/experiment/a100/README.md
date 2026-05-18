@@ -49,3 +49,4 @@ Reference implementation:
 
 Operational notes:
 - offline W&B training/upload workflow: [offline_wandb_upload_workflow_ko.md](/Users/yemokoo/miil/1.%20LLM-CL/LLM-continual-learning/docs/offline_wandb_upload_workflow_ko.md)
+- G2-matched FFN baselines default to final-only checkpointing and 50-step wiki/code probes.

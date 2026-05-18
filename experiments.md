@@ -122,6 +122,7 @@ projection variant 의미:
 - 기존 A/F 계열과 G2 shared-router 계열의 비교축이 섞이지 않도록, FFN expert granularity를 G2와 맞춘다.
 - 고정 변수는 `topk=4`, `wiki experts=8`, `code experts=16`, `moe_ffn_hidden_size=352`, `global_batch_size=2304`이다.
 - 기본 실행은 wiki source를 `micro_batch_size=128`, code continual baselines를 `micro_batch_size=96`으로 둔다.
+- checkpoint는 기본적으로 최종 step만 저장하고, wiki/code probe는 50 step마다 실행한다.
 - 의도적으로 바꾸는 변수는 code continual stage의 attention adaptation뿐이다.
 
 비교군:
