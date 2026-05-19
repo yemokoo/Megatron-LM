@@ -122,6 +122,7 @@ export ROUTER_MEMORY_EVAL_DATASET="${ROUTER_MEMORY_EVAL_DATASET:-$ROUTER_MEMORY_
 export ROUTER_MEMORY_EVAL_INTERVAL="${ROUTER_MEMORY_EVAL_INTERVAL:-0}"
 export ROUTER_MEMORY_EVAL_ITERS="${ROUTER_MEMORY_EVAL_ITERS:-1}"
 export ROUTER_MEMORY_TEACHER_STUDENT_KL="${ROUTER_MEMORY_TEACHER_STUDENT_KL:-0}"
+export ROUTER_MEMORY_TEACHER_STUDENT_KL_EXISTING_EXPERTS_ONLY="${ROUTER_MEMORY_TEACHER_STUDENT_KL_EXISTING_EXPERTS_ONLY:-0}"
 export ROUTER_MEMORY_JOINT_UPDATE="${ROUTER_MEMORY_JOINT_UPDATE:-0}"
 export ROUTER_KL_STOP_STEP="${ROUTER_KL_STOP_STEP:-}"
 export ROUTER_KL_EARLY_STOP_ENABLED="${ROUTER_KL_EARLY_STOP_ENABLED:-0}"
@@ -304,6 +305,7 @@ metadata = {
     'router_memory_eval_interval': int(os.environ.get('ROUTER_MEMORY_EVAL_INTERVAL', '0')),
     'router_memory_eval_iters': int(os.environ.get('ROUTER_MEMORY_EVAL_ITERS', '1')),
     'router_memory_teacher_student_kl': os.environ.get('ROUTER_MEMORY_TEACHER_STUDENT_KL', '0') == '1',
+    'router_memory_teacher_student_kl_existing_experts_only': os.environ.get('ROUTER_MEMORY_TEACHER_STUDENT_KL_EXISTING_EXPERTS_ONLY', '0') == '1',
     'router_memory_joint_update': os.environ.get('ROUTER_MEMORY_JOINT_UPDATE', '0') == '1',
     'wandb_log_checkpoints': os.environ.get('WANDB_LOG_CHECKPOINTS', '0') == '1',
     'router_kl_stop_step': os.environ.get('ROUTER_KL_STOP_STEP', ''),
@@ -390,6 +392,9 @@ if router_memory_requested; then
     fi
     if [ "$ROUTER_MEMORY_TEACHER_STUDENT_KL" = "1" ]; then
         ROUTER_MEMORY_ARGS+=(--router-memory-teacher-student-kl)
+    fi
+    if [ "$ROUTER_MEMORY_TEACHER_STUDENT_KL_EXISTING_EXPERTS_ONLY" = "1" ]; then
+        ROUTER_MEMORY_ARGS+=(--router-memory-teacher-student-kl-existing-experts-only)
     fi
     if [ "$ROUTER_MEMORY_JOINT_UPDATE" = "1" ]; then
         ROUTER_MEMORY_ARGS+=(--router-memory-joint-update)

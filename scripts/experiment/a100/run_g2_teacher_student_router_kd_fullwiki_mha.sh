@@ -28,7 +28,10 @@ export TRAIN_WEIGHTS="${TRAIN_WEIGHTS:-$BASE_STAGE_DIR/code/$RUN_ID}"
 # - every Code iteration also consumes one Wiki global batch,
 # - the frozen full Wiki teacher and expanded student are both kept loaded,
 # - teacher router outputs use teacher hidden states, student router outputs use
-#   student hidden states, and the teacher distribution is zero-padded to 16 experts.
+#   student hidden states,
+# - by default, the teacher distribution is zero-padded to 16 experts.
+#   Set ROUTER_MEMORY_TEACHER_STUDENT_KL_EXISTING_EXPERTS_ONLY=1 to distill only
+#   the old/wiki router rows by slicing student logits to the teacher expert count.
 export ROUTER_MEMORY_KL_COEFF="${ROUTER_MEMORY_KL_COEFF:-0.1}"
 export ROUTER_MEMORY_FORCE_ENABLE_ZERO_COEFF="${ROUTER_MEMORY_FORCE_ENABLE_ZERO_COEFF:-0}"
 export ROUTER_MEMORY_FRACTION="${ROUTER_MEMORY_FRACTION:-1.0}"
@@ -38,6 +41,7 @@ export ROUTER_MEMORY_EVAL_DATASET="${ROUTER_MEMORY_EVAL_DATASET:-$ROUTER_MEMORY_
 export ROUTER_MEMORY_EVAL_INTERVAL="${ROUTER_MEMORY_EVAL_INTERVAL:-0}"
 export ROUTER_MEMORY_EVAL_ITERS="${ROUTER_MEMORY_EVAL_ITERS:-1}"
 export ROUTER_MEMORY_TEACHER_STUDENT_KL=1
+export ROUTER_MEMORY_TEACHER_STUDENT_KL_EXISTING_EXPERTS_ONLY="${ROUTER_MEMORY_TEACHER_STUDENT_KL_EXISTING_EXPERTS_ONLY:-0}"
 export ROUTER_MEMORY_JOINT_UPDATE=1
 export ROUTER_KL_EARLY_STOP_ENABLED=0
 export ROUTER_KL_STOP_STEP=""
@@ -79,6 +83,7 @@ fi
 echo "[CONFIG] G2 teacher-student router KD fullwiki"
 echo "[CONFIG] code steps=${TRAIN_ITERS}, wiki KD interval=${ROUTER_MEMORY_INTERVAL}, fraction=${ROUTER_MEMORY_FRACTION}"
 echo "[CONFIG] teacher/student full models stay loaded; joint update enabled"
+echo "[CONFIG] teacher_student_existing_experts_only=${ROUTER_MEMORY_TEACHER_STUDENT_KL_EXISTING_EXPERTS_ONLY}"
 echo "[CONFIG] wiki=${STAGE1_WEIGHTS_DIR}"
 echo "[CONFIG] code=${TRAIN_WEIGHTS}"
 echo "[CONFIG] router_memory_dataset=${ROUTER_MEMORY_DATASET}"
@@ -130,6 +135,7 @@ env \
     ROUTER_MEMORY_EVAL_INTERVAL="$ROUTER_MEMORY_EVAL_INTERVAL" \
     ROUTER_MEMORY_EVAL_ITERS="$ROUTER_MEMORY_EVAL_ITERS" \
     ROUTER_MEMORY_TEACHER_STUDENT_KL="$ROUTER_MEMORY_TEACHER_STUDENT_KL" \
+    ROUTER_MEMORY_TEACHER_STUDENT_KL_EXISTING_EXPERTS_ONLY="$ROUTER_MEMORY_TEACHER_STUDENT_KL_EXISTING_EXPERTS_ONLY" \
     ROUTER_MEMORY_JOINT_UPDATE="$ROUTER_MEMORY_JOINT_UPDATE" \
     SHARED_ROUTER_HYBRID_TRAIN_ALL_ROUTER_ROWS="$SHARED_ROUTER_HYBRID_TRAIN_ALL_ROUTER_ROWS" \
     ROUTER_KL_EARLY_STOP_ENABLED="$ROUTER_KL_EARLY_STOP_ENABLED" \
