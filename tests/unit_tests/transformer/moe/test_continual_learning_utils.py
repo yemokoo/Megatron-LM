@@ -120,6 +120,56 @@ def test_teacher_student_router_kl_zero_padding_updates_new_student_logits():
     assert torch.count_nonzero(student_logits.grad[:, 2:]) == 2
 
 
+def test_teacher_student_router_kl_existing_only_matches_manual_wiki_row_kl():
+    student_logits = torch.tensor(
+        [
+            [0.3, -0.2, 1.1, -0.7],
+            [-0.4, 0.8, 0.5, 2.0],
+        ]
+    )
+    teacher_logits = torch.tensor(
+        [
+            [1.0, -0.5],
+            [-0.3, 0.2],
+        ]
+    )
+
+    actual = teacher_student_router_kl(
+        student_logits,
+        teacher_logits,
+        existing_experts_only=True,
+    )
+
+    teacher_probs = torch.softmax(teacher_logits.float(), dim=-1)
+    student_wiki_log_probs = torch.log_softmax(student_logits.float()[:, :2], dim=-1)
+    expected = torch.nn.functional.kl_div(
+        student_wiki_log_probs,
+        teacher_probs,
+        reduction="batchmean",
+    )
+
+    assert torch.allclose(actual, expected)
+
+
+def test_teacher_student_router_kl_existing_only_is_invariant_to_new_logits():
+    teacher_logits = torch.tensor([[1.0, -0.5]])
+    student_logits = torch.tensor([[0.3, -0.2, 1.1, -0.7]])
+    changed_new_logits = torch.tensor([[0.3, -0.2, 100.0, -100.0]])
+
+    original_loss = teacher_student_router_kl(
+        student_logits,
+        teacher_logits,
+        existing_experts_only=True,
+    )
+    changed_loss = teacher_student_router_kl(
+        changed_new_logits,
+        teacher_logits,
+        existing_experts_only=True,
+    )
+
+    assert torch.equal(original_loss, changed_loss)
+
+
 def test_teacher_student_router_kl_existing_only_ignores_new_student_logits():
     student_logits = torch.tensor([[0.3, -0.2, 1.1, -0.7]], requires_grad=True)
     teacher_logits = torch.tensor([[1.0, -0.5]])
