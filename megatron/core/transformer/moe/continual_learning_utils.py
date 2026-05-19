@@ -3,6 +3,7 @@ from contextlib import contextmanager
 from typing import Any, Dict, List
 
 import torch
+import torch.nn.functional as F
 
 from megatron.core.transformer.moe.experts import GroupedMLP, SequentialMLP, TEGroupedMLP
 from megatron.core.transformer.moe.moe_layer import BaseMoELayer
@@ -33,6 +34,35 @@ def allow_existing_router_grads():
         yield
     finally:
         _ALLOW_EXISTING_ROUTER_GRADS = previous
+
+
+def teacher_student_router_kl(student_logits, teacher_logits, existing_experts_only=False):
+    """Compute teacher-student router KL for expanded-router distillation.
+
+    The default preserves the original behavior: the teacher distribution is
+    zero-padded to the expanded student expert dimension. When
+    ``existing_experts_only`` is enabled, the student logits are sliced to the
+    teacher expert count and re-normalized before KL, so new/code expert rows do
+    not receive gradients from the KD loss.
+    """
+    teacher_probs = torch.softmax(teacher_logits.float(), dim=-1)
+    num_teacher_experts = teacher_probs.shape[-1]
+
+    if existing_experts_only:
+        if student_logits.shape[-1] < num_teacher_experts:
+            raise ValueError(
+                "student_logits must have at least as many experts as teacher_logits "
+                "for existing-experts-only router KD."
+            )
+        student_log_probs = F.log_softmax(
+            student_logits.float()[..., :num_teacher_experts], dim=-1
+        )
+        return F.kl_div(student_log_probs, teacher_probs, reduction="batchmean")
+
+    student_log_probs = F.log_softmax(student_logits.float(), dim=-1)
+    target = torch.zeros_like(student_log_probs)
+    target[..., :num_teacher_experts] = teacher_probs
+    return F.kl_div(student_log_probs, target, reduction="batchmean")
 
 
 def _load_matching_state(dst_module, src_module):

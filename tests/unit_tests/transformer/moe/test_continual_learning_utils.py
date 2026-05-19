@@ -5,6 +5,7 @@ import torch
 from megatron.core.transformer.moe.continual_learning_utils import (
     allow_existing_router_grads,
     freeze_all_but_new_moe_params,
+    teacher_student_router_kl,
 )
 from megatron.core.transformer.moe.router import TopKRouter
 from megatron.core.transformer.transformer_config import TransformerConfig
@@ -103,3 +104,32 @@ def test_zero_weight_router_kd_does_not_change_accumulated_lm_router_grads():
     assert torch.equal(grad_after_zero_weight_kd, lm_grad)
     assert torch.count_nonzero(grad_after_zero_weight_kd[:2]) == 0
     assert torch.all(grad_after_zero_weight_kd[2:] == 1)
+
+
+def test_teacher_student_router_kl_zero_padding_updates_new_student_logits():
+    student_logits = torch.tensor([[0.3, -0.2, 1.1, -0.7]], requires_grad=True)
+    teacher_logits = torch.tensor([[1.0, -0.5]])
+
+    loss = teacher_student_router_kl(
+        student_logits,
+        teacher_logits,
+        existing_experts_only=False,
+    )
+    loss.backward()
+
+    assert torch.count_nonzero(student_logits.grad[:, 2:]) == 2
+
+
+def test_teacher_student_router_kl_existing_only_ignores_new_student_logits():
+    student_logits = torch.tensor([[0.3, -0.2, 1.1, -0.7]], requires_grad=True)
+    teacher_logits = torch.tensor([[1.0, -0.5]])
+
+    loss = teacher_student_router_kl(
+        student_logits,
+        teacher_logits,
+        existing_experts_only=True,
+    )
+    loss.backward()
+
+    assert torch.count_nonzero(student_logits.grad[:, :2]) == 2
+    assert torch.count_nonzero(student_logits.grad[:, 2:]) == 0

@@ -72,6 +72,7 @@ from megatron.core.transformer.moe.continual_learning_utils import (
     freeze_all_but_new_moe_params,
     freeze_preexisting_moe_params,
     inspect_moe_expansion,
+    teacher_student_router_kl,
 )
 from megatron.core.transformer.shared_router_hybrid import capture_shared_router_inputs
 from megatron.core.transformer.moe import upcycling_utils
@@ -592,15 +593,18 @@ def accumulate_shared_router_teacher_student_memory_kl(
 
             with torch.no_grad():
                 teacher_logits = _router_logits(teacher_router, teacher_flat)
-                teacher_probs = torch.softmax(teacher_logits.float(), dim=-1)
+                num_teacher_experts = teacher_logits.shape[-1]
 
             with allow_existing_router_grads():
                 student_logits = _router_logits(student_router, student_flat)
                 student_log_probs = torch.log_softmax(student_logits.float(), dim=-1)
-                target = torch.zeros_like(student_log_probs)
-                num_teacher_experts = teacher_probs.shape[-1]
-                target[:, :num_teacher_experts] = teacher_probs
-                layer_kl = F.kl_div(student_log_probs, target, reduction="batchmean")
+                layer_kl = teacher_student_router_kl(
+                    student_logits,
+                    teacher_logits,
+                    existing_experts_only=(
+                        args.router_memory_teacher_student_kl_existing_experts_only
+                    ),
+                )
             layer_losses.append(layer_kl)
 
             with torch.no_grad():

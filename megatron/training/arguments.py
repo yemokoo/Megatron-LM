@@ -2421,6 +2421,12 @@ def _add_moe_args(parser):
                        'old-task tokens, then distill teacher router distributions from the '
                        'teacher hidden trajectory into student router distributions from the '
                        'student hidden trajectory.')
+    group.add_argument('--router-memory-teacher-student-kl-existing-experts-only',
+                       action='store_true',
+                       help='With --router-memory-teacher-student-kl, compute KL only between '
+                       'teacher experts and the corresponding existing student expert rows. '
+                       'This slices and re-normalizes the existing student logits instead of '
+                       'zero-padding the teacher distribution to the expanded expert count.')
     group.add_argument('--router-memory-joint-update', action='store_true',
                        help='Accumulate old-memory router KD gradients in the same training '
                        'iteration as the new-task LM gradients, then apply one optimizer '
