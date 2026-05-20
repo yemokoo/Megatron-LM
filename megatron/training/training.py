@@ -1908,6 +1908,40 @@ def setup_model_and_optimizer(model_provider_func,
                         True,
                         True,
                     )
+            router_memory_requested_for_setup = (
+                args.router_memory_kl_coeff > 0
+                or args.router_memory_force_enable_zero_coeff
+            )
+            if router_memory_requested_for_setup and args.router_memory_teacher_student_kl:
+                teacher_load_dir = args.router_memory_teacher_load
+                if not teacher_load_dir:
+                    raise RuntimeError(
+                        "--router-memory-teacher-student-kl with "
+                        "--shared-router-hybrid-resume-from-num-experts requires "
+                        "--router-memory-teacher-load so the frozen old teacher can be "
+                        "reconstructed while the expanded student resumes."
+                    )
+
+                original_load = args.load
+                original_num_flops = args.num_floating_point_operations_so_far
+                args.load = teacher_load_dir
+                source_model = _load_shared_router_hybrid_source_model(
+                    model_provider_func,
+                    model_type,
+                    checkpointing_context,
+                    args.shared_router_hybrid_resume_from_num_experts,
+                )
+                args.load = original_load
+                args.num_floating_point_operations_so_far = original_num_flops
+                for teacher_shard in source_model:
+                    teacher_shard.eval()
+                    for param in teacher_shard.parameters():
+                        param.requires_grad = False
+                set_shared_router_memory_full_teacher(source_model)
+                print_rank_0(
+                    "Loaded full old shared-router hybrid teacher for resumed "
+                    "teacher-student router KD."
+                )
             print_rank_0(
                 'Resumed expanded shared-router hybrid checkpoint at iteration '
                 f'{args.iteration} with continual-learning freeze reapplied.'

@@ -2421,6 +2421,10 @@ def _add_moe_args(parser):
                        'old-task tokens, then distill teacher router distributions from the '
                        'teacher hidden trajectory into student router distributions from the '
                        'student hidden trajectory.')
+    group.add_argument('--router-memory-teacher-load', type=str, default=None,
+                       help='Checkpoint directory for reconstructing the full old shared-router '
+                       'teacher when resuming teacher-student router-memory KD from an already '
+                       'expanded student checkpoint.')
     group.add_argument('--router-memory-teacher-student-kl-existing-experts-only',
                        action='store_true',
                        help='With --router-memory-teacher-student-kl, compute KL only between '
