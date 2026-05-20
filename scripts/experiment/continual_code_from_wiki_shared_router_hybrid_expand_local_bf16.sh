@@ -73,6 +73,7 @@ export SSD_CODE_TRAIN="${SSD_MOUNT}/dataset/code_train"
 export SSD_ROUTER_MEMORY="${SSD_MOUNT}/dataset/router_memory"
 export SSD_ROUTER_MEMORY_EVAL="${SSD_MOUNT}/dataset/router_memory_eval"
 export SSD_SOURCE_WEIGHTS="${SSD_MOUNT}/source_weights"
+export SSD_RESUME_WEIGHTS="${SSD_MOUNT}/resume_weights"
 export SSD_TARGET_WEIGHTS="${SSD_MOUNT}/target_weights"
 
 export NUM_LAYERS="${NUM_LAYERS:-9}"
@@ -137,6 +138,7 @@ export SHARED_ROUTER_HYBRID_TRAIN_ALL_ROUTER_ROWS="${SHARED_ROUTER_HYBRID_TRAIN_
 export STAGE1_WEIGHTS_DIR="${STAGE1_WEIGHTS_DIR:-}"
 export STAGE1_SUBDIR="${STAGE1_SUBDIR:-a100/wiki-shared-router-hybrid-pretrain-local}"
 export SOURCE_REQUIRED_ITERS="${SOURCE_REQUIRED_ITERS:-1}"
+export RESUME_FROM_WEIGHTS="${RESUME_FROM_WEIGHTS:-}"
 export TRAIN_WEIGHTS="${TRAIN_WEIGHTS:-$LOCAL_WEIGHTS/a100/code-from-wiki-shared-router-hybrid-expand-local/$RUN_ID}"
 export LOG_DIR="${LOG_DIR:-$TRAIN_WEIGHTS/logs}"
 export RUN_METADATA="${RUN_METADATA:-$LOG_DIR/run_metadata.json}"
@@ -188,6 +190,7 @@ mkdir -p \
     "$SSD_ROUTER_MEMORY" \
     "$SSD_ROUTER_MEMORY_EVAL" \
     "$SSD_SOURCE_WEIGHTS" \
+    "$SSD_RESUME_WEIGHTS" \
     "$SSD_TARGET_WEIGHTS" \
     "$TRAIN_WEIGHTS" \
     "$LOG_DIR"
@@ -226,6 +229,18 @@ rsync -rlptD \
     --exclude 'events.out.tfevents*' \
     --exclude 'progress.txt' \
     "$STAGE1_WEIGHTS_DIR/" "$SSD_SOURCE_WEIGHTS/"
+if [ -n "$RESUME_FROM_WEIGHTS" ]; then
+    if [ ! -f "$RESUME_FROM_WEIGHTS/latest_checkpointed_iteration.txt" ]; then
+        echo "ERROR: resume checkpoint tracker not found: $RESUME_FROM_WEIGHTS/latest_checkpointed_iteration.txt" >&2
+        exit 1
+    fi
+    rsync -rlptD \
+        --exclude 'logs/' \
+        --exclude 'wandb/' \
+        --exclude 'events.out.tfevents*' \
+        --exclude 'progress.txt' \
+        "$RESUME_FROM_WEIGHTS/" "$SSD_RESUME_WEIGHTS/"
+fi
 rsync -rlptD --info=progress2 "$TRAIN_DATASET/" "$SSD_CODE_TRAIN/"
 if router_memory_requested; then
     if ! compgen -G "$ROUTER_MEMORY_DATASET/*.bin" >/dev/null; then
@@ -267,6 +282,7 @@ metadata = {
     'stage': 'code_from_wiki_shared_router_hybrid_expand',
     'run_id': os.environ['RUN_ID'],
     'stage1_weights_dir': os.environ['STAGE1_WEIGHTS_DIR'],
+    'resume_from_weights': os.environ.get('RESUME_FROM_WEIGHTS', ''),
     'dataset_name': os.environ['DATASET_NAME'],
     'dataset_source': os.environ['DATASET_SOURCE'],
     'train_dataset': {'path': str(dataset_dir), 'tokens': total_tokens, 'documents': total_documents, 'shards': shards},
@@ -351,6 +367,22 @@ if [ "$SAVE_CHECKPOINTS" != "1" ]; then
 fi
 
 SHARED_ROUTER_ARGS=()
+LOAD_WEIGHTS="$SSD_SOURCE_WEIGHTS"
+SHARED_ROUTER_MODE_ARGS=(
+    --shared-router-hybrid-expand-from-num-experts "$SOURCE_NUM_EXPERTS"
+)
+CHECKPOINT_LOAD_ARGS=(
+    --no-load-optim
+    --no-load-rng
+    --finetune
+)
+if [ -n "$RESUME_FROM_WEIGHTS" ]; then
+    LOAD_WEIGHTS="$SSD_RESUME_WEIGHTS"
+    SHARED_ROUTER_MODE_ARGS=(
+        --shared-router-hybrid-resume-from-num-experts "$SOURCE_NUM_EXPERTS"
+    )
+    CHECKPOINT_LOAD_ARGS=()
+fi
 if [ "$SHARED_ROUTER_HYBRID_TRAIN_ALL_ROUTER_ROWS" = "1" ]; then
     SHARED_ROUTER_ARGS+=(--shared-router-hybrid-train-all-router-rows)
 fi
@@ -392,6 +424,9 @@ if router_memory_requested; then
     fi
     if [ "$ROUTER_MEMORY_TEACHER_STUDENT_KL" = "1" ]; then
         ROUTER_MEMORY_ARGS+=(--router-memory-teacher-student-kl)
+        if [ -n "$RESUME_FROM_WEIGHTS" ]; then
+            ROUTER_MEMORY_ARGS+=(--router-memory-teacher-load "$SSD_SOURCE_WEIGHTS")
+        fi
     fi
     if [ "$ROUTER_MEMORY_TEACHER_STUDENT_KL_EXISTING_EXPERTS_ONLY" = "1" ]; then
         ROUTER_MEMORY_ARGS+=(--router-memory-teacher-student-kl-existing-experts-only)
@@ -422,7 +457,7 @@ torchrun \
     --lr-warmup-fraction "$LR_WARMUP_FRACTION" \
     --lr-wsd-decay-iters "$LR_WSD_DECAY_ITERS" \
     --train-iters "$TRAIN_ITERS" \
-    --shared-router-hybrid-expand-from-num-experts "$SOURCE_NUM_EXPERTS" \
+    "${SHARED_ROUTER_MODE_ARGS[@]}" \
     --shared-router-hybrid-train-new-experts-and-router-only \
     "${SHARED_ROUTER_ARGS[@]}" \
     --seq-length "${SEQ_LENGTH:-512}" \
@@ -433,12 +468,10 @@ torchrun \
     --log-progress \
     "${LOG_STYLE_ARGS[@]}" \
     "${SAVE_ARGS[@]}" \
-    --load "$SSD_SOURCE_WEIGHTS" \
+    --load "$LOAD_WEIGHTS" \
     --eval-interval "$EVAL_INTERVAL" \
     --tensorboard-dir "$SSD_TARGET_WEIGHTS" \
-    --no-load-optim \
-    --no-load-rng \
-    --finetune \
+    "${CHECKPOINT_LOAD_ARGS[@]}" \
     "${INITIAL_VALID_ARGS[@]}" \
     --probe-name "$PROBE_NAME" \
     --probe-eval-iters "$PROBE_EVAL_ITERS" \
