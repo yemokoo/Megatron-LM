@@ -134,6 +134,7 @@ export ROUTER_KL_WARMUP_STEPS="${ROUTER_KL_WARMUP_STEPS:-300}"
 export ROUTER_KL_SMOOTHING_WINDOW="${ROUTER_KL_SMOOTHING_WINDOW:-3}"
 export SHARED_ROUTER_TRAIN_MASK_EXISTING_EXPERTS="${SHARED_ROUTER_TRAIN_MASK_EXISTING_EXPERTS:-0}"
 export SHARED_ROUTER_TRAIN_MASK_EXISTING_EXPERTS_FROM_NUM_EXPERTS="${SHARED_ROUTER_TRAIN_MASK_EXISTING_EXPERTS_FROM_NUM_EXPERTS:-$SOURCE_NUM_EXPERTS}"
+export SHARED_ROUTER_HYBRID_TRAIN_ALL_EXPERTS_AND_ROUTER="${SHARED_ROUTER_HYBRID_TRAIN_ALL_EXPERTS_AND_ROUTER:-0}"
 export SHARED_ROUTER_HYBRID_TRAIN_ALL_ROUTER_ROWS="${SHARED_ROUTER_HYBRID_TRAIN_ALL_ROUTER_ROWS:-0}"
 export STAGE1_WEIGHTS_DIR="${STAGE1_WEIGHTS_DIR:-}"
 export STAGE1_SUBDIR="${STAGE1_SUBDIR:-a100/wiki-shared-router-hybrid-pretrain-local}"
@@ -308,8 +309,12 @@ metadata = {
     'shared_router_hybrid': True,
     'shared_router_train_mask_existing_experts': os.environ.get('SHARED_ROUTER_TRAIN_MASK_EXISTING_EXPERTS', '0') == '1',
     'shared_router_train_mask_existing_experts_from_num_experts': int(os.environ.get('SHARED_ROUTER_TRAIN_MASK_EXISTING_EXPERTS_FROM_NUM_EXPERTS', '0')),
-    'train_new_experts_and_router_only': True,
-    'shared_router_hybrid_train_all_router_rows': os.environ.get('SHARED_ROUTER_HYBRID_TRAIN_ALL_ROUTER_ROWS', '0') == '1',
+    'train_new_experts_and_router_only': os.environ.get('SHARED_ROUTER_HYBRID_TRAIN_ALL_EXPERTS_AND_ROUTER', '0') != '1',
+    'shared_router_hybrid_train_all_experts_and_router': os.environ.get('SHARED_ROUTER_HYBRID_TRAIN_ALL_EXPERTS_AND_ROUTER', '0') == '1',
+    'shared_router_hybrid_train_all_router_rows': (
+        os.environ.get('SHARED_ROUTER_HYBRID_TRAIN_ALL_EXPERTS_AND_ROUTER', '0') == '1'
+        or os.environ.get('SHARED_ROUTER_HYBRID_TRAIN_ALL_ROUTER_ROWS', '0') == '1'
+    ),
     'router_memory_kl_coeff': float(os.environ.get('ROUTER_MEMORY_KL_COEFF', '0.0')),
     'router_memory_force_enable_zero_coeff': os.environ.get('ROUTER_MEMORY_FORCE_ENABLE_ZERO_COEFF', '0') == '1',
     'router_memory_fraction': float(os.environ.get('ROUTER_MEMORY_FRACTION', '0.0')),
@@ -382,6 +387,11 @@ if [ -n "$RESUME_FROM_WEIGHTS" ]; then
         --shared-router-hybrid-resume-from-num-experts "$SOURCE_NUM_EXPERTS"
     )
     CHECKPOINT_LOAD_ARGS=()
+fi
+if [ "$SHARED_ROUTER_HYBRID_TRAIN_ALL_EXPERTS_AND_ROUTER" = "1" ]; then
+    SHARED_ROUTER_ARGS+=(--shared-router-hybrid-train-all-experts-and-router-only)
+else
+    SHARED_ROUTER_ARGS+=(--shared-router-hybrid-train-new-experts-and-router-only)
 fi
 if [ "$SHARED_ROUTER_HYBRID_TRAIN_ALL_ROUTER_ROWS" = "1" ]; then
     SHARED_ROUTER_ARGS+=(--shared-router-hybrid-train-all-router-rows)
@@ -458,7 +468,6 @@ torchrun \
     --lr-wsd-decay-iters "$LR_WSD_DECAY_ITERS" \
     --train-iters "$TRAIN_ITERS" \
     "${SHARED_ROUTER_MODE_ARGS[@]}" \
-    --shared-router-hybrid-train-new-experts-and-router-only \
     "${SHARED_ROUTER_ARGS[@]}" \
     --seq-length "${SEQ_LENGTH:-512}" \
     --data-path $(build_data_path "$SSD_CODE_TRAIN") \
