@@ -7,7 +7,9 @@ from megatron.core.transformer.moe.continual_learning_utils import (
     freeze_all_but_new_moe_params,
     teacher_student_router_kl,
 )
+from megatron.core.transformer.moe.experts import GroupedMLP
 from megatron.core.transformer.moe.router import TopKRouter
+from megatron.core.transformer.shared_router_hybrid import SharedFullRankLoraExperts
 from megatron.core.transformer.transformer_config import TransformerConfig
 
 
@@ -27,10 +29,64 @@ class RouterOnlyModel(torch.nn.Module):
         self.dense = torch.nn.Linear(hidden_size, hidden_size)
 
 
+class MinimalGroupedMLP(GroupedMLP):
+    def __init__(self, num_experts=4, hidden_size=3, expert_width=2):
+        torch.nn.Module.__init__(self)
+        self.config = TransformerConfig(
+            num_layers=1,
+            hidden_size=hidden_size,
+            num_attention_heads=1,
+            num_moe_experts=num_experts,
+            moe_ffn_hidden_size=expert_width,
+            use_cpu_initialization=True,
+            params_dtype=torch.float32,
+        )
+        self.num_local_experts = num_experts
+        self.weight1 = torch.nn.Parameter(torch.ones(hidden_size, num_experts * expert_width))
+        self.weight2 = torch.nn.Parameter(torch.ones(num_experts * expert_width, hidden_size))
+
+
+class RouterLoraAndGroupedExpertsModel(torch.nn.Module):
+    def __init__(self, num_experts=4, hidden_size=3):
+        super().__init__()
+        config = TransformerConfig(
+            num_layers=1,
+            hidden_size=hidden_size,
+            num_attention_heads=1,
+            num_moe_experts=num_experts,
+            moe_router_topk=2,
+            attn_lora_num_experts=num_experts,
+            attn_full_rank_lora_rank=2,
+            attn_full_rank_lora_alpha=2,
+            attn_full_rank_lora_targets="qkvo",
+            attn_full_rank_lora_active_targets="",
+            use_cpu_initialization=True,
+            params_dtype=torch.float32,
+        )
+        self.router = TopKRouter(config)
+        self.attn_lora_experts = SharedFullRankLoraExperts(
+            config,
+            input_size=hidden_size,
+            query_output_size=hidden_size,
+            value_output_size=hidden_size,
+        )
+        self.ffn_experts = MinimalGroupedMLP(num_experts=num_experts, hidden_size=hidden_size)
+        self.q_full_rank_lora = torch.nn.Linear(hidden_size, hidden_size)
+        self.dense = torch.nn.Linear(hidden_size, hidden_size)
+
+
 def _backward_router_weight_sum(model):
     model.zero_grad(set_to_none=True)
     model.router.weight.sum().backward()
     return model.router.weight.grad.detach()
+
+
+def _trainable_expert_and_router_loss(model):
+    loss = model.router.weight.sum()
+    loss = loss + model.ffn_experts.weight1.sum() + model.ffn_experts.weight2.sum()
+    for param in model.attn_lora_experts.parameters():
+        loss = loss + param.sum()
+    return loss
 
 
 def test_freeze_all_but_new_moe_params_masks_existing_router_rows_by_default():
@@ -63,6 +119,32 @@ def test_freeze_all_but_new_moe_params_can_train_all_router_rows():
 
     assert torch.all(grad == 1)
     assert not model.dense.weight.requires_grad
+
+
+def test_freeze_all_but_new_moe_params_can_train_all_experts_and_router_rows():
+    model = RouterLoraAndGroupedExpertsModel()
+
+    freeze_all_but_new_moe_params(
+        model,
+        num_existing_experts=2,
+        freeze_existing_experts=False,
+        freeze_existing_router=False,
+        train_dense_attention_lora=False,
+    )
+
+    model.zero_grad(set_to_none=True)
+    _trainable_expert_and_router_loss(model).backward()
+
+    assert torch.all(model.router.weight.grad == 1)
+    assert torch.all(model.ffn_experts.weight1.grad == 1)
+    assert torch.all(model.ffn_experts.weight2.grad == 1)
+    for param in model.attn_lora_experts.parameters():
+        assert param.requires_grad
+        assert torch.all(param.grad == 1)
+    assert not model.q_full_rank_lora.weight.requires_grad
+    assert model.q_full_rank_lora.weight.grad is None
+    assert not model.dense.weight.requires_grad
+    assert model.dense.weight.grad is None
 
 
 def test_allow_existing_router_grads_temporarily_bypasses_existing_row_mask():

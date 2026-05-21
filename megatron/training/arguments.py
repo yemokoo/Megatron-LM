@@ -2597,6 +2597,10 @@ def _add_experimental_args(parser):
     group.add_argument('--shared-router-hybrid-train-new-experts-and-router-only', action='store_true',
                        help='When expanding the shared-router hybrid model, freeze every old '
                             'parameter and train only newly added experts plus newly added router rows.')
+    group.add_argument('--shared-router-hybrid-train-all-experts-and-router-only', action='store_true',
+                       help='When expanding the shared-router hybrid model, freeze shared trunk '
+                            'parameters and train all FFN experts, all attention LoRA experts, '
+                            'and all shared-router rows.')
     group.add_argument('--shared-router-hybrid-train-all-router-rows', action='store_true',
                        help='With --shared-router-hybrid-train-new-experts-and-router-only, keep '
                             'all shared-router rows trainable while old FFN/LoRA experts remain frozen.')

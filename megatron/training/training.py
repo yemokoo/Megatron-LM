@@ -1687,7 +1687,15 @@ def setup_model_and_optimizer(model_provider_func,
             expand_moe_model(
                 target_shard, source_shard, args.shared_router_hybrid_expand_from_num_experts
             )
-            if args.shared_router_hybrid_train_new_experts_and_router_only:
+            if args.shared_router_hybrid_train_all_experts_and_router_only:
+                freeze_all_but_new_moe_params(
+                    target_shard,
+                    args.shared_router_hybrid_expand_from_num_experts,
+                    freeze_existing_experts=False,
+                    freeze_existing_router=False,
+                    train_dense_attention_lora=False,
+                )
+            elif args.shared_router_hybrid_train_new_experts_and_router_only:
                 freeze_all_but_new_moe_params(
                     target_shard,
                     args.shared_router_hybrid_expand_from_num_experts,
@@ -1894,7 +1902,15 @@ def setup_model_and_optimizer(model_provider_func,
                 '--num-experts.'
             )
             for target_shard in unwrapped_model:
-                if args.shared_router_hybrid_train_new_experts_and_router_only:
+                if args.shared_router_hybrid_train_all_experts_and_router_only:
+                    freeze_all_but_new_moe_params(
+                        target_shard,
+                        args.shared_router_hybrid_resume_from_num_experts,
+                        freeze_existing_experts=False,
+                        freeze_existing_router=False,
+                        train_dense_attention_lora=False,
+                    )
+                elif args.shared_router_hybrid_train_new_experts_and_router_only:
                     freeze_all_but_new_moe_params(
                         target_shard,
                         args.shared_router_hybrid_resume_from_num_experts,

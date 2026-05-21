@@ -314,7 +314,11 @@ def freeze_preexisting_moe_params(
 
 
 def freeze_all_but_new_moe_params(
-    model, num_existing_experts, freeze_existing_experts=True, freeze_existing_router=True
+    model,
+    num_existing_experts,
+    freeze_existing_experts=True,
+    freeze_existing_router=True,
+    train_dense_attention_lora=True,
 ):
     for param in model.parameters():
         param.requires_grad = False
@@ -396,6 +400,9 @@ def freeze_all_but_new_moe_params(
                     param.requires_grad = True
             if freeze_existing_experts:
                 _freeze_shared_full_rank_lora_experts(module, num_existing_experts)
+            continue
+
+        if not train_dense_attention_lora:
             continue
 
         # Keep dense attention full-rank LoRA trainable even when shared weights are frozen.
