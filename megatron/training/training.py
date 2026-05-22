@@ -70,6 +70,7 @@ from megatron.core.transformer.moe.continual_learning_utils import (
     expand_moe_model,
     freeze_all_but_attn_lora_router_params,
     freeze_all_but_new_moe_params,
+    freeze_all_but_shared_router_params,
     freeze_preexisting_moe_params,
     inspect_moe_expansion,
     teacher_student_router_kl,
@@ -1687,7 +1688,9 @@ def setup_model_and_optimizer(model_provider_func,
             expand_moe_model(
                 target_shard, source_shard, args.shared_router_hybrid_expand_from_num_experts
             )
-            if args.shared_router_hybrid_train_all_experts_and_router_only:
+            if args.shared_router_hybrid_train_router_only:
+                freeze_all_but_shared_router_params(target_shard)
+            elif args.shared_router_hybrid_train_all_experts_and_router_only:
                 freeze_all_but_new_moe_params(
                     target_shard,
                     args.shared_router_hybrid_expand_from_num_experts,
@@ -1902,7 +1905,9 @@ def setup_model_and_optimizer(model_provider_func,
                 '--num-experts.'
             )
             for target_shard in unwrapped_model:
-                if args.shared_router_hybrid_train_all_experts_and_router_only:
+                if args.shared_router_hybrid_train_router_only:
+                    freeze_all_but_shared_router_params(target_shard)
+                elif args.shared_router_hybrid_train_all_experts_and_router_only:
                     freeze_all_but_new_moe_params(
                         target_shard,
                         args.shared_router_hybrid_resume_from_num_experts,

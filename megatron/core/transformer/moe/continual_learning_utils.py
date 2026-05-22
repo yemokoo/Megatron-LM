@@ -435,6 +435,18 @@ def freeze_all_but_attn_lora_router_params(model):
                 param.requires_grad = True
 
 
+def freeze_all_but_shared_router_params(model):
+    """Freeze a shared-router hybrid model except the MoE router weights."""
+    for param in model.parameters():
+        param.requires_grad = False
+
+    for module in model.modules():
+        if isinstance(module, Router):
+            module.weight.requires_grad = True
+            if getattr(module, "expert_bias", None) is not None:
+                module.expert_bias.requires_grad = True
+
+
 def enable_self_attention_params(model):
     trainable_params = 0
     trainable_tensors = 0
