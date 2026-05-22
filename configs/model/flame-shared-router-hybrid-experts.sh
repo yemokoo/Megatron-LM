@@ -22,7 +22,7 @@ MODEL_ARGS=(
     --attention-dropout 0.0
     --init-method-std "${INIT_METHOD_STD:-0.02}"
     --tokenizer-type HuggingFaceTokenizer
-    --tokenizer-model EleutherAI/pythia-12b
+    --tokenizer-model "${TOKENIZER_MODEL:-EleutherAI/pythia-12b}"
 
     --moe-ffn-hidden-size "$MOE_FFN_HIDDEN_SIZE"
     --num-experts "${NUM_EXPERTS:-4}"
