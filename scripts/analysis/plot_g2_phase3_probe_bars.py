@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Plot G2 phase1 vs phase3 probe metrics from training logs.
 
-This script intentionally uses only the Python standard library and writes SVG
-directly so it can run on KT nodes without installing matplotlib.
+This script always writes SVG directly with the Python standard library. If
+matplotlib is available, it also writes PNG copies for easier viewing.
 """
 
 import argparse
@@ -117,7 +117,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--out-dir",
         default="analysis_outputs/g2_phase3_log_probe_bars",
-        help="Output directory for CSV, markdown, and SVG files.",
+        help="Output directory for CSV, markdown, SVG, and PNG files.",
+    )
+    parser.add_argument(
+        "--no-png",
+        action="store_true",
+        help="Skip optional PNG generation.",
     )
     return parser.parse_args()
 
@@ -349,6 +354,89 @@ def write_metric_svg(rows: List[ProbeResult], metric: str, svg_path: Path) -> No
     svg_path.write_text("\n".join(svg), encoding="utf-8")
 
 
+def write_metric_png(rows: List[ProbeResult], metric: str, png_path: Path) -> bool:
+    try:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except Exception as exc:
+        print(f"[WARN] PNG skipped: matplotlib unavailable ({exc})")
+        return False
+
+    png_path.parent.mkdir(parents=True, exist_ok=True)
+    clusters: List[Tuple[str, str]] = [
+        ("exp1", "code_probe"),
+        ("exp1", "wiki_probe"),
+        ("exp2", "code_probe"),
+        ("exp2", "wiki_probe"),
+    ]
+    keyed = {(r.experiment, r.stage, r.probe): r for r in rows}
+    before_stage = "phase1_before_router_retune"
+    after_stage = "phase3_after_router_retune"
+    x_positions = list(range(len(clusters)))
+    before_values = [getattr(keyed[(exp, before_stage, probe)], metric) for exp, probe in clusters]
+    after_values = [getattr(keyed[(exp, after_stage, probe)], metric) for exp, probe in clusters]
+    labels = [f"{exp.upper()}\n{PROBE_LABEL[probe]}" for exp, probe in clusters]
+
+    fig, ax = plt.subplots(figsize=(11.2, 6.2))
+    fig.patch.set_facecolor("#fbf7ef")
+    ax.set_facecolor("#fbf7ef")
+    bar_width = 0.36
+    before_x = [x - bar_width / 2 for x in x_positions]
+    after_x = [x + bar_width / 2 for x in x_positions]
+    before_bars = ax.bar(
+        before_x,
+        before_values,
+        width=bar_width,
+        color=BAR_COLORS[before_stage],
+        label=STAGE_LABEL[before_stage],
+    )
+    after_bars = ax.bar(
+        after_x,
+        after_values,
+        width=bar_width,
+        color=BAR_COLORS[after_stage],
+        label=STAGE_LABEL[after_stage],
+    )
+
+    for bars in (before_bars, after_bars):
+        for bar in bars:
+            value = bar.get_height()
+            ax.annotate(
+                f"{value:.3f}",
+                xy=(bar.get_x() + bar.get_width() / 2, value),
+                xytext=(0, 4),
+                textcoords="offset points",
+                ha="center",
+                va="bottom",
+                fontsize=9,
+            )
+
+    ax.set_title(
+        f"G2 Phase1 vs Phase3 Log Probe - {METRIC_LABEL[metric]}",
+        fontsize=15,
+        fontweight="bold",
+    )
+    ax.set_ylabel(METRIC_LABEL[metric])
+    ax.set_xticks(x_positions)
+    ax.set_xticklabels(labels)
+    ax.grid(axis="y", alpha=0.28)
+    ax.legend(loc="upper right")
+    if metric == "next_token_acc":
+        ax.set_ylim(0.0, min(1.0, max(before_values + after_values) + 0.05))
+    else:
+        y_min = min(before_values + after_values)
+        y_max = max(before_values + after_values)
+        pad = max((y_max - y_min) * 0.12, 0.1)
+        ax.set_ylim(max(0.0, y_min - pad), y_max + pad)
+
+    fig.tight_layout()
+    fig.savefig(png_path, dpi=200)
+    plt.close(fig)
+    return True
+
+
 def main() -> None:
     args = parse_args()
     g2_root = Path(args.g2_root)
@@ -359,17 +447,26 @@ def main() -> None:
     md_path = out_dir / "g2_phase3_probe_summary.md"
     acc_svg = out_dir / "g2_phase3_probe_accuracy_bars.svg"
     ppl_svg = out_dir / "g2_phase3_probe_ppl_bars.svg"
+    acc_png = out_dir / "g2_phase3_probe_accuracy_bars.png"
+    ppl_png = out_dir / "g2_phase3_probe_ppl_bars.png"
 
     write_csv(rows, csv_path)
     write_markdown(rows, md_path)
     write_metric_svg(rows, "next_token_acc", acc_svg)
     write_metric_svg(rows, "ppl", ppl_svg)
+    wrote_png = False
+    if not args.no_png:
+        wrote_png = write_metric_png(rows, "next_token_acc", acc_png)
+        wrote_png = write_metric_png(rows, "ppl", ppl_png) or wrote_png
 
     print(f"rows: {len(rows)}")
     print(f"csv: {csv_path}")
     print(f"summary: {md_path}")
     print(f"accuracy_svg: {acc_svg}")
     print(f"ppl_svg: {ppl_svg}")
+    if wrote_png:
+        print(f"accuracy_png: {acc_png}")
+        print(f"ppl_png: {ppl_png}")
 
 
 if __name__ == "__main__":
