@@ -63,6 +63,13 @@ if [ "${SHARED_ROUTER_TRAIN_MASK_EXISTING_EXPERTS:-0}" = "1" ]; then
     )
 fi
 
+if [ "${SHARED_ROUTER_HYBRID_TOPK_WITH_ALL_NEW_EXPERTS:-0}" = "1" ]; then
+    MODEL_ARGS+=(
+        --shared-router-hybrid-topk-with-all-new-experts
+        --shared-router-hybrid-all-new-experts-from-num-experts "${SHARED_ROUTER_HYBRID_ALL_NEW_EXPERTS_FROM_NUM_EXPERTS:-${SOURCE_NUM_EXPERTS:-0}}"
+    )
+fi
+
 if [ "${MOE_PERMUTE_FUSION:-0}" = "1" ]; then
     MODEL_ARGS+=(--moe-permute-fusion)
 fi

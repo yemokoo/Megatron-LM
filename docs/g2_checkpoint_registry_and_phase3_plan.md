@@ -159,6 +159,45 @@ Run both sequentially:
 WANDB_MODE=offline scripts/experiment/a100/run_g2_phase3_router_only_retune_mha.sh all
 ```
 
+## Experiment 3 Plan
+
+Experiment 3 starts from the same completed G2 wiki checkpoint:
+
+```bash
+$G2_ROOT/wiki/g2-top4-e8-ffn352-r256-wiki-shared-router-qkvo-mha-a100-bf16-mb72-1800
+```
+
+The code-training stage expands 8 wiki experts to 16 total experts and uses
+full-Wiki teacher-student router KD with KL coefficient 10.0. The Code LM
+forward uses a custom shared-router mode:
+
+```bash
+--shared-router-hybrid-topk-with-all-new-experts
+--shared-router-hybrid-all-new-experts-from-num-experts 8
+```
+
+This mode selects top-4 over all 16 experts, unions every Code expert
+`[8, 16)`, and weights the active expert outputs with the original 16-way
+softmax probabilities without renormalization. It is enabled only during
+grad-enabled training forwards, so no-grad KD hidden capture, probe, and eval
+forwards keep the normal top-k route.
+
+Default Experiment 3 trainability:
+
+- Train all 16 router rows.
+- Train only newly added Code FFN and attention LoRA experts.
+- Freeze copied Wiki experts and shared dense/backbone parameters.
+- Accumulate Code LM loss and full-Wiki router KD loss in the same optimizer
+  step.
+- Disable MoE aux/z loss by default so the objective is exactly Code LM +
+  Wiki router KD, unless explicitly overridden.
+
+Run:
+
+```bash
+WANDB_MODE=offline bash scripts/experiment/a100/run_g2_exp3_router_kd_topk_plus_all_code_experts_mha.sh
+```
+
 ## Current Completed G2 Registry
 
 These entries are from `$G2_ROOT/MANIFEST.tsv` on 2026-05-22.
@@ -169,7 +208,7 @@ These entries are from `$G2_ROOT/MANIFEST.tsv` on 2026-05-22.
 | G2 no-KD baseline | complete, step 1800 | Standard wiki to code expansion baseline without router-memory/KD. | Train newly added FFN experts, newly added attention LoRA experts, newly added router rows. Freeze old wiki experts and shared dense trunk. | `$G2_ROOT/code/baseline/g2-top4-e8to16-ffn352-r256-wiki-to-code-shared-router-qkvo-mha-a100-bf16-mb72-1800` |
 | G2 - experiment 1 Phase 1 | complete, step 1800 | Code task with maximum plasticity before router-only retuning. | Train all FFN experts, all attention LoRA experts, and all router rows. Freeze shared dense trunk, attention main matrices, dense/output trunk. No KD/router-memory regularization. | `$G2_ROOT/code/phase1/g2-top4-e8to16-ffn352-r256-wiki-to-code-shared-router-qkvo-all-experts-router-mha-a100-bf16-mb72-1800` |
 | G2 freeze-wiki-experts baseline | complete, step 1800 | Code task with first-task experts masked/frozen. Closest previous baseline to experiment 2 style. | Freeze wiki experts. Train code-side/new experts. Router behavior depends on the historical script for this run; use metadata before comparing. | `$G2_ROOT/code/phase1/g2-top4-e8to16-ffn352-r256-wiki-to-code-shared-router-qkvo-mha-a100-bf16-mb72-code-train-mask-wiki-experts-1800` |
-| G2 - experiment 2 Phase 1 | pending/running once started | Code task for experiment 2. | Train newly added FFN experts, newly added attention LoRA experts, and all router rows. Freeze existing wiki experts and shared dense trunk. No KD/router-memory regularization. | `$G2_ROOT/code/phase1/g2-exp2-top4-e8to16-ffn352-r256-wiki-to-code-new-experts-all-router-mha-a100-bf16-mb72-1800` |
+| G2 - experiment 2 Phase 1 | complete, step 1800 | Code task for experiment 2. | Train newly added FFN experts, newly added attention LoRA experts, and all router rows. Freeze existing wiki experts and shared dense trunk. No KD/router-memory regularization. | `$G2_ROOT/code/phase1/g2-exp2-top4-e8to16-ffn352-r256-wiki-to-code-new-experts-all-router-mha-a100-bf16-mb72-1800` |
 | Router-memory fixed5 KL0.1 | complete, step 1800 | Router memory regularization baseline using fixed wiki memory sample. | Standard expansion training with router-memory KL coeff 0.1 on fixed 5 percent memory. | `$G2_ROOT/code/router-memory/g2-top4-e8to16-ffn352-r256-wiki-to-code-shared-router-qkvo-mha-a100-bf16-mb72-router-memory-fixed5-kl0p1-1800` |
 | Router-memory fixed5 KL0.1 early stop | partial/early-stop, step 900 | Early-stop variant of fixed 5 percent router-memory KL baseline. | Same as router-memory fixed5 KL0.1, stopped at checkpoint 900. | `$G2_ROOT/code/router-memory/g2-top4-e8to16-ffn352-r256-wiki-to-code-shared-router-qkvo-mha-a100-bf16-mb72-router-memory-fixed5-kl0p1-earlystop-1800` |
 | Teacher-student full-wiki KL1 | partial, step 600 | Teacher-student router KD on full wiki memory. | Shared-router teacher-student router KL, KL coeff 1.0. Partial checkpoint only. | `$G2_ROOT/code/kd-teacher-student/g2-top4-e8to16-ffn352-r256-wiki-to-code-shared-router-qkvo-mha-a100-bf16-mb72-teacher-student-router-kd-fullwiki-kl1p0-1800` |

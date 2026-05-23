@@ -136,6 +136,8 @@ export SHARED_ROUTER_TRAIN_MASK_EXISTING_EXPERTS="${SHARED_ROUTER_TRAIN_MASK_EXI
 export SHARED_ROUTER_TRAIN_MASK_EXISTING_EXPERTS_FROM_NUM_EXPERTS="${SHARED_ROUTER_TRAIN_MASK_EXISTING_EXPERTS_FROM_NUM_EXPERTS:-$SOURCE_NUM_EXPERTS}"
 export SHARED_ROUTER_HYBRID_TRAIN_ALL_EXPERTS_AND_ROUTER="${SHARED_ROUTER_HYBRID_TRAIN_ALL_EXPERTS_AND_ROUTER:-0}"
 export SHARED_ROUTER_HYBRID_TRAIN_ALL_ROUTER_ROWS="${SHARED_ROUTER_HYBRID_TRAIN_ALL_ROUTER_ROWS:-0}"
+export SHARED_ROUTER_HYBRID_TOPK_WITH_ALL_NEW_EXPERTS="${SHARED_ROUTER_HYBRID_TOPK_WITH_ALL_NEW_EXPERTS:-0}"
+export SHARED_ROUTER_HYBRID_ALL_NEW_EXPERTS_FROM_NUM_EXPERTS="${SHARED_ROUTER_HYBRID_ALL_NEW_EXPERTS_FROM_NUM_EXPERTS:-$SOURCE_NUM_EXPERTS}"
 export STAGE1_WEIGHTS_DIR="${STAGE1_WEIGHTS_DIR:-}"
 export STAGE1_SUBDIR="${STAGE1_SUBDIR:-a100/wiki-shared-router-hybrid-pretrain-local}"
 export SOURCE_REQUIRED_ITERS="${SOURCE_REQUIRED_ITERS:-1}"
@@ -198,7 +200,10 @@ mkdir -p \
 exec > >(
     tee -a "$RUN_LOG" | "$PYTHON_BIN" -u -c '
 import re, sys
-iter_re = re.compile(r"(\[[^]]+\]) iteration\s+(\d+)/\s*(\d+).*throughput per GPU \(TFLOP/s/GPU\):\s*([0-9.]+)")
+iter_re = re.compile(r"(\[[^]]+\]) iteration\s+(\d+)/\s*(\d+)")
+ms_re = re.compile(r"elapsed time per iteration \(ms\):\s*([0-9.]+)")
+loss_re = re.compile(r"lm loss:\s*([0-9.Ee+-]+)")
+tflops_re = re.compile(r"throughput per GPU \(TFLOP/s/GPU\):\s*([0-9.]+)")
 val_re = re.compile(r"validation loss at iteration\s+(\d+).*lm loss value:\s*([^|]+)")
 save_re = re.compile(r"saving checkpoint at iteration\s+(\d+)")
 keep_re = re.compile(r"shared-router hybrid|router memory|Router-memory|ERROR:|Traceback|failed \(exitcode|checkpoint at|probe |Expanded MoE checkpoint")
@@ -206,7 +211,17 @@ for line in sys.stdin:
     line = line.rstrip("\n")
     m = iter_re.search(line)
     if m:
-        print(f"{m.group(1)} step {m.group(2)}/{m.group(3)} | GPU {m.group(4)} TFLOP/s", flush=True)
+        parts = [f"{m.group(1)} step {m.group(2)}/{m.group(3)}"]
+        ms = ms_re.search(line)
+        loss = loss_re.search(line)
+        tflops = tflops_re.search(line)
+        if ms:
+            parts.append(f"{ms.group(1)} ms/iter")
+        if loss:
+            parts.append(f"lm loss {loss.group(1)}")
+        if tflops:
+            parts.append(f"GPU {tflops.group(1)} TFLOP/s")
+        print(" | ".join(parts), flush=True)
         continue
     m = val_re.search(line)
     if m:
@@ -328,6 +343,8 @@ metadata = {
     'router_memory_teacher_student_kl': os.environ.get('ROUTER_MEMORY_TEACHER_STUDENT_KL', '0') == '1',
     'router_memory_teacher_student_kl_existing_experts_only': os.environ.get('ROUTER_MEMORY_TEACHER_STUDENT_KL_EXISTING_EXPERTS_ONLY', '0') == '1',
     'router_memory_joint_update': os.environ.get('ROUTER_MEMORY_JOINT_UPDATE', '0') == '1',
+    'shared_router_hybrid_topk_with_all_new_experts': os.environ.get('SHARED_ROUTER_HYBRID_TOPK_WITH_ALL_NEW_EXPERTS', '0') == '1',
+    'shared_router_hybrid_all_new_experts_from_num_experts': int(os.environ.get('SHARED_ROUTER_HYBRID_ALL_NEW_EXPERTS_FROM_NUM_EXPERTS', '0')),
     'wandb_log_checkpoints': os.environ.get('WANDB_LOG_CHECKPOINTS', '0') == '1',
     'router_kl_stop_step': os.environ.get('ROUTER_KL_STOP_STEP', ''),
     'router_kl_early_stop_enabled': os.environ.get('ROUTER_KL_EARLY_STOP_ENABLED', '0') == '1',
