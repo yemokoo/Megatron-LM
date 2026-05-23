@@ -10,7 +10,10 @@ from megatron.core.transformer.moe.continual_learning_utils import (
 )
 from megatron.core.transformer.moe.experts import GroupedMLP
 from megatron.core.transformer.moe.router import TopKRouter
-from megatron.core.transformer.shared_router_hybrid import SharedFullRankLoraExperts
+from megatron.core.transformer.shared_router_hybrid import (
+    SharedFullRankLoraExperts,
+    topk_with_all_new_experts_routing,
+)
 from megatron.core.transformer.transformer_config import TransformerConfig
 
 
@@ -286,3 +289,34 @@ def test_teacher_student_router_kl_existing_only_ignores_new_student_logits():
 
     assert torch.count_nonzero(student_logits.grad[:, :2]) == 2
     assert torch.count_nonzero(student_logits.grad[:, 2:]) == 0
+
+
+def test_topk_with_all_new_experts_uses_union_and_original_softmax_weights():
+    logits = torch.tensor([[4.0, 3.0, 2.0, 1.0, 0.5, -0.5]])
+
+    scores, routing_map = topk_with_all_new_experts_routing(
+        logits,
+        topk=2,
+        num_existing_experts=4,
+    )
+
+    full_scores = torch.softmax(logits.float(), dim=-1)
+    expected_map = torch.tensor([[True, True, False, False, True, True]])
+    expected_scores = full_scores * expected_map.to(full_scores.dtype)
+
+    assert torch.equal(routing_map, expected_map)
+    assert torch.allclose(scores, expected_scores)
+    assert scores.sum() < 1.0
+
+
+def test_topk_with_all_new_experts_does_not_duplicate_new_topk_experts():
+    logits = torch.tensor([[0.0, 0.1, 0.2, 0.3, 9.0, 8.0]])
+
+    scores, routing_map = topk_with_all_new_experts_routing(
+        logits,
+        topk=2,
+        num_existing_experts=4,
+    )
+
+    assert torch.equal(routing_map, torch.tensor([[False, False, False, False, True, True]]))
+    assert torch.allclose(scores, torch.softmax(logits.float(), dim=-1) * routing_map.float())

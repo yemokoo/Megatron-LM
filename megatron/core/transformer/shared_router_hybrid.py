@@ -2,6 +2,7 @@
 
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Dict, List, Optional, Tuple, Union
 
 import torch
@@ -20,6 +21,7 @@ from megatron.core.transformer.moe.legacy_a2a_token_dispatcher import MoEAlltoAl
 from megatron.core.transformer.moe import grouped_gemm_util as gg
 from megatron.core.transformer.moe.moe_layer import BaseMoELayer, MoESubmodules
 from megatron.core.transformer.moe.router import TopKRouter
+from megatron.core.transformer.moe.moe_utils import switch_load_balancing_loss_func
 from megatron.core.transformer.moe.token_dispatcher import (
     MoEAllGatherTokenDispatcher,
     MoEAlltoAllTokenDispatcher,
@@ -109,6 +111,37 @@ def _parse_active_full_rank_targets(active_targets: str, instantiated_targets: s
             f"invalid active entries: {missing}"
         )
     return normalized_active
+
+
+def topk_with_all_new_experts_routing(
+    logits: torch.Tensor,
+    topk: int,
+    num_existing_experts: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Route to global top-k plus every newly added expert.
+
+    The returned scores keep the original full-softmax probability for each
+    active expert and do not renormalize after taking the union. This matches
+    the Experiment 3 code step: selected Wiki experts plus all Code experts.
+    """
+    if logits.dim() != 2:
+        raise ValueError(f"Expected 2D logits [num_tokens, num_experts], got {logits.dim()}D.")
+    num_experts = logits.shape[-1]
+    if topk <= 0 or topk > num_experts:
+        raise ValueError(f"topk must be in [1, {num_experts}], got {topk}.")
+    if num_existing_experts <= 0 or num_existing_experts >= num_experts:
+        raise ValueError(
+            "num_existing_experts must be between 1 and num_experts - 1, "
+            f"got {num_existing_experts} for {num_experts} experts."
+        )
+
+    full_scores = torch.softmax(logits.float(), dim=-1).type_as(logits)
+    _, topk_indices = torch.topk(full_scores, k=topk, dim=-1)
+    routing_map = torch.zeros_like(logits, dtype=torch.bool)
+    routing_map.scatter_(1, topk_indices, True)
+    routing_map[:, num_existing_experts:] = True
+    scores = full_scores * routing_map.to(full_scores.dtype)
+    return scores, routing_map
 
 
 class SharedQVLoraExperts(MegatronModule):
@@ -965,7 +998,69 @@ class SharedRouterHybridTransformerLayer(MegatronModule, BaseTransformerLayer):
             _SHARED_ROUTER_INPUT_CAPTURE_STACK[-1].append(
                 (self.layer_number, hidden_states.detach())
             )
-        scores, routing_map = self.shared_expert_router(hidden_states)
+
+        if (
+            self.training
+            and torch.is_grad_enabled()
+            and self.config.shared_router_hybrid_topk_with_all_new_experts
+        ):
+            if self.config.moe_token_dispatcher_type != "allgather":
+                raise ValueError(
+                    "--shared-router-hybrid-topk-with-all-new-experts currently supports "
+                    "moe_token_dispatcher_type=allgather only."
+                )
+            if self.config.moe_router_group_topk is not None or self.config.moe_router_num_groups:
+                raise ValueError(
+                    "--shared-router-hybrid-topk-with-all-new-experts does not support "
+                    "group-limited routing."
+                )
+            if (
+                self.config.moe_expert_capacity_factor is not None
+                or self.config.moe_pad_expert_input_to_capacity
+            ):
+                raise ValueError(
+                    "--shared-router-hybrid-topk-with-all-new-experts does not support "
+                    "expert capacity token dropping."
+                )
+            if self.shared_expert_router.score_function != "softmax":
+                raise ValueError(
+                    "--shared-router-hybrid-topk-with-all-new-experts requires "
+                    "moe_router_score_function=softmax."
+                )
+
+            num_existing_experts = (
+                self.config.shared_router_hybrid_all_new_experts_from_num_experts
+            )
+            if num_existing_experts is None:
+                raise ValueError(
+                    "--shared-router-hybrid-all-new-experts-from-num-experts must be set when "
+                    "--shared-router-hybrid-topk-with-all-new-experts is enabled."
+                )
+
+            router_input = self.shared_expert_router.apply_input_jitter(hidden_states)
+            logits = self.shared_expert_router.gating(router_input)
+            logits = logits.view(-1, self.config.num_moe_experts)
+            logits = self.shared_expert_router.apply_z_loss(logits)
+            scores, routing_map = topk_with_all_new_experts_routing(
+                logits,
+                self.config.moe_router_topk,
+                num_existing_experts,
+            )
+            if self.config.moe_aux_loss_coeff:
+                full_scores = torch.softmax(logits.float(), dim=-1)
+                aux_loss_func = partial(
+                    switch_load_balancing_loss_func,
+                    probs=full_scores,
+                    tokens_per_expert=routing_map.sum(dim=0),
+                    topk=self.config.moe_router_topk,
+                )
+                scores = self.shared_expert_router.apply_load_balancing_loss(
+                    activation=scores,
+                    load_balancing_loss_func=aux_loss_func,
+                )
+        else:
+            scores, routing_map = self.shared_expert_router(hidden_states)
+
         tokens_per_expert = None
         sorted_token_indices = None
         permuted_scores = None

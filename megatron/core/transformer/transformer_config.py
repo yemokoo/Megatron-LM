@@ -175,6 +175,12 @@ class TransformerConfig(ModelParallelConfig):
     shared_router_train_mask_existing_experts_from_num_experts: Optional[int] = None
     """Number of copied old experts to mask when training with code-only expert routing."""
 
+    shared_router_hybrid_topk_with_all_new_experts: bool = False
+    """During grad-enabled training, route through normal top-k plus every newly added expert."""
+
+    shared_router_hybrid_all_new_experts_from_num_experts: Optional[int] = None
+    """First expert id considered newly added for top-k plus all-new-experts routing."""
+
     ####################
     # initialization
     ####################

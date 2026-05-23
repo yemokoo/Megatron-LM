@@ -2607,6 +2607,16 @@ def _add_experimental_args(parser):
     group.add_argument('--shared-router-hybrid-train-router-only', action='store_true',
                        help='Freeze every parameter except the shared MoE router weights. '
                             'Intended for Phase 3 router-only retuning with fixed experts.')
+    group.add_argument('--shared-router-hybrid-topk-with-all-new-experts', action='store_true',
+                       help='For shared-router hybrid training forwards, route through the normal '
+                            'top-k experts plus every newly added expert id >= '
+                            '--shared-router-hybrid-all-new-experts-from-num-experts. '
+                            'Uses original full-softmax router probabilities without '
+                            'renormalization. No-grad KD/probe/eval forwards keep normal top-k.')
+    group.add_argument('--shared-router-hybrid-all-new-experts-from-num-experts', type=int,
+                       default=None,
+                       help='First newly added expert id used by '
+                            '--shared-router-hybrid-topk-with-all-new-experts.')
     group.add_argument('--shared-router-hybrid-resume-from-num-experts', type=int, default=None,
                        help='When resuming from an expanded shared-router hybrid checkpoint, '
                             're-apply continual-learning freezing using this many original experts.')
