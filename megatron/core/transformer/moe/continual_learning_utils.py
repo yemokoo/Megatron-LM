@@ -447,6 +447,22 @@ def freeze_all_but_shared_router_params(model):
                 module.expert_bias.requires_grad = True
 
 
+def freeze_all_but_new_shared_router_params(model, num_existing_experts):
+    """Freeze everything except newly added shared-router rows.
+
+    This is used for post-hoc code-row router retuning: the fixed experts define
+    the function space, and only router rows for expert ids >= num_existing_experts
+    learn from the LM loss.
+    """
+    for param in model.parameters():
+        param.requires_grad = False
+
+    for module in model.modules():
+        if isinstance(module, Router):
+            module.weight.requires_grad = True
+            _freeze_router(module, num_existing_experts)
+
+
 def enable_self_attention_params(model):
     trainable_params = 0
     trainable_tensors = 0

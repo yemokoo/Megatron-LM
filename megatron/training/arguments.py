@@ -744,6 +744,24 @@ def validate_args(args, defaults={}):
         assert args.spec is None or args.shared_router_hybrid_model, (
             "Model Spec must be None when using MoEs unless --shared-router-hybrid-model is set"
         )
+    shared_router_hybrid_train_modes = [
+        args.shared_router_hybrid_train_new_experts_and_router_only,
+        args.shared_router_hybrid_train_all_experts_and_router_only,
+        args.shared_router_hybrid_train_router_only,
+        args.shared_router_hybrid_train_new_router_only,
+    ]
+    assert sum(bool(mode) for mode in shared_router_hybrid_train_modes) <= 1, (
+        "Only one shared-router hybrid train-freeze mode can be enabled at a time."
+    )
+    if args.shared_router_hybrid_train_new_router_only:
+        assert (
+            args.shared_router_hybrid_expand_from_num_experts is not None
+            or args.shared_router_hybrid_resume_from_num_experts is not None
+        ), (
+            "--shared-router-hybrid-train-new-router-only requires "
+            "--shared-router-hybrid-expand-from-num-experts or "
+            "--shared-router-hybrid-resume-from-num-experts."
+        )
 
     if args.moe_ffn_hidden_size is None:
         args.moe_ffn_hidden_size = args.ffn_hidden_size
@@ -2607,6 +2625,10 @@ def _add_experimental_args(parser):
     group.add_argument('--shared-router-hybrid-train-router-only', action='store_true',
                        help='Freeze every parameter except the shared MoE router weights. '
                             'Intended for Phase 3 router-only retuning with fixed experts.')
+    group.add_argument('--shared-router-hybrid-train-new-router-only', action='store_true',
+                       help='Freeze every parameter except newly added shared-router rows '
+                            'with expert id >= --shared-router-hybrid-*-from-num-experts. '
+                            'Intended for code-row-only Phase 3 router retuning.')
     group.add_argument('--shared-router-hybrid-topk-with-all-new-experts', action='store_true',
                        help='For shared-router hybrid training forwards, route through the normal '
                             'top-k experts plus every newly added expert id >= '
