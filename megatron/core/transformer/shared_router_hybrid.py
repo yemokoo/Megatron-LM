@@ -37,6 +37,7 @@ from megatron.core.utils import make_viewless_tensor
 
 
 _SHARED_ROUTER_INPUT_CAPTURE_STACK: List[list] = []
+_SHARED_ROUTER_ROUTING_CAPTURE_STACK: List[list] = []
 
 
 @contextmanager
@@ -48,6 +49,17 @@ def capture_shared_router_inputs():
         yield captured
     finally:
         _SHARED_ROUTER_INPUT_CAPTURE_STACK.pop()
+
+
+@contextmanager
+def capture_shared_router_routing_maps():
+    """Capture detached token-to-expert routing maps during a forward pass."""
+    captured = []
+    _SHARED_ROUTER_ROUTING_CAPTURE_STACK.append(captured)
+    try:
+        yield captured
+    finally:
+        _SHARED_ROUTER_ROUTING_CAPTURE_STACK.pop()
 
 
 @dataclass
@@ -1060,6 +1072,11 @@ class SharedRouterHybridTransformerLayer(MegatronModule, BaseTransformerLayer):
                 )
         else:
             scores, routing_map = self.shared_expert_router(hidden_states)
+
+        if _SHARED_ROUTER_ROUTING_CAPTURE_STACK:
+            _SHARED_ROUTER_ROUTING_CAPTURE_STACK[-1].append(
+                (self.layer_number, routing_map.detach())
+            )
 
         tokens_per_expert = None
         sorted_token_indices = None

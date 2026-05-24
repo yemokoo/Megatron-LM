@@ -2648,6 +2648,16 @@ def _add_experimental_args(parser):
     group.add_argument('--probe-router-usage-num-existing-experts', type=int, default=None,
                        help='Number of old/source experts for probe router usage metrics. '
                             'Defaults to the shared-router resume/expand expert count when available.')
+    group.add_argument('--train-router-usage-log-interval', type=int, default=0,
+                       help='If > 0, capture train-time shared-router token-to-expert usage '
+                            'every N optimizer steps and append JSONL records to '
+                            '--train-router-usage-log-path.')
+    group.add_argument('--train-router-usage-log-path', type=str, default=None,
+                       help='JSONL output path for train-time shared-router usage records. '
+                            'Defaults to <save>/logs/train_router_usage.jsonl.')
+    group.add_argument('--train-router-usage-num-existing-experts', type=int, default=None,
+                       help='Number of old/source experts for train-time router usage summaries. '
+                            'Defaults to the shared-router resume/expand expert count when available.')
     group.add_argument('--train-log-step-time-only', action='store_true',
                        help='Print compact training progress logs with only step progress and '
                             'iteration timing, while keeping tensorboard/W&B logging unchanged.')

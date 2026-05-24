@@ -76,7 +76,10 @@ from megatron.core.transformer.moe.continual_learning_utils import (
     inspect_moe_expansion,
     teacher_student_router_kl,
 )
-from megatron.core.transformer.shared_router_hybrid import capture_shared_router_inputs
+from megatron.core.transformer.shared_router_hybrid import (
+    capture_shared_router_inputs,
+    capture_shared_router_routing_maps,
+)
 from megatron.core.transformer.moe import upcycling_utils
 from megatron.core.transformer.moe.moe_utils import track_moe_metrics
 from megatron.core.parallel_state import (
@@ -2039,6 +2042,181 @@ def dummy_train_step(data_iterator):
         batch = get_batch_on_this_cp_rank(batch)
 
 
+def _resolve_train_router_usage_log_path(args):
+    path = getattr(args, 'train_router_usage_log_path', None)
+    if path:
+        return path
+    save_dir = getattr(args, 'save', '') or os.getcwd()
+    return os.path.join(save_dir, 'logs', 'train_router_usage.jsonl')
+
+
+def _resolve_train_router_usage_num_existing_experts(args):
+    explicit = getattr(args, 'train_router_usage_num_existing_experts', None)
+    if explicit is not None:
+        return explicit
+    if getattr(args, 'shared_router_hybrid_resume_from_num_experts', None) is not None:
+        return args.shared_router_hybrid_resume_from_num_experts
+    if getattr(args, 'shared_router_hybrid_expand_from_num_experts', None) is not None:
+        return args.shared_router_hybrid_expand_from_num_experts
+    return None
+
+
+def _empty_train_router_usage_metrics(device):
+    zero = torch.tensor(0.0, dtype=torch.float, device=device)
+    return {
+        'train_router_usage/old_expert_fraction': zero,
+        'train_router_usage/new_expert_fraction': zero,
+        'train_router_usage/total_assignments': zero,
+    }
+
+
+def _summarize_and_log_train_router_usage(iteration, captured_router_maps):
+    args = get_args()
+    if not captured_router_maps:
+        device = torch.device('cuda', torch.cuda.current_device())
+        return _empty_train_router_usage_metrics(device)
+
+    num_existing = _resolve_train_router_usage_num_existing_experts(args)
+    by_layer = {}
+    for layer_number, routing_map in captured_router_maps:
+        layer_number = int(layer_number)
+        hist = routing_map.sum(dim=0, dtype=torch.float)
+        if layer_number in by_layer:
+            by_layer[layer_number] = by_layer[layer_number] + hist
+        else:
+            by_layer[layer_number] = hist
+
+    reduced_by_layer = {}
+    for layer_number, hist in by_layer.items():
+        hist = hist.detach().float()
+        if torch.distributed.is_initialized():
+            torch.distributed.all_reduce(hist, group=mpu.get_data_parallel_group())
+        reduced_by_layer[layer_number] = hist
+
+    device = next(iter(reduced_by_layer.values())).device
+    aggregate = None
+    cumulative_aggregate = None
+    layers = {}
+    cumulative = getattr(args, '_train_router_usage_cumulative', {})
+
+    for layer_number in sorted(reduced_by_layer):
+        hist = reduced_by_layer[layer_number]
+        cumulative_hist = cumulative.get(layer_number)
+        if cumulative_hist is None:
+            cumulative_hist = torch.zeros_like(hist)
+        cumulative_hist = cumulative_hist.to(device=hist.device) + hist
+        cumulative[layer_number] = cumulative_hist.detach()
+
+        total = hist.sum().clamp_min(1.0)
+        cumulative_total = cumulative_hist.sum().clamp_min(1.0)
+        fractions = hist / total
+        cumulative_fractions = cumulative_hist / cumulative_total
+        layer_payload = {
+            'total_assignments': float(hist.sum().item()),
+            'expert_counts': [float(value) for value in hist.cpu().tolist()],
+            'expert_fractions': [float(value) for value in fractions.cpu().tolist()],
+            'cumulative_expert_counts': [
+                float(value) for value in cumulative_hist.cpu().tolist()
+            ],
+            'cumulative_expert_fractions': [
+                float(value) for value in cumulative_fractions.cpu().tolist()
+            ],
+        }
+        if num_existing is not None:
+            old_count = hist[:num_existing].sum()
+            new_count = hist[num_existing:].sum()
+            cumulative_old_count = cumulative_hist[:num_existing].sum()
+            cumulative_new_count = cumulative_hist[num_existing:].sum()
+            layer_payload.update(
+                {
+                    'old_expert_fraction': float((old_count / total).item()),
+                    'new_expert_fraction': float((new_count / total).item()),
+                    'cumulative_old_expert_fraction': float(
+                        (cumulative_old_count / cumulative_total).item()
+                    ),
+                    'cumulative_new_expert_fraction': float(
+                        (cumulative_new_count / cumulative_total).item()
+                    ),
+                }
+            )
+        layers[str(layer_number)] = layer_payload
+        aggregate = hist if aggregate is None else aggregate + hist
+        cumulative_aggregate = (
+            cumulative_hist
+            if cumulative_aggregate is None
+            else cumulative_aggregate + cumulative_hist
+        )
+
+    args._train_router_usage_cumulative = cumulative
+
+    aggregate_total = aggregate.sum().clamp_min(1.0)
+    aggregate_fractions = aggregate / aggregate_total
+    cumulative_aggregate_total = cumulative_aggregate.sum().clamp_min(1.0)
+    cumulative_aggregate_fractions = cumulative_aggregate / cumulative_aggregate_total
+    metrics = {
+        'train_router_usage/total_assignments': aggregate.sum(),
+        'train_router_usage/cumulative_total_assignments': cumulative_aggregate.sum(),
+    }
+    record = {
+        'iteration': int(iteration),
+        'topk': int(args.moe_router_topk),
+        'num_existing_experts': num_existing,
+        'layers': layers,
+        'aggregate': {
+            'total_assignments': float(aggregate.sum().item()),
+            'expert_counts': [float(value) for value in aggregate.cpu().tolist()],
+            'expert_fractions': [float(value) for value in aggregate_fractions.cpu().tolist()],
+            'cumulative_total_assignments': float(cumulative_aggregate.sum().item()),
+            'cumulative_expert_counts': [
+                float(value) for value in cumulative_aggregate.cpu().tolist()
+            ],
+            'cumulative_expert_fractions': [
+                float(value) for value in cumulative_aggregate_fractions.cpu().tolist()
+            ],
+        },
+    }
+    if num_existing is not None:
+        old_count = aggregate[:num_existing].sum()
+        new_count = aggregate[num_existing:].sum()
+        cumulative_old_count = cumulative_aggregate[:num_existing].sum()
+        cumulative_new_count = cumulative_aggregate[num_existing:].sum()
+        old_fraction = old_count / aggregate_total
+        new_fraction = new_count / aggregate_total
+        cumulative_old_fraction = cumulative_old_count / cumulative_aggregate_total
+        cumulative_new_fraction = cumulative_new_count / cumulative_aggregate_total
+        metrics['train_router_usage/old_expert_fraction'] = old_fraction
+        metrics['train_router_usage/new_expert_fraction'] = new_fraction
+        metrics['train_router_usage/cumulative_old_expert_fraction'] = cumulative_old_fraction
+        metrics['train_router_usage/cumulative_new_expert_fraction'] = cumulative_new_fraction
+        record['aggregate']['old_expert_fraction'] = float(old_fraction.item())
+        record['aggregate']['new_expert_fraction'] = float(new_fraction.item())
+        record['aggregate']['cumulative_old_expert_fraction'] = float(
+            cumulative_old_fraction.item()
+        )
+        record['aggregate']['cumulative_new_expert_fraction'] = float(
+            cumulative_new_fraction.item()
+        )
+
+    for expert_idx, value in enumerate(aggregate_fractions):
+        metrics[f'train_router_usage/expert_{expert_idx}_fraction'] = value
+    for expert_idx, value in enumerate(cumulative_aggregate_fractions):
+        metrics[f'train_router_usage/cumulative_expert_{expert_idx}_fraction'] = value
+
+    if torch.distributed.get_rank() == 0:
+        path = _resolve_train_router_usage_log_path(args)
+        path_dir = os.path.dirname(path)
+        if path_dir:
+            os.makedirs(path_dir, exist_ok=True)
+        if not getattr(args, '_train_router_usage_log_initialized', False):
+            if os.path.exists(path):
+                os.remove(path)
+            args._train_router_usage_log_initialized = True
+        with open(path, 'a', encoding='utf-8') as handle:
+            handle.write(json.dumps(record, sort_keys=True) + '\n')
+
+    return metrics
+
+
 def train_step(
     forward_step_func,
     data_iterator,
@@ -2062,15 +2240,38 @@ def train_step(
 
         # Forward pass.
         forward_backward_func = get_forward_backward_func()
-        losses_reduced = forward_backward_func(
-            forward_step_func=forward_step_func,
-            data_iterator=data_iterator,
-            model=model,
-            num_microbatches=get_num_microbatches(),
-            seq_length=args.seq_length,
-            micro_batch_size=args.micro_batch_size,
-            decoder_seq_length=args.decoder_seq_length,
-            forward_only=False)
+        train_router_usage_metrics = {}
+        usage_interval = getattr(args, 'train_router_usage_log_interval', 0)
+        capture_train_router_usage = (
+            usage_interval
+            and router_memory_iteration is not None
+            and router_memory_iteration % usage_interval == 0
+        )
+        if capture_train_router_usage:
+            with capture_shared_router_routing_maps() as captured_router_maps:
+                losses_reduced = forward_backward_func(
+                    forward_step_func=forward_step_func,
+                    data_iterator=data_iterator,
+                    model=model,
+                    num_microbatches=get_num_microbatches(),
+                    seq_length=args.seq_length,
+                    micro_batch_size=args.micro_batch_size,
+                    decoder_seq_length=args.decoder_seq_length,
+                    forward_only=False)
+            train_router_usage_metrics = _summarize_and_log_train_router_usage(
+                router_memory_iteration,
+                captured_router_maps,
+            )
+        else:
+            losses_reduced = forward_backward_func(
+                forward_step_func=forward_step_func,
+                data_iterator=data_iterator,
+                model=model,
+                num_microbatches=get_num_microbatches(),
+                seq_length=args.seq_length,
+                micro_batch_size=args.micro_batch_size,
+                decoder_seq_length=args.decoder_seq_length,
+                forward_only=False)
         router_memory_loss_dict = {}
         router_lm_grad_snapshot = None
         router_grad_metrics = {}
@@ -2174,6 +2375,7 @@ def train_step(
                     denominator += 1
             loss_reduced[key] = numerator / denominator
         loss_reduced.update(router_memory_loss_dict)
+        loss_reduced.update(train_router_usage_metrics)
         lm_loss = loss_reduced.get('lm loss')
         router_kl = loss_reduced.get('router_memory_teacher_student/kl')
         scaled_router_kl = loss_reduced.get('router_memory_teacher_student/scaled_kl')
