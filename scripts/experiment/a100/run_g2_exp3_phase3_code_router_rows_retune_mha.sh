@@ -15,6 +15,7 @@ export SAVE_INTERVAL="${SAVE_INTERVAL:-600}"
 export SAVE_CHECKPOINTS="${SAVE_CHECKPOINTS:-1}"
 export LOG_INTERVAL="${LOG_INTERVAL:-10}"
 export TRAIN_LOG_STEP_TIME_ONLY="${TRAIN_LOG_STEP_TIME_ONLY:-0}"
+export TRAIN_ROUTER_USAGE_LOG_INTERVAL="${TRAIN_ROUTER_USAGE_LOG_INTERVAL:-1}"
 export MICRO_BATCH_SIZE="${MICRO_BATCH_SIZE:-48}"
 export GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-2304}"
 export G2_ROOT="${G2_ROOT:-$PROJECT_ROOT/.local/weights/a100/mha/g2-checkpoints}"
@@ -105,6 +106,7 @@ echo "[CONFIG] forward=normal top${MOE_ROUTER_TOPK} over wiki+code experts; no a
 echo "[CONFIG] trainable=shared-router code rows only (${SOURCE_NUM_EXPERTS}..$((NUM_EXPERTS - 1)))"
 echo "[CONFIG] frozen=wiki router rows + all experts + dense/shared params"
 echo "[CONFIG] wandb_mode=${WANDB_MODE}, mb=${MICRO_BATCH_SIZE}, log_interval=${LOG_INTERVAL}"
+echo "[CONFIG] train_router_usage_log_interval=${TRAIN_ROUTER_USAGE_LOG_INTERVAL}"
 echo "[CONFIG] weights=${TRAIN_WEIGHTS}"
 
 env \
