@@ -762,6 +762,18 @@ def validate_args(args, defaults={}):
             "--shared-router-hybrid-expand-from-num-experts or "
             "--shared-router-hybrid-resume-from-num-experts."
         )
+    if args.shared_router_hybrid_reinit_router:
+        assert args.shared_router_hybrid_model, (
+            "--shared-router-hybrid-reinit-router requires --shared-router-hybrid-model."
+        )
+        assert (
+            args.shared_router_hybrid_expand_from_num_experts is not None
+            or args.shared_router_hybrid_resume_from_num_experts is not None
+        ), (
+            "--shared-router-hybrid-reinit-router requires "
+            "--shared-router-hybrid-expand-from-num-experts or "
+            "--shared-router-hybrid-resume-from-num-experts."
+        )
 
     if args.moe_ffn_hidden_size is None:
         args.moe_ffn_hidden_size = args.ffn_hidden_size
@@ -2051,6 +2063,13 @@ def _add_validation_args(parser):
     group.add_argument('--skip-train', action='store_true',
                        default=False, help='If set, bypass the training loop, '
                        'optionally do evaluation for validation/test, and exit.')
+    group.add_argument('--diagnostic-override-train-iteration', type=int, default=None,
+                       help='Diagnostic-only override for args.iteration after checkpoint load '
+                            'and before dataloader construction. Useful for replaying a specific '
+                            'train-step data position without changing the loaded checkpoint.')
+    group.add_argument('--diagnostic-override-consumed-train-samples', type=int, default=None,
+                       help='Diagnostic-only override for args.consumed_train_samples after '
+                            'checkpoint load and before dataloader construction.')
 
     return parser
 
@@ -2625,6 +2644,11 @@ def _add_experimental_args(parser):
     group.add_argument('--shared-router-hybrid-train-router-only', action='store_true',
                        help='Freeze every parameter except the shared MoE router weights. '
                             'Intended for Phase 3 router-only retuning with fixed experts.')
+    group.add_argument('--shared-router-hybrid-reinit-router', action='store_true',
+                       help='After loading or expanding a shared-router hybrid checkpoint, '
+                            're-initialize all shared-router weights before applying '
+                            'continual-learning freeze modes. Experts and dense parameters '
+                            'remain loaded from the checkpoint.')
     group.add_argument('--shared-router-hybrid-train-new-router-only', action='store_true',
                        help='Freeze every parameter except newly added shared-router rows '
                             'with expert id >= --shared-router-hybrid-*-from-num-experts. '

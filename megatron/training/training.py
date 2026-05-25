@@ -74,6 +74,7 @@ from megatron.core.transformer.moe.continual_learning_utils import (
     freeze_all_but_shared_router_params,
     freeze_preexisting_moe_params,
     inspect_moe_expansion,
+    reinitialize_shared_router_params,
     teacher_student_router_kl,
 )
 from megatron.core.transformer.shared_router_hybrid import (
@@ -1075,6 +1076,25 @@ def pretrain(
     app_metrics['app_build_optimizer_finish_time'] = one_logger_utils.get_timestamp_in_ms()
     config = get_model_config(model[0])
 
+    if args.diagnostic_override_train_iteration is not None:
+        if args.diagnostic_override_train_iteration < 0:
+            raise ValueError("--diagnostic-override-train-iteration must be >= 0.")
+        print_rank_0(
+            "Diagnostic override: args.iteration "
+            f"{args.iteration} -> {args.diagnostic_override_train_iteration}"
+        )
+        args.iteration = args.diagnostic_override_train_iteration
+    if args.diagnostic_override_consumed_train_samples is not None:
+        if args.diagnostic_override_consumed_train_samples < 0:
+            raise ValueError("--diagnostic-override-consumed-train-samples must be >= 0.")
+        print_rank_0(
+            "Diagnostic override: args.consumed_train_samples "
+            f"{args.consumed_train_samples} -> "
+            f"{args.diagnostic_override_consumed_train_samples}"
+        )
+        args.consumed_train_samples = args.diagnostic_override_consumed_train_samples
+        update_num_microbatches(consumed_samples=args.consumed_train_samples, verbose=True)
+
     # Data stuff.
     app_metrics['app_build_dataiters_start_time'] = one_logger_utils.get_timestamp_in_ms()
     timers('train/valid/test-data-iterators-setup', log_level=0).start(
@@ -1692,6 +1712,12 @@ def setup_model_and_optimizer(model_provider_func,
             expand_moe_model(
                 target_shard, source_shard, args.shared_router_hybrid_expand_from_num_experts
             )
+            if args.shared_router_hybrid_reinit_router:
+                summary = reinitialize_shared_router_params(target_shard)
+                print_rank_0(
+                    "Re-initialized shared-router hybrid routers after expansion: "
+                    f"{summary['routers']} routers, {summary['parameters']} parameters."
+                )
             if args.shared_router_hybrid_train_router_only:
                 freeze_all_but_shared_router_params(target_shard)
             elif args.shared_router_hybrid_train_new_router_only:
@@ -1914,6 +1940,12 @@ def setup_model_and_optimizer(model_provider_func,
                 '--num-experts.'
             )
             for target_shard in unwrapped_model:
+                if args.shared_router_hybrid_reinit_router:
+                    summary = reinitialize_shared_router_params(target_shard)
+                    print_rank_0(
+                        "Re-initialized shared-router hybrid routers after resume: "
+                        f"{summary['routers']} routers, {summary['parameters']} parameters."
+                    )
                 if args.shared_router_hybrid_train_router_only:
                     freeze_all_but_shared_router_params(target_shard)
                 elif args.shared_router_hybrid_train_new_router_only:

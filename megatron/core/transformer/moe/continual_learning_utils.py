@@ -447,6 +447,29 @@ def freeze_all_but_shared_router_params(model):
                 module.expert_bias.requires_grad = True
 
 
+def reinitialize_shared_router_params(model):
+    """Re-initialize shared-router weights while leaving experts untouched."""
+    num_routers = 0
+    num_params = 0
+    with torch.no_grad():
+        for module in model.modules():
+            if not isinstance(module, Router):
+                continue
+            init_weight = torch.empty(
+                module.weight.shape,
+                dtype=torch.float32,
+                device=module.weight.device,
+            )
+            module.config.init_method(init_weight)
+            module.weight.copy_(init_weight.to(dtype=module.weight.dtype))
+            num_routers += 1
+            num_params += module.weight.numel()
+            if getattr(module, "expert_bias", None) is not None:
+                module.expert_bias.zero_()
+                num_params += module.expert_bias.numel()
+    return {"routers": num_routers, "parameters": num_params}
+
+
 def freeze_all_but_new_shared_router_params(model, num_existing_experts):
     """Freeze everything except newly added shared-router rows.
 
