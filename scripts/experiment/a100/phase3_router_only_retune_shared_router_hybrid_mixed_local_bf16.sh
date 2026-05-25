@@ -21,6 +21,8 @@ export LOG_DIR="${LOG_DIR:-$TRAIN_WEIGHTS/logs}"
 export RUN_LOG="${RUN_LOG:-$LOG_DIR/phase3_run.log}"
 export GPU_LOG="${GPU_LOG:-$LOG_DIR/phase3_gpu.log}"
 export RUN_METADATA="${RUN_METADATA:-$LOG_DIR/phase3_run_metadata.json}"
+export TRAIN_ROUTER_USAGE_LOG_INTERVAL="${TRAIN_ROUTER_USAGE_LOG_INTERVAL:-0}"
+export TRAIN_ROUTER_USAGE_LOG_PATH="${TRAIN_ROUTER_USAGE_LOG_PATH:-$LOG_DIR/train_router_usage.jsonl}"
 
 export SSD_MOUNT="${LOCAL_SSD_ROOT}/${RUN_ID}"
 export SSD_WIKI_TRAIN="${SSD_MOUNT}/dataset/wiki_train"
@@ -203,6 +205,8 @@ metadata = {
     'trainable': 'shared-router weights only',
     'frozen': 'all FFN experts, attention LoRA experts, dense trunk, embeddings, and output weights',
     'loss': 'standard final language-modeling loss',
+    'train_router_usage_log_interval': int(os.environ['TRAIN_ROUTER_USAGE_LOG_INTERVAL']),
+    'train_router_usage_log_path': os.environ['TRAIN_ROUTER_USAGE_LOG_PATH'],
     'moe_aux_loss_coeff': float(os.environ['MOE_AUX_LOSS_COEFF']),
     'moe_z_loss_coeff': float(os.environ['MOE_Z_LOSS_COEFF']),
     'micro_batch_size': int(os.environ['MICRO_BATCH_SIZE']),
@@ -286,6 +290,9 @@ torchrun \
     --train-iters "$TRAIN_ITERS" \
     --shared-router-hybrid-resume-from-num-experts "$SOURCE_NUM_EXPERTS" \
     --shared-router-hybrid-train-router-only \
+    --train-router-usage-log-interval "$TRAIN_ROUTER_USAGE_LOG_INTERVAL" \
+    --train-router-usage-log-path "$TRAIN_ROUTER_USAGE_LOG_PATH" \
+    --train-router-usage-num-existing-experts "$SOURCE_NUM_EXPERTS" \
     --seq-length "${SEQ_LENGTH:-512}" \
     --data-path $(build_data_path "$SSD_WIKI_TRAIN" "$SSD_CODE_TRAIN") \
     --split "$DATASET_SPLIT" \
