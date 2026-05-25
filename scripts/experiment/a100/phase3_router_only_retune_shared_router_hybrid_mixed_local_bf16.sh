@@ -23,6 +23,7 @@ export GPU_LOG="${GPU_LOG:-$LOG_DIR/phase3_gpu.log}"
 export RUN_METADATA="${RUN_METADATA:-$LOG_DIR/phase3_run_metadata.json}"
 export TRAIN_ROUTER_USAGE_LOG_INTERVAL="${TRAIN_ROUTER_USAGE_LOG_INTERVAL:-0}"
 export TRAIN_ROUTER_USAGE_LOG_PATH="${TRAIN_ROUTER_USAGE_LOG_PATH:-$LOG_DIR/train_router_usage.jsonl}"
+export SHARED_ROUTER_HYBRID_REINIT_ROUTER="${SHARED_ROUTER_HYBRID_REINIT_ROUTER:-0}"
 
 export SSD_MOUNT="${LOCAL_SSD_ROOT}/${RUN_ID}"
 export SSD_WIKI_TRAIN="${SSD_MOUNT}/dataset/wiki_train"
@@ -205,6 +206,7 @@ metadata = {
     'trainable': 'shared-router weights only',
     'frozen': 'all FFN experts, attention LoRA experts, dense trunk, embeddings, and output weights',
     'loss': 'standard final language-modeling loss',
+    'shared_router_hybrid_reinit_router': os.environ['SHARED_ROUTER_HYBRID_REINIT_ROUTER'] == '1',
     'train_router_usage_log_interval': int(os.environ['TRAIN_ROUTER_USAGE_LOG_INTERVAL']),
     'train_router_usage_log_path': os.environ['TRAIN_ROUTER_USAGE_LOG_PATH'],
     'moe_aux_loss_coeff': float(os.environ['MOE_AUX_LOSS_COEFF']),
@@ -249,6 +251,11 @@ if [ "$TRAIN_LOG_STEP_TIME_ONLY" = "1" ]; then
     LOG_STYLE_ARGS+=(--train-log-step-time-only)
 fi
 
+REINIT_ROUTER_ARGS=()
+if [ "$SHARED_ROUTER_HYBRID_REINIT_ROUTER" = "1" ]; then
+    REINIT_ROUTER_ARGS+=(--shared-router-hybrid-reinit-router)
+fi
+
 SAVE_ARGS=(
     --save "$SSD_TARGET_WEIGHTS"
     --save-interval "$SAVE_INTERVAL"
@@ -290,6 +297,7 @@ torchrun \
     --train-iters "$TRAIN_ITERS" \
     --shared-router-hybrid-resume-from-num-experts "$SOURCE_NUM_EXPERTS" \
     --shared-router-hybrid-train-router-only \
+    "${REINIT_ROUTER_ARGS[@]}" \
     --train-router-usage-log-interval "$TRAIN_ROUTER_USAGE_LOG_INTERVAL" \
     --train-router-usage-log-path "$TRAIN_ROUTER_USAGE_LOG_PATH" \
     --train-router-usage-num-existing-experts "$SOURCE_NUM_EXPERTS" \

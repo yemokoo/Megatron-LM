@@ -7,21 +7,30 @@ cd "$PROJECT_ROOT"
 
 usage() {
     cat >&2 <<'EOF'
-usage: run_g2_phase3_router_only_retune_mha.sh <exp1|exp2|all>
+usage: run_g2_phase3_router_only_retune_mha.sh <exp1|exp2|all> [no-reinit|router-reinit]
 
 Runs Phase 3 router-only retuning on a completed Phase 3 checkpoint copy.
 Use prepare_g2_phase3_copy.sh first. For exp2, run after Phase 1 reaches step 1800.
 EOF
 }
 
-if [ "$#" -ne 1 ]; then
+if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
     usage
     exit 1
 fi
 
 TARGET="$1"
+ROUTER_INIT="${2:-no-reinit}"
 case "$TARGET" in
     exp1|exp2|all)
+        ;;
+    *)
+        usage
+        exit 1
+        ;;
+esac
+case "$ROUTER_INIT" in
+    no-reinit|router-reinit)
         ;;
     *)
         usage
@@ -69,13 +78,13 @@ run_one() {
 
     case "$exp" in
         exp1)
-            run_id="g2-exp1-phase3-router-only-retune-wikicode-from-all-experts-router-no-reinit-mb72-1800"
-            exp_name="G2 - exp1 Phase 3 router-only retune wiki+code"
+            run_id="g2-exp1-phase3-router-only-retune-wikicode-from-all-experts-router-${ROUTER_INIT}-mb72-1800"
+            exp_name="G2 - exp1 Phase 3 router-only retune wiki+code (${ROUTER_INIT})"
             port="${MASTER_PORT_EXP1:-29761}"
             ;;
         exp2)
-            run_id="g2-exp2-phase3-router-only-retune-wikicode-from-new-experts-all-router-no-reinit-mb72-1800"
-            exp_name="G2 - exp2 Phase 3 router-only retune wiki+code"
+            run_id="g2-exp2-phase3-router-only-retune-wikicode-from-new-experts-all-router-${ROUTER_INIT}-mb72-1800"
+            exp_name="G2 - exp2 Phase 3 router-only retune wiki+code (${ROUTER_INIT})"
             port="${MASTER_PORT_EXP2:-29762}"
             ;;
         *)
@@ -87,7 +96,7 @@ run_one() {
     weights="$G2_ROOT/code/phase3/$run_id"
     if [ ! -f "$weights/latest_checkpointed_iteration.txt" ]; then
         echo "[ERROR] missing Phase 3 copy: $weights" >&2
-        echo "Run: scripts/experiment/a100/prepare_g2_phase3_copy.sh $exp no-reinit" >&2
+        echo "Run: scripts/experiment/a100/prepare_g2_phase3_copy.sh $exp $ROUTER_INIT" >&2
         exit 1
     fi
 
@@ -104,10 +113,19 @@ run_one() {
         echo "[SKIP] already at or past target: $weights latest=$latest_step target=$target_step"
         return
     fi
+    local reinit_flag=0
+    if [ "$ROUTER_INIT" = "router-reinit" ]; then
+        if [ "$latest_step" = "$base_step" ]; then
+            reinit_flag=1
+        else
+            echo "[CONFIG] router_init=router-reinit requested, but latest_step=${latest_step} > base_step=${base_step}; resuming without re-init"
+        fi
+    fi
 
     echo "[CONFIG] G2 $exp Phase 3 router-only retune"
     echo "[CONFIG] base_step=${base_step}, latest_step=${latest_step}, retune_iters=${RETUNE_ITERS}, target_step=${target_step}"
     echo "[CONFIG] data=wiki train + code train, loss=LM loss, trainable=shared router only"
+    echo "[CONFIG] router_init=${ROUTER_INIT}, reinit_on_this_launch=${reinit_flag}"
     echo "[CONFIG] weights=${weights}"
 
     env \
@@ -118,6 +136,7 @@ run_one() {
         WANDB_EXP_NAME="$exp_name" \
         WANDB_RUN_ID="$run_id" \
         MASTER_PORT="$port" \
+        SHARED_ROUTER_HYBRID_REINIT_ROUTER="$reinit_flag" \
         bash "$SCRIPT_DIR/run_guarded_training.sh" \
             bash "$SCRIPT_DIR/phase3_router_only_retune_shared_router_hybrid_mixed_local_bf16.sh"
 }
