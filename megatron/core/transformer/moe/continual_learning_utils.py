@@ -435,8 +435,8 @@ def freeze_all_but_attn_lora_router_params(model):
                 param.requires_grad = True
 
 
-def freeze_all_but_shared_router_params(model):
-    """Freeze a shared-router hybrid model except the MoE router weights."""
+def freeze_all_but_router_params(model):
+    """Freeze a model except MoE router weights."""
     for param in model.parameters():
         param.requires_grad = False
 
@@ -445,6 +445,11 @@ def freeze_all_but_shared_router_params(model):
             module.weight.requires_grad = True
             if getattr(module, "expert_bias", None) is not None:
                 module.expert_bias.requires_grad = True
+
+
+def freeze_all_but_shared_router_params(model):
+    """Freeze a shared-router hybrid model except the shared MoE router weights."""
+    freeze_all_but_router_params(model)
 
 
 def reinitialize_shared_router_params(model):

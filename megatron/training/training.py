@@ -71,6 +71,7 @@ from megatron.core.transformer.moe.continual_learning_utils import (
     freeze_all_but_attn_lora_router_params,
     freeze_all_but_new_moe_params,
     freeze_all_but_new_shared_router_params,
+    freeze_all_but_router_params,
     freeze_all_but_shared_router_params,
     freeze_preexisting_moe_params,
     inspect_moe_expansion,
@@ -1533,7 +1534,9 @@ def setup_model_and_optimizer(model_provider_func,
         source_unwrapped_model = unwrap_model(source_model)
         for target_shard, source_shard in zip(unwrapped_model, source_unwrapped_model):
             expand_moe_model(target_shard, source_shard, args.moe_expand_from_num_experts)
-            if args.moe_train_new_experts_and_router_only:
+            if args.moe_train_router_only:
+                freeze_all_but_router_params(target_shard)
+            elif args.moe_train_new_experts_and_router_only:
                 freeze_all_but_new_moe_params(
                     target_shard,
                     args.moe_expand_from_num_experts,
@@ -1811,7 +1814,9 @@ def setup_model_and_optimizer(model_provider_func,
                 '--moe-resume-from-num-experts must be smaller than --num-experts.'
             )
             for target_shard in unwrapped_model:
-                if args.moe_train_new_experts_and_router_only:
+                if args.moe_train_router_only:
+                    freeze_all_but_router_params(target_shard)
+                elif args.moe_train_new_experts_and_router_only:
                     freeze_all_but_new_moe_params(
                         target_shard,
                         args.moe_resume_from_num_experts,

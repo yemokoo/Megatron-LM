@@ -6,6 +6,7 @@ from megatron.core.transformer.moe.continual_learning_utils import (
     allow_existing_router_grads,
     freeze_all_but_new_moe_params,
     freeze_all_but_new_shared_router_params,
+    freeze_all_but_router_params,
     freeze_all_but_shared_router_params,
     teacher_student_router_kl,
 )
@@ -156,6 +157,26 @@ def test_freeze_all_but_shared_router_params_trains_only_router_weights():
     model = RouterLoraAndGroupedExpertsModel()
 
     freeze_all_but_shared_router_params(model)
+
+    model.zero_grad(set_to_none=True)
+    _trainable_expert_and_router_loss(model).backward()
+
+    assert torch.all(model.router.weight.grad == 1)
+    assert model.ffn_experts.weight1.grad is None
+    assert model.ffn_experts.weight2.grad is None
+    for param in model.attn_lora_experts.parameters():
+        assert not param.requires_grad
+        assert param.grad is None
+    assert not model.q_full_rank_lora.weight.requires_grad
+    assert model.q_full_rank_lora.weight.grad is None
+    assert not model.dense.weight.requires_grad
+    assert model.dense.weight.grad is None
+
+
+def test_freeze_all_but_router_params_trains_only_generic_moe_router_weights():
+    model = RouterLoraAndGroupedExpertsModel()
+
+    freeze_all_but_router_params(model)
 
     model.zero_grad(set_to_none=True)
     _trainable_expert_and_router_loss(model).backward()

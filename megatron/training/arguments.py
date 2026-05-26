@@ -744,6 +744,21 @@ def validate_args(args, defaults={}):
         assert args.spec is None or args.shared_router_hybrid_model, (
             "Model Spec must be None when using MoEs unless --shared-router-hybrid-model is set"
         )
+    moe_train_modes = [
+        args.moe_train_new_experts_and_router_only,
+        args.moe_train_router_only,
+    ]
+    assert sum(bool(mode) for mode in moe_train_modes) <= 1, (
+        "Only one generic MoE train-freeze mode can be enabled at a time."
+    )
+    if args.moe_train_router_only:
+        assert (
+            args.moe_expand_from_num_experts is not None
+            or args.moe_resume_from_num_experts is not None
+        ), (
+            "--moe-train-router-only requires --moe-expand-from-num-experts "
+            "or --moe-resume-from-num-experts."
+        )
     shared_router_hybrid_train_modes = [
         args.shared_router_hybrid_train_new_experts_and_router_only,
         args.shared_router_hybrid_train_all_experts_and_router_only,
@@ -2434,6 +2449,8 @@ def _add_moe_args(parser):
                        help='Freeze the copied router rows when --moe-expand-from-num-experts is used.')
     group.add_argument('--moe-train-new-experts-and-router-only', action='store_true',
                        help='When expanding from a smaller MoE checkpoint, freeze every parameter except the newly added experts and the trainable portion of the expanded router.')
+    group.add_argument('--moe-train-router-only', action='store_true',
+                       help='When expanding or resuming an expanded MoE checkpoint, freeze every parameter except the MoE router weights. Intended for router-only retuning with fixed experts.')
     group.add_argument('--moe-train-attention-with-new-experts', action='store_true',
                        help='With --moe-train-new-experts-and-router-only, also keep self-attention parameters trainable while the rest of the shared trunk remains frozen.')
     group.add_argument('--moe-resume-from-num-experts', type=int, default=None,
