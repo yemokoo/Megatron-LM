@@ -1003,13 +1003,17 @@ class SharedRouterHybridTransformerLayer(MegatronModule, BaseTransformerLayer):
         self.mlp_bda = build_module(submodules.mlp_bda)
         self.bias_dropout_add_exec_handler = torch.enable_grad
 
-    def _compute_shared_routing(self, hidden_states: torch.Tensor) -> SharedRoutingContext:
-        if self.shared_expert_router is None:
-            raise ValueError("Shared routing requested for a layer without shared experts.")
-        if _SHARED_ROUTER_INPUT_CAPTURE_STACK:
-            _SHARED_ROUTER_INPUT_CAPTURE_STACK[-1].append(
-                (self.layer_number, hidden_states.detach())
-            )
+    def _compute_routing(
+        self,
+        hidden_states: torch.Tensor,
+        router: TopKRouter,
+        *,
+        capture: bool = True,
+    ) -> SharedRoutingContext:
+        if router is None:
+            raise ValueError("Routing requested for a layer without experts.")
+        if capture and _SHARED_ROUTER_INPUT_CAPTURE_STACK:
+            _SHARED_ROUTER_INPUT_CAPTURE_STACK[-1].append((self.layer_number, hidden_states.detach()))
 
         if (
             self.training
@@ -1034,7 +1038,7 @@ class SharedRouterHybridTransformerLayer(MegatronModule, BaseTransformerLayer):
                     "--shared-router-hybrid-topk-with-all-new-experts does not support "
                     "expert capacity token dropping."
                 )
-            if self.shared_expert_router.score_function != "softmax":
+            if router.score_function != "softmax":
                 raise ValueError(
                     "--shared-router-hybrid-topk-with-all-new-experts requires "
                     "moe_router_score_function=softmax."
@@ -1049,10 +1053,10 @@ class SharedRouterHybridTransformerLayer(MegatronModule, BaseTransformerLayer):
                     "--shared-router-hybrid-topk-with-all-new-experts is enabled."
                 )
 
-            router_input = self.shared_expert_router.apply_input_jitter(hidden_states)
-            logits = self.shared_expert_router.gating(router_input)
+            router_input = router.apply_input_jitter(hidden_states)
+            logits = router.gating(router_input)
             logits = logits.view(-1, self.config.num_moe_experts)
-            logits = self.shared_expert_router.apply_z_loss(logits)
+            logits = router.apply_z_loss(logits)
             scores, routing_map = topk_with_all_new_experts_routing(
                 logits,
                 self.config.moe_router_topk,
@@ -1066,14 +1070,14 @@ class SharedRouterHybridTransformerLayer(MegatronModule, BaseTransformerLayer):
                     tokens_per_expert=routing_map.sum(dim=0),
                     topk=self.config.moe_router_topk,
                 )
-                scores = self.shared_expert_router.apply_load_balancing_loss(
+                scores = router.apply_load_balancing_loss(
                     activation=scores,
                     load_balancing_loss_func=aux_loss_func,
                 )
         else:
-            scores, routing_map = self.shared_expert_router(hidden_states)
+            scores, routing_map = router(hidden_states)
 
-        if _SHARED_ROUTER_ROUTING_CAPTURE_STACK:
+        if capture and _SHARED_ROUTER_ROUTING_CAPTURE_STACK:
             _SHARED_ROUTER_ROUTING_CAPTURE_STACK[-1].append(
                 (self.layer_number, routing_map.detach())
             )
@@ -1108,6 +1112,11 @@ class SharedRouterHybridTransformerLayer(MegatronModule, BaseTransformerLayer):
             sorted_token_indices=sorted_token_indices,
             permuted_scores=permuted_scores,
         )
+
+    def _compute_shared_routing(self, hidden_states: torch.Tensor) -> SharedRoutingContext:
+        if self.shared_expert_router is None:
+            raise ValueError("Shared routing requested for a layer without shared experts.")
+        return self._compute_routing(hidden_states, self.shared_expert_router)
 
     def forward(
         self,
@@ -1198,3 +1207,116 @@ class SharedRouterHybridTransformerLayer(MegatronModule, BaseTransformerLayer):
 
     def __call__(self, *args, **kwargs):
         return super(MegatronModule, self).__call__(*args, **kwargs)
+
+
+class TwoRouterHybridTransformerLayer(SharedRouterHybridTransformerLayer):
+    """Hybrid expert layer with independent attention and FFN routers.
+
+    Attention experts are routed from the attention LN input. FFN experts are routed
+    later from the FFN LN input, after the attention residual has been applied.
+    """
+
+    def __init__(
+        self,
+        config: TransformerConfig,
+        submodules: SharedRouterHybridLayerSubmodules,
+        layer_number: int = 1,
+        hidden_dropout: float = None,
+    ):
+        super().__init__(config, submodules, layer_number, hidden_dropout)
+        if self.is_moe_layer:
+            # Replace the single shared router with two independent routers. The
+            # experts and ranks remain identical to the original G2 setup.
+            self.shared_expert_router = None
+            self.attn_expert_router = TopKRouter(config=self.config)
+            self.attn_expert_router.set_layer_number(self.layer_number)
+            self.ffn_expert_router = TopKRouter(config=self.config)
+            self.ffn_expert_router.set_layer_number(self.layer_number)
+        else:
+            self.attn_expert_router = None
+            self.ffn_expert_router = None
+
+    def forward(
+        self,
+        hidden_states,
+        attention_mask=None,
+        context=None,
+        context_mask=None,
+        rotary_pos_emb=None,
+        rotary_pos_cos=None,
+        rotary_pos_sin=None,
+        attention_bias=None,
+        inference_params=None,
+        packed_seq_params=None,
+        sequence_len_offset=None,
+    ):
+        residual = hidden_states
+        input_layernorm_output = self.input_layernorm(hidden_states)
+        attn_routing_context = (
+            self._compute_routing(input_layernorm_output, self.attn_expert_router)
+            if self.is_moe_layer
+            else None
+        )
+
+        attention_output_with_bias = self.self_attention(
+            input_layernorm_output,
+            attention_mask=attention_mask,
+            inference_params=inference_params,
+            rotary_pos_emb=rotary_pos_emb,
+            rotary_pos_cos=rotary_pos_cos,
+            rotary_pos_sin=rotary_pos_sin,
+            attention_bias=attention_bias,
+            packed_seq_params=packed_seq_params,
+            sequence_len_offset=sequence_len_offset,
+            routing_context=attn_routing_context,
+        )
+
+        with self.bias_dropout_add_exec_handler():
+            hidden_states = self.self_attn_bda(self.training, self.config.bias_dropout_fusion)(
+                attention_output_with_bias, residual, self.hidden_dropout
+            )
+
+        residual = hidden_states
+        pre_cross_attn_layernorm_output = self.pre_cross_attn_layernorm(hidden_states)
+        attention_output_with_bias = self.cross_attention(
+            pre_cross_attn_layernorm_output,
+            attention_mask=context_mask,
+            key_value_states=context,
+            inference_params=inference_params,
+        )
+
+        if isinstance(attention_output_with_bias, dict) and "context" in attention_output_with_bias:
+            context = attention_output_with_bias["context"]
+
+        with self.bias_dropout_add_exec_handler():
+            hidden_states = self.cross_attn_bda(self.training, self.config.bias_dropout_fusion)(
+                attention_output_with_bias, residual, self.hidden_dropout
+            )
+
+        residual = hidden_states
+        pre_mlp_layernorm_output = self.pre_mlp_layernorm(hidden_states)
+        if self.is_moe_layer:
+            ffn_routing_context = self._compute_routing(
+                pre_mlp_layernorm_output,
+                self.ffn_expert_router,
+                capture=False,
+            )
+            mlp_output_with_bias = self.mlp(
+                pre_mlp_layernorm_output,
+                routing_context=ffn_routing_context,
+            )
+        else:
+            mlp_output_with_bias = self.mlp(pre_mlp_layernorm_output)
+
+        with self.bias_dropout_add_exec_handler():
+            hidden_states = self.mlp_bda(self.training, self.config.bias_dropout_fusion)(
+                mlp_output_with_bias, residual, self.hidden_dropout
+            )
+
+        output = make_viewless_tensor(
+            inp=hidden_states, requires_grad=hidden_states.requires_grad, keep_graph=True
+        )
+
+        if self.config.external_cuda_graph and self.training:
+            return output
+        return output, context

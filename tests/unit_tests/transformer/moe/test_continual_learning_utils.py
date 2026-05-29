@@ -1,9 +1,11 @@
 # Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
 
 import torch
+from types import MethodType
 
 from megatron.core.transformer.moe.continual_learning_utils import (
     allow_existing_router_grads,
+    expand_moe_model,
     freeze_all_but_new_moe_params,
     freeze_all_but_new_shared_router_params,
     freeze_all_but_router_params,
@@ -14,6 +16,8 @@ from megatron.core.transformer.moe.experts import GroupedMLP
 from megatron.core.transformer.moe.router import TopKRouter
 from megatron.core.transformer.shared_router_hybrid import (
     SharedFullRankLoraExperts,
+    SharedRouterHybridTransformerLayer,
+    TwoRouterHybridTransformerLayer,
     topk_with_all_new_experts_routing,
 )
 from megatron.core.transformer.transformer_config import TransformerConfig
@@ -79,6 +83,135 @@ class RouterLoraAndGroupedExpertsModel(torch.nn.Module):
         self.ffn_experts = MinimalGroupedMLP(num_experts=num_experts, hidden_size=hidden_size)
         self.q_full_rank_lora = torch.nn.Linear(hidden_size, hidden_size)
         self.dense = torch.nn.Linear(hidden_size, hidden_size)
+
+
+class ConstantOutput(torch.nn.Module):
+    def __init__(self, value):
+        super().__init__()
+        self.register_buffer("value", value.clone())
+
+    def forward(self, hidden_states):
+        return self.value.to(hidden_states.device, hidden_states.dtype)
+
+
+class RecordingAttention(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.routing_context = None
+
+    def forward(self, hidden_states, **kwargs):
+        self.routing_context = kwargs.get("routing_context")
+        return torch.zeros_like(hidden_states)
+
+
+class ZeroCrossAttention(torch.nn.Module):
+    def forward(self, hidden_states, **kwargs):
+        return torch.zeros_like(hidden_states)
+
+
+class RecordingMlp(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.routing_context = None
+
+    def forward(self, hidden_states, routing_context=None):
+        self.routing_context = routing_context
+        return torch.zeros_like(hidden_states)
+
+
+class TwoRouterOnlyModel(torch.nn.Module):
+    def __init__(self, num_experts=8, hidden_size=8):
+        super().__init__()
+        config = _two_router_test_config(num_experts=num_experts, hidden_size=hidden_size)
+        self.attn_expert_router = TopKRouter(config)
+        self.ffn_expert_router = TopKRouter(config)
+
+
+def _two_router_test_config(num_experts=8, hidden_size=8, topk=4):
+    return TransformerConfig(
+        num_layers=1,
+        hidden_size=hidden_size,
+        num_attention_heads=1,
+        num_moe_experts=num_experts,
+        moe_router_topk=topk,
+        moe_router_load_balancing_type="none",
+        moe_router_pre_softmax=True,
+        moe_router_score_function="softmax",
+        moe_aux_loss_coeff=0.0,
+        moe_z_loss_coeff=None,
+        attn_lora_num_experts=num_experts,
+        attn_lora_topk=topk,
+        use_cpu_initialization=True,
+        params_dtype=torch.float32,
+    )
+
+
+def _bda_no_dropout(training, bias_dropout_fusion):
+    def inner(output_with_bias, residual, hidden_dropout):
+        return residual + output_with_bias
+
+    return inner
+
+
+def _force_cpu_router_forward(router):
+    def cpu_forward(self, input):
+        logits = torch.nn.functional.linear(input.float(), self.weight.float())
+        return self.routing(logits)
+
+    router.forward = MethodType(cpu_forward, router)
+
+
+def _build_two_router_forward_harness():
+    config = _two_router_test_config()
+    layer = TwoRouterHybridTransformerLayer.__new__(TwoRouterHybridTransformerLayer)
+    torch.nn.Module.__init__(layer)
+    layer.config = config
+    layer.layer_number = 1
+    layer.hidden_dropout = 0.0
+    layer.is_moe_layer = True
+    layer.training = False
+    layer.bias_dropout_add_exec_handler = torch.enable_grad
+    layer.attn_expert_router = TopKRouter(config)
+    layer.ffn_expert_router = TopKRouter(config)
+    layer.shared_expert_router = None
+    _force_cpu_router_forward(layer.attn_expert_router)
+    _force_cpu_router_forward(layer.ffn_expert_router)
+
+    attn_input = torch.tensor([[9.0, 8.0, 7.0, 6.0, 0.0, 0.0, 0.0, 0.0]])
+    ffn_input = torch.tensor([[0.0, 0.0, 0.0, 0.0, 9.0, 8.0, 7.0, 6.0]])
+    layer.input_layernorm = ConstantOutput(attn_input)
+    layer.pre_cross_attn_layernorm = torch.nn.Identity()
+    layer.pre_mlp_layernorm = ConstantOutput(ffn_input)
+    layer.self_attention = RecordingAttention()
+    layer.cross_attention = ZeroCrossAttention()
+    layer.mlp = RecordingMlp()
+    layer.self_attn_bda = _bda_no_dropout
+    layer.cross_attn_bda = _bda_no_dropout
+    layer.mlp_bda = _bda_no_dropout
+
+    with torch.no_grad():
+        identity_router_weight = torch.eye(8)
+        layer.attn_expert_router.weight.copy_(identity_router_weight)
+        layer.ffn_expert_router.weight.copy_(identity_router_weight)
+
+    records = []
+
+    def record_compute_routing(self, hidden_states, router, *, capture=True):
+        records.append(
+            {
+                "router": "attn" if router is self.attn_expert_router else "ffn",
+                "input": hidden_states.detach().clone(),
+            }
+        )
+        return SharedRouterHybridTransformerLayer._compute_routing(
+            self,
+            hidden_states,
+            router,
+            capture=capture,
+        )
+
+    layer._compute_routing = MethodType(record_compute_routing, layer)
+    return layer, attn_input, ffn_input, records
 
 
 def _backward_router_weight_sum(model):
@@ -363,3 +496,54 @@ def test_topk_with_all_new_experts_does_not_duplicate_new_topk_experts():
 
     assert torch.equal(routing_map, torch.tensor([[False, False, False, False, True, True]]))
     assert torch.allclose(scores, torch.softmax(logits.float(), dim=-1) * routing_map.float())
+
+
+def test_g2_2router_forward_uses_independent_attn_and_ffn_router_inputs():
+    layer, attn_input, ffn_input, records = _build_two_router_forward_harness()
+
+    output, context = TwoRouterHybridTransformerLayer.forward(layer, torch.zeros_like(attn_input))
+
+    attn_record, ffn_record = records
+    attn_map = layer.self_attention.routing_context.routing_map
+    ffn_map = layer.mlp.routing_context.routing_map
+
+    assert context is None
+    assert torch.equal(output, torch.zeros_like(attn_input))
+    assert attn_record["router"] == "attn"
+    assert ffn_record["router"] == "ffn"
+    assert torch.equal(attn_record["input"], attn_input)
+    assert torch.equal(ffn_record["input"], ffn_input)
+    assert layer.attn_expert_router is not layer.ffn_expert_router
+    assert torch.equal(attn_map, torch.tensor([[True, True, True, True, False, False, False, False]]))
+    assert torch.equal(ffn_map, torch.tensor([[False, False, False, False, True, True, True, True]]))
+    assert torch.all(attn_map.sum(dim=-1) == 4)
+    assert torch.all(ffn_map.sum(dim=-1) == 4)
+    assert not torch.equal(attn_map, ffn_map)
+    print("[g2-2router] OK: attn router uses LN_attn(x), FFN router uses LN_ffn(h), top4 differs")
+
+
+def test_g2_2router_code_expansion_copies_both_router_existing_rows():
+    source = TwoRouterOnlyModel(num_experts=8, hidden_size=8)
+    target = TwoRouterOnlyModel(num_experts=16, hidden_size=8)
+
+    with torch.no_grad():
+        source.attn_expert_router.weight.copy_(torch.arange(64, dtype=torch.float32).view(8, 8))
+        source.ffn_expert_router.weight.copy_(
+            torch.arange(1000, 1064, dtype=torch.float32).view(8, 8)
+        )
+        target.attn_expert_router.weight.fill_(-1.0)
+        target.ffn_expert_router.weight.fill_(-2.0)
+
+    expand_moe_model(target, source, num_existing_experts=8)
+
+    assert torch.equal(
+        target.attn_expert_router.weight[:8],
+        source.attn_expert_router.weight,
+    )
+    assert torch.equal(
+        target.ffn_expert_router.weight[:8],
+        source.ffn_expert_router.weight,
+    )
+    assert torch.all(target.attn_expert_router.weight[8:] == -1.0)
+    assert torch.all(target.ffn_expert_router.weight[8:] == -2.0)
+    print("[g2-2router] OK: code expansion copies existing rows for both added routers")
