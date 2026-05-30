@@ -126,6 +126,7 @@ fi
 mkdir -p "$SSD_WIKI_TRAIN" "$SSD_CODE_TRAIN" "$SSD_TARGET_WEIGHTS" "$TRAIN_WEIGHTS" "$LOG_DIR"
 exec > >(
     tee -a "$RUN_LOG" | "$PYTHON_BIN" -u -c '
+import datetime as dt
 import re, sys
 iter_re = re.compile(r"(\[[^]]+\]) iteration\s+(\d+)/\s*(\d+)")
 ms_re = re.compile(r"elapsed time per iteration \(ms\):\s*([0-9.]+)")
@@ -134,14 +135,24 @@ loss_re = re.compile(r"\blm loss:\s*([0-9.E+-]+)")
 val_re = re.compile(r"validation loss at iteration\s+(\d+).*lm loss value:\s*([^|]+)")
 save_re = re.compile(r"saving checkpoint at iteration\s+(\d+)")
 keep_re = re.compile(r"phase3|shared-router hybrid|router-only|ERROR:|Traceback|failed \(exitcode|checkpoint at|probe ")
+recent_ms = []
 for line in sys.stdin:
     line = line.rstrip("\n")
     m = iter_re.search(line)
     if m:
-        parts = [f"{m.group(1)} step {m.group(2)}/{m.group(3)}"]
+        step = int(m.group(2))
+        total = int(m.group(3))
+        parts = [f"{m.group(1)} step {step}/{total}"]
         ms = ms_re.search(line)
         if ms:
-            parts.append(f"{float(ms.group(1)):.1f} ms/iter")
+            ms_value = float(ms.group(1))
+            recent_ms.append(ms_value)
+            recent_ms[:] = recent_ms[-5:]
+            avg_ms = sum(recent_ms) / len(recent_ms)
+            eta = dt.datetime.now() + dt.timedelta(seconds=max(0, total - step) * avg_ms / 1000.0)
+            parts.append(f"{ms_value:.1f} ms/iter")
+            parts.append(f"avg5 {avg_ms:.1f} ms/iter")
+            parts.append(f"eta {eta:%Y-%m-%d %H:%M:%S}")
         loss = loss_re.search(line)
         if loss:
             parts.append(f"lm loss {loss.group(1)}")
