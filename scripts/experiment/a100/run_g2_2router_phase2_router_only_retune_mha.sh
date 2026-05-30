@@ -16,7 +16,7 @@ export LOG_INTERVAL="${LOG_INTERVAL:-20}"
 export MICRO_BATCH_SIZE="${MICRO_BATCH_SIZE:-72}"
 export GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-2304}"
 export G2_2R_ROOT="${G2_2R_ROOT:-$PROJECT_ROOT/.local/weights/a100/mha/g2-2router}"
-export TOKENIZER_MODEL="${TOKENIZER_MODEL:-/home/work/.cache/huggingface/hub/models--EleutherAI--pythia-12b/snapshots/bb1e3e710cdf6b524461d543cfb5ba773f0a81b6}"
+export TOKENIZER_MODEL="${TOKENIZER_MODEL:-EleutherAI/pythia-12b}"
 
 export SOURCE_NUM_EXPERTS="${SOURCE_NUM_EXPERTS:-8}"
 export NUM_EXPERTS="${NUM_EXPERTS:-16}"
