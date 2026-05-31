@@ -33,8 +33,9 @@ export MODEL_CONFIG_SCRIPT="${MODEL_CONFIG_SCRIPT:-scripts/experiment/a100/flame
 
 WIKI_REGISTRY="$G2_ROOT/wiki/g2matched-top4-e8-ffn352-wiki-ffn-moe-mha-a100-bf16-mb128-1800"
 WIKI_ORIGINAL="$BASE_WEIGHTS_DIR/wiki-a-moe-g2matched-bf16/g2matched-top4-e8-ffn352-wiki-ffn-moe-mha-a100-bf16-mb128-1800"
-CODE_DIR="$G2_ROOT/code/g2matched/g2matched-top4-e8to16-ffn352-wiki-to-code-ffn-moe-attn-freeze-mha-a100-bf16-mb96-1800"
-RETUNE_DIR="$G2_ROOT/code/phase3/g2matched-attn-freeze-phase3-router-only-retune-wikicode-no-reinit-mb96-1800"
+CODE_REGISTRY="$G2_ROOT/code/g2matched/g2matched-top4-e8to16-ffn352-wiki-to-code-ffn-moe-attn-freeze-mha-a100-bf16-mb96-1800"
+CODE_ORIGINAL="$BASE_WEIGHTS_DIR/g2matched-ffn-moe-attn-freeze-bf16/g2matched-top4-e8to16-ffn352-wiki-to-code-ffn-moe-attn-freeze-mha-a100-bf16-mb96-1800"
+RETUNE_DEFAULT="$G2_ROOT/code/phase3/g2matched-attn-freeze-phase3-router-only-retune-wikicode-no-reinit-mb96-1800"
 WIKI_PROBE_PREFIX="$PROJECT_ROOT/data/wiki/test/test_text_document"
 
 pick_existing_dir() {
@@ -63,7 +64,9 @@ require_checkpoint() {
     fi
 }
 
-WIKI_DIR="$(pick_existing_dir "$WIKI_REGISTRY" "$WIKI_ORIGINAL")"
+WIKI_DIR="${WIKI_DIR:-$(pick_existing_dir "$WIKI_REGISTRY" "$WIKI_ORIGINAL")}"
+CODE_DIR="${CODE_DIR:-$(pick_existing_dir "$CODE_REGISTRY" "$CODE_ORIGINAL")}"
+RETUNE_DIR="${RETUNE_DIR:-$RETUNE_DEFAULT}"
 require_checkpoint "$CODE_DIR" "code-trained"
 require_checkpoint "$RETUNE_DIR" "router-retuned"
 
