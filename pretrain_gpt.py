@@ -3,6 +3,7 @@
 
 import math
 import os
+import json
 import torch
 import torch.nn.functional as F
 from functools import partial
@@ -32,6 +33,7 @@ from megatron.training.utils import (
     get_batch_on_this_cp_rank,
     get_batch_on_this_tp_rank,
     get_blend_and_blend_per_split,
+    unwrap_model,
 )
 from megatron.training.arguments import core_transformer_config_from_args
 from megatron.training.yaml_arguments import core_transformer_config_from_yaml
@@ -664,6 +666,183 @@ def _finalize_probe_router_usage(totals, hist_totals, denom):
     return reporting
 
 
+def _parse_hidden_space_layers(layer_spec, available_layers):
+    if layer_spec is None or layer_spec == "" or layer_spec.lower() == "all":
+        return {int(layer.layer_number) for layer in available_layers}
+    selected = set()
+    for value in layer_spec.split(","):
+        value = value.strip()
+        if not value:
+            continue
+        selected.add(int(value))
+    return selected
+
+
+def _collect_transformer_layers(modules, layer_spec):
+    layers = []
+    for module in unwrap_model(modules):
+        decoder = getattr(module, "decoder", None)
+        module_layers = getattr(decoder, "layers", None)
+        if module_layers is None:
+            continue
+        layers.extend(list(module_layers))
+
+    selected = _parse_hidden_space_layers(layer_spec, layers)
+    return [(int(layer.layer_number), layer) for layer in layers if int(layer.layer_number) in selected]
+
+
+def _layer_output_tensor(output):
+    if isinstance(output, tuple):
+        output = output[0]
+    if isinstance(output, dict):
+        output = output.get("hidden_states")
+    if not torch.is_tensor(output):
+        raise RuntimeError(f"Unsupported transformer layer output type for hidden dump: {type(output)}")
+    return output
+
+
+def _flatten_layer_hidden(hidden_states, labels):
+    # Transformer layers use [seq, batch, hidden], while labels use [batch, seq].
+    if hidden_states.dim() != 3:
+        raise RuntimeError(f"Unexpected hidden state shape: {tuple(hidden_states.shape)}")
+    if hidden_states.shape[0] == labels.shape[1] and hidden_states.shape[1] == labels.shape[0]:
+        return hidden_states.permute(1, 0, 2).contiguous().view(-1, hidden_states.shape[-1])
+    if hidden_states.shape[0] == labels.shape[0] and hidden_states.shape[1] == labels.shape[1]:
+        return hidden_states.contiguous().view(-1, hidden_states.shape[-1])
+    raise RuntimeError(
+        f"Could not align hidden states {tuple(hidden_states.shape)} with labels {tuple(labels.shape)}"
+    )
+
+
+def _run_hidden_space_dump(model, iteration):
+    args = get_args()
+    dump_path = getattr(args, "hidden_space_dump_path", None)
+    if not dump_path:
+        return False
+    if args.pipeline_model_parallel_size != 1:
+        raise RuntimeError("--hidden-space-dump-path currently requires pipeline parallel size 1.")
+    if args.probe_eval_iters <= 0 or not args.probe_data_path:
+        raise RuntimeError("Hidden-space dump requires --probe-data-path and --probe-eval-iters > 0.")
+
+    modules = model if isinstance(model, list) else [model]
+    layer_modules = _collect_transformer_layers(modules, args.hidden_space_dump_layers)
+    if not layer_modules:
+        raise RuntimeError("No transformer layers found for hidden-space dump.")
+
+    dataloader = _build_probe_dataloader(args.probe_data_path, args.probe_eval_iters, "hidden_space_dump")
+    if dataloader is None:
+        raise RuntimeError("Could not build hidden-space probe dataloader.")
+
+    prior_states = [module.training for module in modules]
+    for module in modules:
+        module.eval()
+
+    captured = {}
+    handles = []
+    layer_chunks = {layer_number: [] for layer_number, _ in layer_modules}
+    selected_token_ids = []
+    selected_positions = []
+    selected_sample_indices = []
+    total_tokens = 0
+    max_tokens = max(1, int(args.hidden_space_dump_max_tokens))
+
+    def make_hook(layer_number):
+        def hook(_module, _inputs, output):
+            captured[layer_number] = _layer_output_tensor(output).detach()
+        return hook
+
+    for layer_number, layer in layer_modules:
+        handles.append(layer.register_forward_hook(make_hook(layer_number)))
+
+    try:
+        with torch.no_grad():
+            probe_iterator = iter(dataloader)
+            for _ in range(args.probe_eval_iters):
+                if total_tokens >= max_tokens:
+                    break
+                tokens, labels, loss_mask, attention_mask, position_ids = get_batch(probe_iterator)
+                captured.clear()
+                _ = modules[0](
+                    tokens,
+                    position_ids,
+                    attention_mask,
+                    labels=None,
+                    runtime_gather_output=True,
+                )
+
+                flat_mask = loss_mask.reshape(-1).bool()
+                candidate_indices = torch.nonzero(flat_mask, as_tuple=False).view(-1)
+                if candidate_indices.numel() == 0:
+                    continue
+                remaining = max_tokens - total_tokens
+                candidate_indices = candidate_indices[:remaining]
+
+                flat_tokens = tokens.reshape(-1)
+                batch_size, seq_length = labels.shape
+                selected_token_ids.append(flat_tokens[candidate_indices].detach().cpu())
+                selected_positions.append((candidate_indices % seq_length).detach().cpu())
+                selected_sample_indices.append((candidate_indices // seq_length).detach().cpu())
+
+                for layer_number, _layer in layer_modules:
+                    if layer_number not in captured:
+                        raise RuntimeError(f"Layer {layer_number} was not captured during hidden dump.")
+                    flat_hidden = _flatten_layer_hidden(captured[layer_number], labels)
+                    layer_chunks[layer_number].append(
+                        flat_hidden[candidate_indices].float().detach().cpu()
+                    )
+                total_tokens += int(candidate_indices.numel())
+    finally:
+        for handle in handles:
+            handle.remove()
+        for module, was_training in zip(modules, prior_states):
+            if was_training:
+                module.train()
+
+    if total_tokens <= 0:
+        raise RuntimeError("Hidden-space dump captured zero valid tokens.")
+
+    layer_numbers = [layer_number for layer_number, _ in layer_modules]
+    hidden_layers = torch.stack(
+        [torch.cat(layer_chunks[layer_number], dim=0) for layer_number in layer_numbers],
+        dim=0,
+    ).numpy()
+    token_ids = torch.cat(selected_token_ids, dim=0).numpy()
+    positions = torch.cat(selected_positions, dim=0).numpy()
+    sample_indices = torch.cat(selected_sample_indices, dim=0).numpy()
+
+    metadata = {
+        "label": args.hidden_space_dump_label or "",
+        "iteration": int(iteration),
+        "probe_data_path": list(args.probe_data_path),
+        "probe_eval_iters": int(args.probe_eval_iters),
+        "max_tokens": int(max_tokens),
+        "captured_tokens": int(total_tokens),
+        "layer_numbers": layer_numbers,
+        "hidden_shape": list(hidden_layers.shape),
+        "load": getattr(args, "load", None),
+    }
+
+    if torch.distributed.get_rank() == 0:
+        import numpy as np
+
+        os.makedirs(os.path.dirname(os.path.abspath(dump_path)), exist_ok=True)
+        np.savez_compressed(
+            dump_path,
+            hidden_layers=hidden_layers,
+            layer_numbers=np.asarray(layer_numbers, dtype=np.int64),
+            token_ids=token_ids,
+            positions=positions,
+            sample_indices=sample_indices,
+            metadata=json.dumps(metadata, ensure_ascii=False),
+        )
+        print_rank_0(
+            f"hidden-space dump saved: {dump_path} | "
+            f"layers={layer_numbers} | tokens={total_tokens}"
+        )
+    torch.distributed.barrier()
+    return True
+
+
 def _run_single_probe_evaluation(
     model,
     iteration,
@@ -791,6 +970,8 @@ def _run_single_probe_evaluation(
 
 def run_probe_evaluation(model, iteration):
     args = get_args()
+    if _run_hidden_space_dump(model, iteration):
+        return
     if args.probe_eval_interval and iteration % args.probe_eval_interval == 0:
         _run_single_probe_evaluation(
             model,

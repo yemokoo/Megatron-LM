@@ -2702,4 +2702,14 @@ def _add_experimental_args(parser):
     group.add_argument('--train-log-step-time-only', action='store_true',
                        help='Print compact training progress logs with only step progress and '
                             'iteration timing, while keeping tensorboard/W&B logging unchanged.')
+    group.add_argument('--hidden-space-dump-path', type=str, default=None,
+                       help='If set, run the primary probe dataloader once during initial probe '
+                            'evaluation, capture transformer layer hidden states, save them to this '
+                            '.npz file, and skip normal probe metric logging.')
+    group.add_argument('--hidden-space-dump-label', type=str, default=None,
+                       help='Human-readable stage label stored in --hidden-space-dump-path output.')
+    group.add_argument('--hidden-space-dump-max-tokens', type=int, default=2048,
+                       help='Maximum valid probe tokens to store for hidden-space visualization.')
+    group.add_argument('--hidden-space-dump-layers', type=str, default='all',
+                       help='Comma-separated 1-based transformer layer numbers to capture, or all.')
     return parser
