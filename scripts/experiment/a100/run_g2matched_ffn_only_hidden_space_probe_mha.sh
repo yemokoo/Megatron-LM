@@ -25,6 +25,12 @@ export MOE_LAYER_FREQ="${MOE_LAYER_FREQ:-[0]*1+[1]*8}"
 export MOE_ROUTER_TOPK="${MOE_ROUTER_TOPK:-4}"
 export MICRO_BATCH_SIZE="${MICRO_BATCH_SIZE:-8}"
 export GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-8}"
+export LR="${LR:-3e-4}"
+export MIN_LR="${MIN_LR:-3e-5}"
+export LR_DECAY_STYLE="${LR_DECAY_STYLE:-WSD}"
+export LR_DECAY_ITERS="${LR_DECAY_ITERS:-1}"
+export LR_WARMUP_FRACTION="${LR_WARMUP_FRACTION:-0.0}"
+export LR_WSD_DECAY_ITERS="${LR_WSD_DECAY_ITERS:-1}"
 export PROBE_EVAL_ITERS="${PROBE_EVAL_ITERS:-4}"
 export HIDDEN_SPACE_MAX_TOKENS="${HIDDEN_SPACE_MAX_TOKENS:-2048}"
 export HIDDEN_SPACE_LAYERS="${HIDDEN_SPACE_LAYERS:-all}"
@@ -111,6 +117,12 @@ run_dump() {
         --bf16 \
         --micro-batch-size "$MICRO_BATCH_SIZE" \
         --global-batch-size "$GLOBAL_BATCH_SIZE" \
+        --lr "$LR" \
+        --min-lr "$MIN_LR" \
+        --lr-decay-style "$LR_DECAY_STYLE" \
+        --lr-decay-iters "$LR_DECAY_ITERS" \
+        --lr-warmup-fraction "$LR_WARMUP_FRACTION" \
+        --lr-wsd-decay-iters "$LR_WSD_DECAY_ITERS" \
         --seq-length 512 \
         --data-path 1.0 "$WIKI_PROBE_PREFIX" \
         --split 100,0,0 \
