@@ -131,6 +131,8 @@ run_dump() {
         --load "$load_dir" \
         --no-load-optim \
         --no-load-rng \
+        --diagnostic-override-train-iteration 0 \
+        --diagnostic-override-consumed-train-samples 0 \
         "${extra_resume_arg[@]}" \
         --eval-interval 1 \
         --probe-name wiki_probe \
