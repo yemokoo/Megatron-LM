@@ -32,6 +32,7 @@ def parse_args():
     parser.add_argument("--max-points-per-stage", type=int, default=1200)
     parser.add_argument("--max-vectors", type=int, default=350)
     parser.add_argument("--trim-percentile", type=float, default=99.0)
+    parser.add_argument("--density-bins", type=int, default=100)
     parser.add_argument("--seed", type=int, default=1234)
     return parser.parse_args()
 
@@ -133,6 +134,210 @@ def expand_limits(ax, coords, pad_fraction=0.08, trim_percentile=None):
     ypad = max((ymax - ymin) * pad_fraction, 1e-5)
     ax.set_xlim(xmin - xpad, xmax + xpad)
     ax.set_ylim(ymin - ypad, ymax + ypad)
+
+
+def smooth_histogram(hist: np.ndarray, passes: int = 2):
+    kernel = np.array([[1.0, 2.0, 1.0], [2.0, 4.0, 2.0], [1.0, 2.0, 1.0]], dtype=np.float32)
+    kernel /= kernel.sum()
+    smoothed = hist.astype(np.float32, copy=True)
+    for _ in range(passes):
+        padded = np.pad(smoothed, 1, mode="edge")
+        out = np.zeros_like(smoothed)
+        for i in range(3):
+            for j in range(3):
+                out += kernel[i, j] * padded[i : i + smoothed.shape[0], j : j + smoothed.shape[1]]
+        smoothed = out
+    return smoothed
+
+
+def percentile_bounds(points: np.ndarray, trim_percentile: float, pad_fraction: float = 0.08):
+    if trim_percentile is not None and 0 < trim_percentile < 100:
+        low = (100.0 - trim_percentile) / 2.0
+        high = 100.0 - low
+        xmin, ymin = np.percentile(points, low, axis=0)
+        xmax, ymax = np.percentile(points, high, axis=0)
+    else:
+        xmin, ymin = points.min(axis=0)
+        xmax, ymax = points.max(axis=0)
+    xpad = max((xmax - xmin) * pad_fraction, 1e-5)
+    ypad = max((ymax - ymin) * pad_fraction, 1e-5)
+    return xmin - xpad, xmax + xpad, ymin - ypad, ymax + ypad
+
+
+def draw_density_cloud(
+    ax,
+    points: np.ndarray,
+    color: str,
+    label: str,
+    bins: int,
+    trim_percentile: float,
+    alpha: float = 0.34,
+):
+    xmin, xmax, ymin, ymax = percentile_bounds(points, trim_percentile, pad_fraction=0.12)
+    inside = (
+        (points[:, 0] >= xmin)
+        & (points[:, 0] <= xmax)
+        & (points[:, 1] >= ymin)
+        & (points[:, 1] <= ymax)
+    )
+    clipped = points[inside]
+    if len(clipped) < 8:
+        ax.scatter(points[:, 0], points[:, 1], s=10, alpha=0.35, c=color, label=label, edgecolors="none")
+        return
+
+    hist, xedges, yedges = np.histogram2d(
+        clipped[:, 0],
+        clipped[:, 1],
+        bins=bins,
+        range=[[xmin, xmax], [ymin, ymax]],
+    )
+    hist = smooth_histogram(hist, passes=2)
+    nonzero = hist[hist > 0]
+    if len(nonzero) == 0:
+        return
+
+    levels = np.unique(np.percentile(nonzero, [45, 62, 78, 90, 97]))
+    levels = levels[levels > 0]
+    if len(levels) < 2:
+        ax.scatter(clipped[:, 0], clipped[:, 1], s=10, alpha=0.35, c=color, label=label, edgecolors="none")
+        return
+
+    xcenters = (xedges[:-1] + xedges[1:]) / 2.0
+    ycenters = (yedges[:-1] + yedges[1:]) / 2.0
+    ax.contourf(xcenters, ycenters, hist.T, levels=levels, colors=[color], alpha=alpha, antialiased=True)
+    ax.contour(xcenters, ycenters, hist.T, levels=levels, colors=[color], alpha=0.72, linewidths=0.8)
+    # A faint point layer keeps sparse tails visible without turning the plot back into a dot cloud.
+    ax.scatter(clipped[:, 0], clipped[:, 1], s=5, alpha=0.08, c=color, edgecolors="none")
+    ax.scatter([], [], c=color, alpha=0.75, label=label)
+
+
+def draw_origin_marker(ax, zero_xy: np.ndarray):
+    origin = zero_xy.mean(axis=0)
+    ax.scatter(
+        [origin[0]],
+        [origin[1]],
+        s=170,
+        facecolors="white",
+        edgecolors="#2563eb",
+        linewidths=2.5,
+        label="wiki_origin",
+        zorder=8,
+    )
+    ax.scatter([origin[0]], [origin[1]], s=34, c="#2563eb", zorder=9)
+    return origin
+
+
+def plot_delta_density_layer_grid(
+    dumps,
+    out_path: Path,
+    method: str,
+    max_points: int,
+    seed: int,
+    trim_percentile: float,
+    density_bins: int,
+):
+    rng = np.random.default_rng(seed)
+    layers = dumps[0]["layers"]
+    n_layers = len(layers)
+    ncols = min(3, n_layers)
+    nrows = math.ceil(n_layers / ncols)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(5.2 * ncols, 4.4 * nrows), squeeze=False)
+
+    for layer_idx, layer_number in enumerate(layers):
+        ax = axes[layer_idx // ncols][layer_idx % ncols]
+        idx = common_subsample_indices(dumps, max_points, rng)
+        wiki = dumps[0]["hidden"][layer_idx][idx]
+        code_delta = dumps[1]["hidden"][layer_idx][idx] - wiki
+        retune_delta = dumps[2]["hidden"][layer_idx][idx] - wiki
+        zero = np.zeros_like(code_delta)
+        coords = reduce2(np.concatenate([zero, code_delta, retune_delta], axis=0), method, seed + 5000 + int(layer_number))
+        zero_xy, code_xy, retune_xy = split_stage_coords(coords, len(idx))
+
+        draw_density_cloud(ax, code_xy, "#f97316", "code_delta", density_bins, trim_percentile, alpha=0.30)
+        draw_density_cloud(ax, retune_xy, "#16a34a", "retune_delta", density_bins, trim_percentile, alpha=0.38)
+        origin = draw_origin_marker(ax, zero_xy)
+
+        code_centroid = code_xy.mean(axis=0)
+        retune_centroid = retune_xy.mean(axis=0)
+        ax.annotate("", xy=code_centroid, xytext=origin, arrowprops=dict(arrowstyle="->", color="#f97316", lw=1.5, alpha=0.85))
+        ax.annotate("", xy=retune_centroid, xytext=origin, arrowprops=dict(arrowstyle="->", color="#16a34a", lw=1.5, alpha=0.85))
+        ax.scatter([code_centroid[0]], [code_centroid[1]], s=30, c="#f97316", edgecolors="#7c2d12", linewidths=0.7)
+        ax.scatter([retune_centroid[0]], [retune_centroid[1]], s=30, c="#16a34a", edgecolors="#064e3b", linewidths=0.7)
+
+        limit_points = np.concatenate([code_xy, retune_xy, origin[None, :]], axis=0)
+        expand_limits(ax, limit_points, trim_percentile=trim_percentile)
+        ax.set_title(f"Layer {int(layer_number)} density delta", fontsize=11, weight="bold")
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.grid(alpha=0.16)
+
+    for idx in range(n_layers, nrows * ncols):
+        axes[idx // ncols][idx % ncols].axis("off")
+
+    handles, labels = axes[0][0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="upper center", ncol=3, frameon=False)
+    fig.suptitle(f"FFN-only Hidden Delta Density from Wiki-Only by Layer ({method.upper()})", y=0.995, fontsize=16)
+    fig.tight_layout(rect=(0, 0, 1, 0.96))
+    fig.savefig(out_path, dpi=230)
+    plt.close(fig)
+
+
+def plot_delta_density_layer_average(
+    dumps,
+    out_path: Path,
+    zoom_out_path: Path,
+    method: str,
+    max_points: int,
+    seed: int,
+    trim_percentile: float,
+    density_bins: int,
+):
+    rng = np.random.default_rng(seed)
+    idx = common_subsample_indices(dumps, max_points, rng)
+    wiki = dumps[0]["hidden"].mean(axis=0)[idx]
+    code_delta = dumps[1]["hidden"].mean(axis=0)[idx] - wiki
+    retune_delta = dumps[2]["hidden"].mean(axis=0)[idx] - wiki
+    zero = np.zeros_like(code_delta)
+    coords = reduce2(np.concatenate([zero, code_delta, retune_delta], axis=0), method, seed + 5999)
+    zero_xy, code_xy, retune_xy = split_stage_coords(coords, len(idx))
+
+    def render(path: Path, zoom_retune: bool):
+        fig, ax = plt.subplots(figsize=(8.4, 6.8))
+        draw_density_cloud(ax, code_xy, "#f97316", "code_delta", density_bins, trim_percentile, alpha=0.30)
+        draw_density_cloud(ax, retune_xy, "#16a34a", "retune_delta", density_bins, trim_percentile, alpha=0.42)
+        origin = draw_origin_marker(ax, zero_xy)
+        code_centroid = code_xy.mean(axis=0)
+        retune_centroid = retune_xy.mean(axis=0)
+        ax.annotate("", xy=code_centroid, xytext=origin, arrowprops=dict(arrowstyle="->", color="#f97316", lw=1.8, alpha=0.88))
+        ax.annotate("", xy=retune_centroid, xytext=origin, arrowprops=dict(arrowstyle="->", color="#16a34a", lw=1.8, alpha=0.88))
+        ax.scatter([code_centroid[0]], [code_centroid[1]], s=42, c="#f97316", edgecolors="#7c2d12", linewidths=0.8)
+        ax.scatter([retune_centroid[0]], [retune_centroid[1]], s=42, c="#16a34a", edgecolors="#064e3b", linewidths=0.8)
+
+        if zoom_retune:
+            zoom_points = np.concatenate([retune_xy, origin[None, :]], axis=0)
+            xmin, xmax, ymin, ymax = percentile_bounds(zoom_points, 99.4, pad_fraction=0.45)
+            ax.set_xlim(xmin, xmax)
+            ax.set_ylim(ymin, ymax)
+            subtitle = "Retune/Origin Zoom"
+        else:
+            limit_points = np.concatenate([code_xy, retune_xy, origin[None, :]], axis=0)
+            expand_limits(ax, limit_points, trim_percentile=trim_percentile)
+            subtitle = "Full Delta Field"
+
+        ax.set_title(
+            f"FFN-only Hidden Delta Density from Wiki-Only, Layer-Average ({method.upper()})\n{subtitle}",
+            weight="bold",
+        )
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.grid(alpha=0.18)
+        ax.legend(frameon=False, loc="upper left")
+        fig.tight_layout()
+        fig.savefig(path, dpi=250)
+        plt.close(fig)
+
+    render(out_path, zoom_retune=False)
+    render(zoom_out_path, zoom_retune=True)
 
 
 def plot_delta_layer_grid(
@@ -408,6 +613,15 @@ def main():
         args.seed,
         args.trim_percentile,
     )
+    plot_delta_density_layer_grid(
+        dumps,
+        out_dir / f"ffn_only_hidden_delta_density_layers_{args.method}.png",
+        args.method,
+        args.max_points_per_stage,
+        args.seed,
+        args.trim_percentile,
+        args.density_bins,
+    )
     plot_delta_layer_average(
         dumps,
         out_dir / f"ffn_only_hidden_delta_layer_average_{args.method}.png",
@@ -416,6 +630,16 @@ def main():
         args.max_vectors,
         args.seed,
         args.trim_percentile,
+    )
+    plot_delta_density_layer_average(
+        dumps,
+        out_dir / f"ffn_only_hidden_delta_density_layer_average_{args.method}.png",
+        out_dir / f"ffn_only_hidden_delta_density_layer_average_zoom_{args.method}.png",
+        args.method,
+        args.max_points_per_stage,
+        args.seed,
+        args.trim_percentile,
+        args.density_bins,
     )
     plot_layer_average(
         dumps,
