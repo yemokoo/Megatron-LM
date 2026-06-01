@@ -432,6 +432,106 @@ def plot_hidden_density_layer_average(
     plt.close(fig)
 
 
+def plot_hidden_pairwise_density_layer_average(
+    dumps,
+    out_path: Path,
+    method: str,
+    max_points: int,
+    seed: int,
+    trim_percentile: float,
+    density_bins: int,
+):
+    rng = np.random.default_rng(seed)
+    idx = common_subsample_indices(dumps, max_points, rng)
+    sampled = [dump["hidden"].mean(axis=0)[idx] for dump in dumps]
+    coords = reduce2(np.concatenate(sampled, axis=0), method, seed + 8999)
+    coords_by_stage = split_stage_coords(coords, len(idx))
+    wiki_xy, code_xy, retune_xy = coords_by_stage
+
+    pairs = [
+        ("Wiki-only vs Code-trained", dumps[1]["label"], code_xy, "#f97316"),
+        ("Wiki-only vs Router-retuned", dumps[2]["label"], retune_xy, "#16a34a"),
+    ]
+    fig, axes = plt.subplots(1, 2, figsize=(13.2, 5.8), sharex=True, sharey=True)
+    all_points = np.concatenate([wiki_xy, code_xy, retune_xy], axis=0)
+    xmin, xmax, ymin, ymax = percentile_bounds(all_points, trim_percentile, pad_fraction=0.10)
+
+    for ax, (title, other_label, other_xy, other_color) in zip(axes, pairs):
+        draw_density_cloud(ax, wiki_xy, "#2563eb", dumps[0]["label"], density_bins, trim_percentile, alpha=0.24)
+        draw_density_cloud(ax, other_xy, other_color, other_label, density_bins, trim_percentile, alpha=0.34)
+        wiki_centroid = wiki_xy.mean(axis=0)
+        other_centroid = other_xy.mean(axis=0)
+        ax.annotate(
+            "",
+            xy=other_centroid,
+            xytext=wiki_centroid,
+            arrowprops=dict(arrowstyle="->", color="#111827", lw=2.0, alpha=0.82),
+        )
+        ax.scatter([wiki_centroid[0]], [wiki_centroid[1]], s=48, c="#2563eb", edgecolors="#1e3a8a", linewidths=0.8, zorder=8)
+        ax.scatter([other_centroid[0]], [other_centroid[1]], s=48, c=other_color, edgecolors="#111827", linewidths=0.8, zorder=8)
+        ax.set_title(title, weight="bold")
+        ax.set_xlim(xmin, xmax)
+        ax.set_ylim(ymin, ymax)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.grid(alpha=0.16)
+        ax.legend(frameon=False, loc="upper left")
+
+    fig.suptitle(f"FFN-only Wiki Probe Hidden Density, Pairwise Layer-Average ({method.upper()})", weight="bold")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=250)
+    plt.close(fig)
+
+
+def plot_hidden_small_multiples_layer_average(
+    dumps,
+    out_path: Path,
+    method: str,
+    max_points: int,
+    seed: int,
+    trim_percentile: float,
+    density_bins: int,
+):
+    rng = np.random.default_rng(seed)
+    idx = common_subsample_indices(dumps, max_points, rng)
+    sampled = [dump["hidden"].mean(axis=0)[idx] for dump in dumps]
+    coords = reduce2(np.concatenate(sampled, axis=0), method, seed + 9999)
+    coords_by_stage = split_stage_coords(coords, len(idx))
+
+    fig, axes = plt.subplots(1, 3, figsize=(15.0, 5.2), sharex=True, sharey=True)
+    all_points = np.concatenate(coords_by_stage, axis=0)
+    xmin, xmax, ymin, ymax = percentile_bounds(all_points, trim_percentile, pad_fraction=0.10)
+    wiki_centroid = coords_by_stage[0].mean(axis=0)
+
+    for ax, dump, part in zip(axes, dumps, coords_by_stage):
+        color = STAGE_COLORS.get(dump["label"], None)
+        # Gray wiki reference makes the displacement readable without overplotting all three clouds.
+        if dump["label"] != "wiki_only":
+            draw_density_cloud(ax, coords_by_stage[0], "#94a3b8", "wiki_ref", density_bins, trim_percentile, alpha=0.18)
+        draw_density_cloud(ax, part, color, dump["label"], density_bins, trim_percentile, alpha=0.40)
+        centroid = part.mean(axis=0)
+        if dump["label"] != "wiki_only":
+            ax.annotate(
+                "",
+                xy=centroid,
+                xytext=wiki_centroid,
+                arrowprops=dict(arrowstyle="->", color="#111827", lw=1.8, alpha=0.78),
+            )
+        ax.scatter([centroid[0]], [centroid[1]], s=54, c=color, edgecolors="#111827", linewidths=0.8, zorder=8)
+        ax.set_title(dump["label"], weight="bold", color=color)
+        ax.set_xlim(xmin, xmax)
+        ax.set_ylim(ymin, ymax)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.grid(alpha=0.16)
+        ax.legend(frameon=False, loc="upper left")
+
+    fig.suptitle(f"FFN-only Wiki Probe Hidden Density, Small Multiples Layer-Average ({method.upper()})", weight="bold")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=250)
+    plt.close(fig)
+
+
 def plot_delta_layer_grid(
     dumps,
     out_path: Path,
@@ -753,6 +853,24 @@ def main():
     plot_hidden_density_layer_average(
         dumps,
         out_dir / f"ffn_only_hidden_density_layer_average_{args.method}.png",
+        args.method,
+        args.max_points_per_stage,
+        args.seed,
+        args.trim_percentile,
+        args.density_bins,
+    )
+    plot_hidden_pairwise_density_layer_average(
+        dumps,
+        out_dir / f"ffn_only_hidden_pairwise_density_layer_average_{args.method}.png",
+        args.method,
+        args.max_points_per_stage,
+        args.seed,
+        args.trim_percentile,
+        args.density_bins,
+    )
+    plot_hidden_small_multiples_layer_average(
+        dumps,
+        out_dir / f"ffn_only_hidden_small_multiples_layer_average_{args.method}.png",
         args.method,
         args.max_points_per_stage,
         args.seed,
