@@ -340,6 +340,98 @@ def plot_delta_density_layer_average(
     render(zoom_out_path, zoom_retune=True)
 
 
+def plot_hidden_density_layer_grid(
+    dumps,
+    out_path: Path,
+    method: str,
+    max_points: int,
+    seed: int,
+    trim_percentile: float,
+    density_bins: int,
+):
+    rng = np.random.default_rng(seed)
+    layers = dumps[0]["layers"]
+    n_layers = len(layers)
+    ncols = min(3, n_layers)
+    nrows = math.ceil(n_layers / ncols)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(5.2 * ncols, 4.4 * nrows), squeeze=False)
+
+    for layer_idx, layer_number in enumerate(layers):
+        ax = axes[layer_idx // ncols][layer_idx % ncols]
+        idx = common_subsample_indices(dumps, max_points, rng)
+        sampled = [dump["hidden"][layer_idx][idx] for dump in dumps]
+        coords = reduce2(np.concatenate(sampled, axis=0), method, seed + 7000 + int(layer_number))
+        coords_by_stage = split_stage_coords(coords, len(idx))
+
+        for dump, part in zip(dumps, coords_by_stage):
+            color = STAGE_COLORS.get(dump["label"], None)
+            draw_density_cloud(ax, part, color, dump["label"], density_bins, trim_percentile, alpha=0.28)
+
+        centroids = np.stack([part.mean(axis=0) for part in coords_by_stage])
+        ax.plot(centroids[:, 0], centroids[:, 1], color="#111827", lw=1.25, alpha=0.78)
+        ax.scatter(centroids[:, 0], centroids[:, 1], color="#111827", s=22, alpha=0.92, zorder=8)
+        expand_limits(ax, coords, trim_percentile=trim_percentile)
+        ax.set_title(f"Layer {int(layer_number)} hidden density", fontsize=11, weight="bold")
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.grid(alpha=0.16)
+
+    for idx in range(n_layers, nrows * ncols):
+        axes[idx // ncols][idx % ncols].axis("off")
+
+    handles, labels = axes[0][0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc="upper center", ncol=3, frameon=False)
+    fig.suptitle(f"FFN-only Wiki Probe Hidden Density by Layer ({method.upper()})", y=0.995, fontsize=16)
+    fig.tight_layout(rect=(0, 0, 1, 0.96))
+    fig.savefig(out_path, dpi=230)
+    plt.close(fig)
+
+
+def plot_hidden_density_layer_average(
+    dumps,
+    out_path: Path,
+    method: str,
+    max_points: int,
+    seed: int,
+    trim_percentile: float,
+    density_bins: int,
+):
+    rng = np.random.default_rng(seed)
+    idx = common_subsample_indices(dumps, max_points, rng)
+    sampled = [dump["hidden"].mean(axis=0)[idx] for dump in dumps]
+    coords = reduce2(np.concatenate(sampled, axis=0), method, seed + 7999)
+    coords_by_stage = split_stage_coords(coords, len(idx))
+
+    fig, ax = plt.subplots(figsize=(8.4, 6.8))
+    for dump, part in zip(dumps, coords_by_stage):
+        color = STAGE_COLORS.get(dump["label"], None)
+        draw_density_cloud(ax, part, color, dump["label"], density_bins, trim_percentile, alpha=0.30)
+
+    centroids = np.stack([part.mean(axis=0) for part in coords_by_stage])
+    ax.plot(centroids[:, 0], centroids[:, 1], color="#111827", lw=1.8, alpha=0.80)
+    ax.scatter(centroids[:, 0], centroids[:, 1], color="#111827", s=36, alpha=0.94, zorder=8)
+    for dump, centroid in zip(dumps, centroids):
+        ax.text(
+            centroid[0],
+            centroid[1],
+            f" {dump['label']}",
+            fontsize=9,
+            color="#111827",
+            weight="bold",
+            alpha=0.82,
+        )
+
+    expand_limits(ax, coords, trim_percentile=trim_percentile)
+    ax.set_title(f"FFN-only Wiki Probe Hidden Density, Layer-Average ({method.upper()})", weight="bold")
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.grid(alpha=0.18)
+    ax.legend(frameon=False, loc="upper left")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=250)
+    plt.close(fig)
+
+
 def plot_delta_layer_grid(
     dumps,
     out_path: Path,
@@ -604,6 +696,15 @@ def main():
         args.max_vectors,
         args.seed,
     )
+    plot_hidden_density_layer_grid(
+        dumps,
+        out_dir / f"ffn_only_hidden_density_layers_{args.method}.png",
+        args.method,
+        args.max_points_per_stage,
+        args.seed,
+        args.trim_percentile,
+        args.density_bins,
+    )
     plot_delta_layer_grid(
         dumps,
         out_dir / f"ffn_only_hidden_delta_layers_{args.method}.png",
@@ -648,6 +749,15 @@ def main():
         args.max_points_per_stage,
         args.max_vectors,
         args.seed,
+    )
+    plot_hidden_density_layer_average(
+        dumps,
+        out_dir / f"ffn_only_hidden_density_layer_average_{args.method}.png",
+        args.method,
+        args.max_points_per_stage,
+        args.seed,
+        args.trim_percentile,
+        args.density_bins,
     )
 
     metrics = collect_metrics(dumps)
