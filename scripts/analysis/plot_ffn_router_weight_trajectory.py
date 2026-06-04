@@ -14,6 +14,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.colors import TwoSlopeNorm
 import numpy as np
 
 
@@ -47,6 +48,7 @@ def parse_args():
     parser.add_argument("--old-experts", type=int, default=8)
     parser.add_argument("--display-layer-offset", type=int, default=1)
     parser.add_argument("--normalize-rows-for-pca", action="store_true")
+    parser.add_argument("--plot-pca-trajectory", action="store_true", help="Also write the dense PCA trajectory diagnostic plot.")
     parser.add_argument("--list-keys", action="store_true", help="Print matched router keys before plotting.")
     parser.add_argument("--seed", type=int, default=1234)
     return parser.parse_args()
@@ -428,6 +430,134 @@ def plot_layer_summary(mats, layers, out_dir: Path):
     plt.close(fig)
 
 
+def plot_recovery_ratio_heatmap(mats, layers, out_dir: Path):
+    wiki_to_code = mats["old_l2/wiki_to_code"]
+    wiki_to_retune = mats["old_l2/wiki_to_retune"]
+    ratio = wiki_to_retune / np.maximum(wiki_to_code, 1e-8)
+    finite = ratio[np.isfinite(ratio)]
+    vmax = max(1.5, float(np.percentile(finite, 95))) if len(finite) else 1.5
+    norm = TwoSlopeNorm(vmin=0.0, vcenter=1.0, vmax=vmax)
+
+    fig, ax = plt.subplots(figsize=(10.8, 5.2))
+    image = ax.imshow(np.ma.masked_invalid(ratio), aspect="auto", cmap="RdYlGn_r", norm=norm)
+    ax.set_title(
+        "Router Weight Recovery Ratio by Expert Row\n"
+        "lower than 1.0 = retune moved back toward wiki-only",
+        fontsize=15,
+        weight="bold",
+    )
+    ax.set_xticks(np.arange(len(layers)))
+    ax.set_xticklabels([str(layer + 1) for layer in layers])
+    ax.set_xlabel("Layer")
+    ax.set_yticks(np.arange(ratio.shape[0]))
+    ax.set_yticklabels([str(idx) for idx in range(ratio.shape[0])])
+    ax.set_ylabel("Old expert row")
+
+    for row in range(ratio.shape[0]):
+        for col in range(ratio.shape[1]):
+            value = ratio[row, col]
+            if not np.isfinite(value):
+                continue
+            color = "white" if value > 1.15 or value < 0.45 else "#111827"
+            ax.text(col, row, f"{value:.2f}", ha="center", va="center", fontsize=7.5, color=color)
+
+    cbar = fig.colorbar(image, ax=ax, fraction=0.032, pad=0.02)
+    cbar.set_label("||retuned - wiki|| / ||code - wiki||", fontsize=9)
+    ax.grid(False)
+    fig.tight_layout()
+    fig.savefig(out_dir / "ffn_only_router_weight_recovery_ratio_heatmap.png", dpi=230)
+    plt.close(fig)
+
+
+def plot_recovery_scatter(mats, layers, out_dir: Path):
+    wiki_to_code = mats["old_l2/wiki_to_code"]
+    wiki_to_retune = mats["old_l2/wiki_to_retune"]
+    code_to_retune = mats["old_l2/code_to_retune"]
+
+    xs, ys, cs, sizes = [], [], [], []
+    for layer_idx, layer in enumerate(layers):
+        for expert_id in range(wiki_to_code.shape[0]):
+            x = wiki_to_code[expert_id, layer_idx]
+            y = wiki_to_retune[expert_id, layer_idx]
+            if not np.isfinite(x) or not np.isfinite(y):
+                continue
+            xs.append(float(x))
+            ys.append(float(y))
+            cs.append(layer + 1)
+            sizes.append(42 + 18 * min(max(float(code_to_retune[expert_id, layer_idx]), 0.0), 2.5))
+
+    xs = np.asarray(xs)
+    ys = np.asarray(ys)
+    cs = np.asarray(cs)
+    sizes = np.asarray(sizes)
+    max_axis = float(max(np.max(xs), np.max(ys))) * 1.08 if len(xs) else 1.0
+    recovered = int(np.sum(ys < xs)) if len(xs) else 0
+    total = int(len(xs))
+    median_ratio = float(np.median(ys / np.maximum(xs, 1e-8))) if len(xs) else float("nan")
+
+    fig, ax = plt.subplots(figsize=(7.6, 6.6))
+    ax.plot([0, max_axis], [0, max_axis], color="#64748b", lw=1.4, linestyle="--", label="no recovery line")
+    scatter = ax.scatter(xs, ys, c=cs, s=sizes, cmap="viridis", alpha=0.82, edgecolors="white", linewidths=0.55)
+    ax.fill_between([0, max_axis], [0, max_axis], [0, 0], color="#16a34a", alpha=0.08, label="closer to wiki after retune")
+    ax.set_xlim(0, max_axis)
+    ax.set_ylim(0, max_axis)
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_xlabel("Distance moved by code training: ||code - wiki||")
+    ax.set_ylabel("Distance after retune: ||retuned - wiki||")
+    ax.set_title("Router Weight Recovery Scatter\npoints below diagonal recovered toward wiki-only", fontsize=14, weight="bold")
+    ax.grid(alpha=0.24)
+    ax.legend(frameon=False, loc="upper left")
+    cbar = fig.colorbar(scatter, ax=ax, fraction=0.046, pad=0.02)
+    cbar.set_label("Layer", fontsize=9)
+    ax.text(
+        0.98,
+        0.04,
+        f"recovered rows: {recovered}/{total}\nmedian ratio: {median_ratio:.2f}",
+        transform=ax.transAxes,
+        ha="right",
+        va="bottom",
+        fontsize=10,
+        bbox=dict(facecolor="white", edgecolor="#cbd5e1", alpha=0.88, boxstyle="round,pad=0.35"),
+    )
+    fig.tight_layout()
+    fig.savefig(out_dir / "ffn_only_router_weight_recovery_scatter.png", dpi=230)
+    plt.close(fig)
+
+
+def plot_layer_recovery_bars(mats, layers, out_dir: Path):
+    wiki_to_code = np.nanmean(mats["old_l2/wiki_to_code"], axis=0)
+    wiki_to_retune = np.nanmean(mats["old_l2/wiki_to_retune"], axis=0)
+    ratio = wiki_to_retune / np.maximum(wiki_to_code, 1e-8)
+    x = np.arange(len(layers))
+    layer_labels = [str(layer + 1) for layer in layers]
+
+    fig, axes = plt.subplots(2, 1, figsize=(10.8, 7.2), sharex=True, gridspec_kw={"height_ratios": [1.25, 1.0]})
+    width = 0.36
+    axes[0].bar(x - width / 2, wiki_to_code, width=width, color="#f97316", alpha=0.86, label="after code training")
+    axes[0].bar(x + width / 2, wiki_to_retune, width=width, color="#16a34a", alpha=0.86, label="after router retune")
+    axes[0].set_ylabel("Mean distance from wiki-only")
+    axes[0].set_title("Layer-wise router drift from wiki-only", weight="bold")
+    axes[0].grid(axis="y", alpha=0.24)
+    axes[0].legend(frameon=False)
+
+    colors = np.where(ratio < 1.0, "#16a34a", "#ef4444")
+    axes[1].axhline(1.0, color="#64748b", lw=1.2, linestyle="--")
+    axes[1].bar(x, ratio, color=colors, alpha=0.86)
+    axes[1].set_ylabel("Recovery ratio")
+    axes[1].set_xlabel("Layer")
+    axes[1].set_title("Retuned distance / Code-trained distance", weight="bold")
+    axes[1].set_xticks(x)
+    axes[1].set_xticklabels(layer_labels)
+    axes[1].grid(axis="y", alpha=0.24)
+    for idx, value in enumerate(ratio):
+        axes[1].text(idx, value + 0.025, f"{value:.2f}", ha="center", va="bottom", fontsize=8)
+
+    fig.suptitle("FFN Router Weight Recovery Overview", fontsize=16, weight="bold")
+    fig.tight_layout(rect=(0, 0, 1, 0.94))
+    fig.savefig(out_dir / "ffn_only_router_weight_recovery_overview.png", dpi=230)
+    plt.close(fig)
+
+
 def plot_layer_grid(stages, layers, out_path: Path, old_experts: int, display_layer_offset: int, normalize_for_pca: bool):
     n_layers = len(layers)
     ncols = min(3, n_layers)
@@ -515,10 +645,10 @@ def plot_layer_grid(stages, layers, out_path: Path, old_experts: int, display_la
             handles.extend(h)
             labels.extend(l)
     dedup = dict(zip(labels, handles))
-    fig.legend(dedup.values(), dedup.keys(), loc="upper center", ncol=3, frameon=False)
+    fig.legend(dedup.values(), dedup.keys(), loc="lower center", ncol=3, frameon=False)
     suffix = "row-normalized " if normalize_for_pca else ""
-    fig.suptitle(f"FFN-only Router Weight Row Trajectory by Layer ({suffix}PCA)", y=0.995, fontsize=16, weight="bold")
-    fig.tight_layout(rect=(0, 0, 1, 0.94))
+    fig.suptitle(f"Diagnostic PCA: FFN Router Weight Row Trajectory by Layer ({suffix}PCA)", y=0.992, fontsize=15, weight="bold")
+    fig.tight_layout(rect=(0, 0.045, 1, 0.955))
     fig.savefig(out_path, dpi=230)
     plt.close(fig)
 
@@ -537,17 +667,21 @@ def main():
     if not common_layers:
         raise SystemExit("No common router layers found across the three checkpoints.")
 
-    plot_path = out_dir / "ffn_only_router_weight_row_trajectory_layers_pca.png"
-    plot_layer_grid(
-        stages,
-        common_layers,
-        plot_path,
-        args.old_experts,
-        args.display_layer_offset,
-        args.normalize_rows_for_pca,
-    )
+    if args.plot_pca_trajectory:
+        plot_path = out_dir / "ffn_only_router_weight_row_trajectory_layers_pca.png"
+        plot_layer_grid(
+            stages,
+            common_layers,
+            plot_path,
+            args.old_experts,
+            args.display_layer_offset,
+            args.normalize_rows_for_pca,
+        )
     heatmap_mats = plot_transition_heatmaps(stages, common_layers, out_dir, args.old_experts)
     plot_layer_summary(heatmap_mats, common_layers, out_dir)
+    plot_recovery_ratio_heatmap(heatmap_mats, common_layers, out_dir)
+    plot_recovery_scatter(heatmap_mats, common_layers, out_dir)
+    plot_layer_recovery_bars(heatmap_mats, common_layers, out_dir)
 
     metrics = collect_metrics(stages, common_layers, args.old_experts)
     metrics["checkpoints"] = {stage["label"]: stage["checkpoint_dir"] for stage in stages}
@@ -557,7 +691,8 @@ def main():
         json.dumps(metrics, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
-    print(f"[DONE] wrote {plot_path}")
+    if args.plot_pca_trajectory:
+        print(f"[DONE] wrote {plot_path}")
     print(f"[DONE] wrote {out_dir / 'ffn_only_router_weight_trajectory_metrics.json'}")
 
 
