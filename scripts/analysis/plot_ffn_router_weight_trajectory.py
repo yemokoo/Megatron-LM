@@ -7,6 +7,7 @@ import argparse
 import json
 import math
 import re
+import sys
 from pathlib import Path
 
 import matplotlib
@@ -21,6 +22,15 @@ STAGES = [
     ("code_trained", "#f97316", "s"),
     ("router_retuned", "#16a34a", "^"),
 ]
+
+
+def ensure_megatron_on_path():
+    repo_root = Path(__file__).resolve().parents[2]
+    megatron_path = repo_root / "Megatron-LM"
+    if megatron_path.exists():
+        path = str(megatron_path)
+        if path not in sys.path:
+            sys.path.insert(0, path)
 
 
 def parse_args():
@@ -93,6 +103,7 @@ def tensor_dtype_from_metadata(meta, torch):
 
 
 def load_dcp_tensors(ckpt_dir: Path, keys):
+    ensure_megatron_on_path()
     import torch
     from torch.distributed.checkpoint import FileSystemReader
 
@@ -116,6 +127,7 @@ def load_dcp_tensors(ckpt_dir: Path, keys):
 
 
 def matched_router_keys(ckpt_dir: Path, key_regex: str):
+    ensure_megatron_on_path()
     from torch.distributed.checkpoint import FileSystemReader
 
     reader = FileSystemReader(str(ckpt_dir))
