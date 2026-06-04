@@ -303,6 +303,73 @@ def transition_matrices(stages, layers, old_experts: int):
     return mats
 
 
+def geometry_matrices(stages, layers, old_experts: int):
+    weights = {stage["label"]: stage["by_layer"] for stage in stages}
+    n_layers = len(layers)
+    out = {
+        "old_norm/wiki_only": np.full((old_experts, n_layers), np.nan, dtype=np.float32),
+        "old_norm/code_trained": np.full((old_experts, n_layers), np.nan, dtype=np.float32),
+        "old_norm/router_retuned": np.full((old_experts, n_layers), np.nan, dtype=np.float32),
+        "new_norm/code_trained": None,
+        "new_norm/router_retuned": None,
+        "old_new_centroid_l2/code_trained": np.full(n_layers, np.nan, dtype=np.float32),
+        "old_new_centroid_l2/router_retuned": np.full(n_layers, np.nan, dtype=np.float32),
+        "old_new_mean_cosine/code_trained": np.full(n_layers, np.nan, dtype=np.float32),
+        "old_new_mean_cosine/router_retuned": np.full(n_layers, np.nan, dtype=np.float32),
+        "old_new_max_cosine/code_trained": np.full(n_layers, np.nan, dtype=np.float32),
+        "old_new_max_cosine/router_retuned": np.full(n_layers, np.nan, dtype=np.float32),
+        "norm_ratio_new_over_old/code_trained": np.full(n_layers, np.nan, dtype=np.float32),
+        "norm_ratio_new_over_old/router_retuned": np.full(n_layers, np.nan, dtype=np.float32),
+        "new_mean_norm_delta/retune_minus_code": np.full(n_layers, np.nan, dtype=np.float32),
+        "old_mean_norm_delta/retune_minus_code": np.full(n_layers, np.nan, dtype=np.float32),
+    }
+
+    max_new_rows = max(
+        [0]
+        + [
+            weights[label][layer]["weight"].shape[0] - old_experts
+            for label in ("code_trained", "router_retuned")
+            for layer in layers
+        ]
+    )
+    out["new_norm/code_trained"] = np.full((max_new_rows, n_layers), np.nan, dtype=np.float32)
+    out["new_norm/router_retuned"] = np.full((max_new_rows, n_layers), np.nan, dtype=np.float32)
+
+    for layer_idx, layer in enumerate(layers):
+        for label in ("wiki_only", "code_trained", "router_retuned"):
+            w = weights[label][layer]["weight"]
+            old = w[: min(old_experts, w.shape[0])]
+            if old.size:
+                out[f"old_norm/{label}"][: old.shape[0], layer_idx] = np.linalg.norm(old, axis=1)
+
+            if label in ("code_trained", "router_retuned") and w.shape[0] > old_experts:
+                new = w[old_experts:]
+                out[f"new_norm/{label}"][: new.shape[0], layer_idx] = np.linalg.norm(new, axis=1)
+
+                old_centroid = old.mean(axis=0)
+                new_centroid = new.mean(axis=0)
+                out[f"old_new_centroid_l2/{label}"][layer_idx] = float(np.linalg.norm(old_centroid - new_centroid))
+
+                old_unit = normalize_rows(old)
+                new_unit = normalize_rows(new)
+                pair_cos = old_unit @ new_unit.T
+                out[f"old_new_mean_cosine/{label}"][layer_idx] = float(np.mean(pair_cos))
+                out[f"old_new_max_cosine/{label}"][layer_idx] = float(np.max(pair_cos))
+                out[f"norm_ratio_new_over_old/{label}"][layer_idx] = float(
+                    np.mean(np.linalg.norm(new, axis=1)) / max(np.mean(np.linalg.norm(old, axis=1)), 1e-8)
+                )
+
+        code_old_norm = np.nanmean(out["old_norm/code_trained"][:, layer_idx])
+        retune_old_norm = np.nanmean(out["old_norm/router_retuned"][:, layer_idx])
+        out["old_mean_norm_delta/retune_minus_code"][layer_idx] = retune_old_norm - code_old_norm
+
+        code_new_norm = np.nanmean(out["new_norm/code_trained"][:, layer_idx])
+        retune_new_norm = np.nanmean(out["new_norm/router_retuned"][:, layer_idx])
+        out["new_mean_norm_delta/retune_minus_code"][layer_idx] = retune_new_norm - code_new_norm
+
+    return out
+
+
 def imshow_heatmap(ax, matrix, title, layers, expert_offset, cmap, vmin=None, vmax=None, cbar_label=""):
     masked = np.ma.masked_invalid(matrix)
     image = ax.imshow(masked, aspect="auto", interpolation="nearest", cmap=cmap, vmin=vmin, vmax=vmax)
@@ -318,6 +385,170 @@ def imshow_heatmap(ax, matrix, title, layers, expert_offset, cmap, vmin=None, vm
     if cbar_label:
         cbar.set_label(cbar_label, fontsize=9)
     return image
+
+
+def plot_router_geometry_dashboard(stages, layers, out_dir: Path, old_experts: int):
+    geo = geometry_matrices(stages, layers, old_experts)
+    x = np.arange(len(layers))
+    layer_labels = [str(layer + 1) for layer in layers]
+    width = 0.35
+
+    old_code_norm = np.nanmean(geo["old_norm/code_trained"], axis=0)
+    old_retune_norm = np.nanmean(geo["old_norm/router_retuned"], axis=0)
+    new_code_norm = np.nanmean(geo["new_norm/code_trained"], axis=0)
+    new_retune_norm = np.nanmean(geo["new_norm/router_retuned"], axis=0)
+
+    fig, axes = plt.subplots(2, 2, figsize=(14.2, 9.4))
+
+    axes[0][0].bar(x - width / 2, old_code_norm, width, color="#64748b", alpha=0.88, label="old rows after code")
+    axes[0][0].bar(x + width / 2, new_code_norm, width, color="#f97316", alpha=0.88, label="new rows after code")
+    axes[0][0].set_title("Before retune: router row norm balance", weight="bold")
+    axes[0][0].set_ylabel("Mean row norm")
+    axes[0][0].set_xticks(x)
+    axes[0][0].set_xticklabels(layer_labels)
+    axes[0][0].grid(axis="y", alpha=0.24)
+    axes[0][0].legend(frameon=False)
+
+    axes[0][1].bar(x - width / 2, old_retune_norm, width, color="#64748b", alpha=0.88, label="old rows after retune")
+    axes[0][1].bar(x + width / 2, new_retune_norm, width, color="#16a34a", alpha=0.88, label="new rows after retune")
+    axes[0][1].set_title("After retune: router row norm balance", weight="bold")
+    axes[0][1].set_ylabel("Mean row norm")
+    axes[0][1].set_xticks(x)
+    axes[0][1].set_xticklabels(layer_labels)
+    axes[0][1].grid(axis="y", alpha=0.24)
+    axes[0][1].legend(frameon=False)
+
+    axes[1][0].plot(
+        x,
+        geo["norm_ratio_new_over_old/code_trained"],
+        marker="o",
+        lw=2.2,
+        color="#f97316",
+        label="after code",
+    )
+    axes[1][0].plot(
+        x,
+        geo["norm_ratio_new_over_old/router_retuned"],
+        marker="o",
+        lw=2.2,
+        color="#16a34a",
+        label="after retune",
+    )
+    axes[1][0].axhline(1.0, color="#94a3b8", lw=1.1, linestyle="--")
+    axes[1][0].set_title("New/old norm ratio", weight="bold")
+    axes[1][0].set_ylabel("mean ||new row|| / mean ||old row||")
+    axes[1][0].set_xticks(x)
+    axes[1][0].set_xticklabels(layer_labels)
+    axes[1][0].grid(alpha=0.24)
+    axes[1][0].legend(frameon=False)
+
+    axes[1][1].plot(
+        x,
+        geo["old_new_centroid_l2/code_trained"],
+        marker="o",
+        lw=2.2,
+        color="#f97316",
+        label="after code",
+    )
+    axes[1][1].plot(
+        x,
+        geo["old_new_centroid_l2/router_retuned"],
+        marker="o",
+        lw=2.2,
+        color="#16a34a",
+        label="after retune",
+    )
+    axes[1][1].set_title("Old/new router row separation", weight="bold")
+    axes[1][1].set_ylabel("centroid L2 distance")
+    axes[1][1].set_xticks(x)
+    axes[1][1].set_xticklabels(layer_labels)
+    axes[1][1].grid(alpha=0.24)
+    axes[1][1].legend(frameon=False)
+
+    fig.suptitle(
+        "FFN Router Weight Geometry\n"
+        "What router weights can show in the freeze-old-rows setting",
+        fontsize=17,
+        weight="bold",
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.91))
+    fig.savefig(out_dir / "ffn_only_router_weight_geometry_dashboard.png", dpi=230)
+    plt.close(fig)
+
+    return geo
+
+
+def plot_router_norm_heatmaps(geo, layers, out_dir: Path, old_experts: int):
+    old_values = np.concatenate(
+        [
+            geo["old_norm/wiki_only"].reshape(-1),
+            geo["old_norm/code_trained"].reshape(-1),
+            geo["old_norm/router_retuned"].reshape(-1),
+        ]
+    )
+    new_values = np.concatenate(
+        [geo["new_norm/code_trained"].reshape(-1), geo["new_norm/router_retuned"].reshape(-1)]
+    )
+    all_values = np.concatenate([old_values, new_values])
+    all_values = all_values[np.isfinite(all_values)]
+    vmax = float(np.percentile(all_values, 95)) if len(all_values) else None
+
+    fig, axes = plt.subplots(2, 3, figsize=(15.8, 7.6), squeeze=False)
+    imshow_heatmap(axes[0][0], geo["old_norm/wiki_only"], "Old rows: wiki-only", layers, 0, "Blues", vmin=0.0, vmax=vmax, cbar_label="row norm")
+    imshow_heatmap(axes[0][1], geo["old_norm/code_trained"], "Old rows: after code", layers, 0, "Blues", vmin=0.0, vmax=vmax, cbar_label="row norm")
+    imshow_heatmap(axes[0][2], geo["old_norm/router_retuned"], "Old rows: after retune", layers, 0, "Blues", vmin=0.0, vmax=vmax, cbar_label="row norm")
+    imshow_heatmap(axes[1][0], geo["new_norm/code_trained"], "New rows: after code", layers, old_experts, "Oranges", vmin=0.0, vmax=vmax, cbar_label="row norm")
+    imshow_heatmap(axes[1][1], geo["new_norm/router_retuned"], "New rows: after retune", layers, old_experts, "Greens", vmin=0.0, vmax=vmax, cbar_label="row norm")
+
+    delta = geo["new_norm/router_retuned"] - geo["new_norm/code_trained"]
+    finite_delta = delta[np.isfinite(delta)]
+    dmax = float(max(abs(np.percentile(finite_delta, 5)), abs(np.percentile(finite_delta, 95)))) if len(finite_delta) else 1.0
+    imshow_heatmap(
+        axes[1][2],
+        delta,
+        "New rows: retune - code",
+        layers,
+        old_experts,
+        "coolwarm",
+        vmin=-dmax,
+        vmax=dmax,
+        cbar_label="norm delta",
+    )
+
+    fig.suptitle("FFN Router Row Norm Heatmaps", fontsize=17, weight="bold")
+    fig.tight_layout(rect=(0, 0, 1, 0.93))
+    fig.savefig(out_dir / "ffn_only_router_weight_row_norm_heatmaps.png", dpi=230)
+    plt.close(fig)
+
+
+def plot_old_new_similarity_dashboard(geo, layers, out_dir: Path):
+    x = np.arange(len(layers))
+    layer_labels = [str(layer + 1) for layer in layers]
+
+    fig, axes = plt.subplots(1, 2, figsize=(13.0, 4.8))
+    axes[0].plot(x, geo["old_new_mean_cosine/code_trained"], marker="o", lw=2.2, color="#f97316", label="after code")
+    axes[0].plot(x, geo["old_new_mean_cosine/router_retuned"], marker="o", lw=2.2, color="#16a34a", label="after retune")
+    axes[0].axhline(0.0, color="#94a3b8", lw=1.0, linestyle="--")
+    axes[0].set_title("Mean old-new row cosine", weight="bold")
+    axes[0].set_ylabel("mean pairwise cosine")
+    axes[0].set_xticks(x)
+    axes[0].set_xticklabels(layer_labels)
+    axes[0].grid(alpha=0.24)
+    axes[0].legend(frameon=False)
+
+    axes[1].plot(x, geo["old_new_max_cosine/code_trained"], marker="o", lw=2.2, color="#f97316", label="after code")
+    axes[1].plot(x, geo["old_new_max_cosine/router_retuned"], marker="o", lw=2.2, color="#16a34a", label="after retune")
+    axes[1].set_title("Most similar old-new row pair", weight="bold")
+    axes[1].set_ylabel("max pairwise cosine")
+    axes[1].set_xticks(x)
+    axes[1].set_xticklabels(layer_labels)
+    axes[1].grid(alpha=0.24)
+    axes[1].legend(frameon=False)
+
+    fig.suptitle("Old/New Router Row Competition Geometry", fontsize=16, weight="bold")
+    fig.tight_layout(rect=(0, 0, 1, 0.90))
+    fig.savefig(out_dir / "ffn_only_router_weight_old_new_similarity.png", dpi=230)
+    plt.close(fig)
 
 
 def plot_transition_heatmaps(stages, layers, out_dir: Path, old_experts: int):
@@ -753,11 +984,10 @@ def main():
             args.normalize_rows_for_pca,
         )
     heatmap_mats = plot_transition_heatmaps(stages, common_layers, out_dir, args.old_experts)
+    geometry_mats = plot_router_geometry_dashboard(stages, common_layers, out_dir, args.old_experts)
+    plot_router_norm_heatmaps(geometry_mats, common_layers, out_dir, args.old_experts)
+    plot_old_new_similarity_dashboard(geometry_mats, common_layers, out_dir)
     plot_weight_story_dashboard(heatmap_mats, common_layers, out_dir, args.old_experts)
-    plot_layer_summary(heatmap_mats, common_layers, out_dir)
-    plot_recovery_ratio_heatmap(heatmap_mats, common_layers, out_dir)
-    plot_recovery_scatter(heatmap_mats, common_layers, out_dir)
-    plot_layer_recovery_bars(heatmap_mats, common_layers, out_dir)
 
     metrics = collect_metrics(stages, common_layers, args.old_experts)
     metrics["checkpoints"] = {stage["label"]: stage["checkpoint_dir"] for stage in stages}
