@@ -238,6 +238,196 @@ def collect_metrics(stages, layers, old_experts: int):
     return metrics
 
 
+def transition_matrices(stages, layers, old_experts: int):
+    weights = {stage["label"]: stage["by_layer"] for stage in stages}
+    max_rows = max(
+        weights[label][layer]["weight"].shape[0]
+        for label in weights
+        for layer in layers
+    )
+    n_old = min(
+        old_experts,
+        min(weights[label][layer]["weight"].shape[0] for label in weights for layer in layers),
+    )
+    n_new = max(
+        [0]
+        + [
+            min(
+                weights["code_trained"][layer]["weight"].shape[0],
+                weights["router_retuned"][layer]["weight"].shape[0],
+            )
+            - old_experts
+            for layer in layers
+        ]
+    )
+
+    def empty(rows):
+        return np.full((rows, len(layers)), np.nan, dtype=np.float32)
+
+    mats = {
+        "old_l2/wiki_to_code": empty(n_old),
+        "old_l2/wiki_to_retune": empty(n_old),
+        "old_l2/code_to_retune": empty(n_old),
+        "old_cosine/wiki_to_code": empty(n_old),
+        "old_cosine/wiki_to_retune": empty(n_old),
+        "old_cosine/code_to_retune": empty(n_old),
+        "new_l2/code_to_retune": empty(n_new),
+        "new_cosine/code_to_retune": empty(n_new),
+    }
+
+    for layer_idx, layer in enumerate(layers):
+        wiki = weights["wiki_only"][layer]["weight"]
+        code = weights["code_trained"][layer]["weight"]
+        retune = weights["router_retuned"][layer]["weight"]
+        old_rows = min(n_old, wiki.shape[0], code.shape[0], retune.shape[0])
+        for expert_id in range(old_rows):
+            pairs = {
+                "wiki_to_code": (wiki[expert_id], code[expert_id]),
+                "wiki_to_retune": (wiki[expert_id], retune[expert_id]),
+                "code_to_retune": (code[expert_id], retune[expert_id]),
+            }
+            for name, (a, b) in pairs.items():
+                mats[f"old_l2/{name}"][expert_id, layer_idx] = float(np.linalg.norm(a - b))
+                mats[f"old_cosine/{name}"][expert_id, layer_idx] = row_cosine(a, b)
+
+        new_rows = min(n_new, code.shape[0] - old_experts, retune.shape[0] - old_experts)
+        for local_id in range(max(new_rows, 0)):
+            expert_id = old_experts + local_id
+            a, b = code[expert_id], retune[expert_id]
+            mats["new_l2/code_to_retune"][local_id, layer_idx] = float(np.linalg.norm(a - b))
+            mats["new_cosine/code_to_retune"][local_id, layer_idx] = row_cosine(a, b)
+
+    mats["metadata/max_rows"] = max_rows
+    return mats
+
+
+def imshow_heatmap(ax, matrix, title, layers, expert_offset, cmap, vmin=None, vmax=None, cbar_label=""):
+    masked = np.ma.masked_invalid(matrix)
+    image = ax.imshow(masked, aspect="auto", interpolation="nearest", cmap=cmap, vmin=vmin, vmax=vmax)
+    ax.set_title(title, fontsize=11, weight="bold")
+    ax.set_xticks(np.arange(len(layers)))
+    ax.set_xticklabels([str(layer + 1) for layer in layers], fontsize=8)
+    ax.set_xlabel("Layer")
+    ax.set_yticks(np.arange(matrix.shape[0]))
+    ax.set_yticklabels([str(expert_offset + idx) for idx in range(matrix.shape[0])], fontsize=8)
+    ax.set_ylabel("Expert row")
+    ax.grid(False)
+    cbar = ax.figure.colorbar(image, ax=ax, fraction=0.046, pad=0.02)
+    if cbar_label:
+        cbar.set_label(cbar_label, fontsize=9)
+    return image
+
+
+def plot_transition_heatmaps(stages, layers, out_dir: Path, old_experts: int):
+    mats = transition_matrices(stages, layers, old_experts)
+
+    old_l2_keys = [
+        ("old_l2/wiki_to_code", "Old rows: Wiki -> Code"),
+        ("old_l2/wiki_to_retune", "Old rows: Wiki -> Retuned"),
+        ("old_l2/code_to_retune", "Old rows: Code -> Retuned"),
+    ]
+    old_l2_values = np.concatenate([mats[key].reshape(-1) for key, _ in old_l2_keys])
+    old_l2_values = old_l2_values[np.isfinite(old_l2_values)]
+    l2_vmax = float(np.percentile(old_l2_values, 95)) if len(old_l2_values) else None
+
+    fig, axes = plt.subplots(1, 3, figsize=(15.6, 4.6), squeeze=False)
+    for ax, (key, title) in zip(axes[0], old_l2_keys):
+        imshow_heatmap(ax, mats[key], title, layers, 0, "YlOrRd", vmin=0.0, vmax=l2_vmax, cbar_label="L2 distance")
+    fig.suptitle("FFN Router Weight Movement Heatmap (Old Expert Rows)", fontsize=16, weight="bold")
+    fig.tight_layout(rect=(0, 0, 1, 0.92))
+    path = out_dir / "ffn_only_router_weight_old_row_l2_heatmaps.png"
+    fig.savefig(path, dpi=230)
+    plt.close(fig)
+
+    old_cos_keys = [
+        ("old_cosine/wiki_to_code", "Old rows: Wiki vs Code"),
+        ("old_cosine/wiki_to_retune", "Old rows: Wiki vs Retuned"),
+        ("old_cosine/code_to_retune", "Old rows: Code vs Retuned"),
+    ]
+    fig, axes = plt.subplots(1, 3, figsize=(15.6, 4.6), squeeze=False)
+    for ax, (key, title) in zip(axes[0], old_cos_keys):
+        imshow_heatmap(ax, mats[key], title, layers, 0, "viridis", vmin=0.0, vmax=1.0, cbar_label="row cosine")
+    fig.suptitle("FFN Router Weight Similarity Heatmap (Old Expert Rows)", fontsize=16, weight="bold")
+    fig.tight_layout(rect=(0, 0, 1, 0.92))
+    path_cos = out_dir / "ffn_only_router_weight_old_row_cosine_heatmaps.png"
+    fig.savefig(path_cos, dpi=230)
+    plt.close(fig)
+
+    if mats["new_l2/code_to_retune"].shape[0] > 0:
+        fig, axes = plt.subplots(1, 2, figsize=(10.6, 4.6), squeeze=False)
+        imshow_heatmap(
+            axes[0][0],
+            mats["new_l2/code_to_retune"],
+            "New rows: Code -> Retuned",
+            layers,
+            old_experts,
+            "YlOrRd",
+            vmin=0.0,
+            cbar_label="L2 distance",
+        )
+        imshow_heatmap(
+            axes[0][1],
+            mats["new_cosine/code_to_retune"],
+            "New rows: Code vs Retuned",
+            layers,
+            old_experts,
+            "viridis",
+            vmin=0.0,
+            vmax=1.0,
+            cbar_label="row cosine",
+        )
+        fig.suptitle("FFN Router Weight Movement Heatmap (New Expert Rows)", fontsize=16, weight="bold")
+        fig.tight_layout(rect=(0, 0, 1, 0.92))
+        path_new = out_dir / "ffn_only_router_weight_new_row_heatmaps.png"
+        fig.savefig(path_new, dpi=230)
+        plt.close(fig)
+
+    return mats
+
+
+def plot_layer_summary(mats, layers, out_dir: Path):
+    x = np.arange(len(layers))
+    layer_labels = [str(layer + 1) for layer in layers]
+
+    def colmean(key):
+        return np.nanmean(mats[key], axis=0)
+
+    wiki_to_code = colmean("old_l2/wiki_to_code")
+    wiki_to_retune = colmean("old_l2/wiki_to_retune")
+    code_to_retune = colmean("old_l2/code_to_retune")
+    return_ratio = wiki_to_retune / np.maximum(wiki_to_code, 1e-8)
+
+    fig, axes = plt.subplots(1, 2, figsize=(13.4, 4.8))
+    axes[0].plot(x, wiki_to_code, marker="o", lw=2.2, color="#f97316", label="Wiki -> Code")
+    axes[0].plot(x, wiki_to_retune, marker="o", lw=2.2, color="#16a34a", label="Wiki -> Retuned")
+    axes[0].plot(x, code_to_retune, marker="o", lw=2.2, color="#64748b", label="Code -> Retuned")
+    axes[0].set_title("Mean row movement by layer", weight="bold")
+    axes[0].set_ylabel("Mean L2 distance")
+    axes[0].set_xticks(x)
+    axes[0].set_xticklabels(layer_labels)
+    axes[0].set_xlabel("Layer")
+    axes[0].grid(alpha=0.25)
+    axes[0].legend(frameon=False)
+
+    axes[1].axhline(1.0, color="#94a3b8", lw=1.2, linestyle="--", label="No recovery")
+    axes[1].plot(x, return_ratio, marker="o", lw=2.4, color="#2563eb", label="Retuned distance / Code distance")
+    axes[1].fill_between(x, 0, np.minimum(return_ratio, 1.0), color="#2563eb", alpha=0.10)
+    axes[1].set_title("Wiki-space recovery ratio", weight="bold")
+    axes[1].set_ylabel("Lower means closer to wiki-only")
+    axes[1].set_xticks(x)
+    axes[1].set_xticklabels(layer_labels)
+    axes[1].set_xlabel("Layer")
+    axes[1].set_ylim(bottom=0)
+    axes[1].grid(alpha=0.25)
+    axes[1].legend(frameon=False)
+
+    fig.suptitle("FFN Router Weight Change Summary", fontsize=16, weight="bold")
+    fig.tight_layout(rect=(0, 0, 1, 0.92))
+    path = out_dir / "ffn_only_router_weight_layer_summary.png"
+    fig.savefig(path, dpi=230)
+    plt.close(fig)
+
+
 def plot_layer_grid(stages, layers, out_path: Path, old_experts: int, display_layer_offset: int, normalize_for_pca: bool):
     n_layers = len(layers)
     ncols = min(3, n_layers)
@@ -318,9 +508,14 @@ def plot_layer_grid(stages, layers, out_path: Path, old_experts: int, display_la
     for panel_idx in range(n_layers, nrows * ncols):
         axes[panel_idx // ncols][panel_idx % ncols].axis("off")
 
-    handles, labels = axes[0][0].get_legend_handles_labels()
+    handles, labels = [], []
+    for ax_row in axes:
+        for ax in ax_row:
+            h, l = ax.get_legend_handles_labels()
+            handles.extend(h)
+            labels.extend(l)
     dedup = dict(zip(labels, handles))
-    fig.legend(dedup.values(), dedup.keys(), loc="upper center", ncol=4, frameon=False)
+    fig.legend(dedup.values(), dedup.keys(), loc="upper center", ncol=3, frameon=False)
     suffix = "row-normalized " if normalize_for_pca else ""
     fig.suptitle(f"FFN-only Router Weight Row Trajectory by Layer ({suffix}PCA)", y=0.995, fontsize=16, weight="bold")
     fig.tight_layout(rect=(0, 0, 1, 0.94))
@@ -351,6 +546,8 @@ def main():
         args.display_layer_offset,
         args.normalize_rows_for_pca,
     )
+    heatmap_mats = plot_transition_heatmaps(stages, common_layers, out_dir, args.old_experts)
+    plot_layer_summary(heatmap_mats, common_layers, out_dir)
 
     metrics = collect_metrics(stages, common_layers, args.old_experts)
     metrics["checkpoints"] = {stage["label"]: stage["checkpoint_dir"] for stage in stages}
