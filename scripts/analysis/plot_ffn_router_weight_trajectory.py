@@ -430,6 +430,81 @@ def plot_layer_summary(mats, layers, out_dir: Path):
     plt.close(fig)
 
 
+def plot_weight_story_dashboard(mats, layers, out_dir: Path, old_experts: int):
+    layer_x = np.arange(len(layers))
+    layer_labels = [str(layer + 1) for layer in layers]
+
+    old_code_from_wiki = np.nanmean(mats["old_l2/wiki_to_code"], axis=0)
+    old_retune_from_wiki = np.nanmean(mats["old_l2/wiki_to_retune"], axis=0)
+    old_code_to_retune = np.nanmean(mats["old_l2/code_to_retune"], axis=0)
+    old_retune_cos_wiki = np.nanmean(mats["old_cosine/wiki_to_retune"], axis=0)
+
+    has_new = mats["new_l2/code_to_retune"].shape[0] > 0
+    new_code_to_retune = np.nanmean(mats["new_l2/code_to_retune"], axis=0) if has_new else None
+    new_cos = np.nanmean(mats["new_cosine/code_to_retune"], axis=0) if has_new else None
+
+    fig, axes = plt.subplots(2, 2, figsize=(13.8, 9.2))
+    width = 0.34
+
+    axes[0][0].bar(layer_x - width / 2, old_code_from_wiki, width, color="#f97316", alpha=0.85, label="after code training")
+    axes[0][0].bar(layer_x + width / 2, old_retune_from_wiki, width, color="#16a34a", alpha=0.85, label="after router retune")
+    axes[0][0].set_title("Old router rows: distance from wiki-only", weight="bold")
+    axes[0][0].set_ylabel("Mean L2 distance")
+    axes[0][0].set_xticks(layer_x)
+    axes[0][0].set_xticklabels(layer_labels)
+    axes[0][0].grid(axis="y", alpha=0.24)
+    axes[0][0].legend(frameon=False)
+    axes[0][0].text(
+        0.02,
+        0.96,
+        "If orange is near zero,\nold rows were effectively unchanged\nby code training.",
+        transform=axes[0][0].transAxes,
+        ha="left",
+        va="top",
+        fontsize=9,
+        bbox=dict(facecolor="white", edgecolor="#cbd5e1", alpha=0.90, boxstyle="round,pad=0.35"),
+    )
+
+    axes[0][1].bar(layer_x, old_code_to_retune, color="#64748b", alpha=0.88)
+    axes[0][1].set_title("Old router rows: movement caused by retune", weight="bold")
+    axes[0][1].set_ylabel("Mean L2 distance, code -> retuned")
+    axes[0][1].set_xticks(layer_x)
+    axes[0][1].set_xticklabels(layer_labels)
+    axes[0][1].grid(axis="y", alpha=0.24)
+
+    if has_new:
+        axes[1][0].bar(layer_x, new_code_to_retune, color="#0ea5e9", alpha=0.88)
+        axes[1][0].set_title(f"New router rows {old_experts}+ : movement caused by retune", weight="bold")
+        axes[1][0].set_ylabel("Mean L2 distance, code -> retuned")
+    else:
+        axes[1][0].text(0.5, 0.5, "No new rows found", transform=axes[1][0].transAxes, ha="center", va="center", fontsize=13)
+        axes[1][0].set_title("New router rows", weight="bold")
+    axes[1][0].set_xticks(layer_x)
+    axes[1][0].set_xticklabels(layer_labels)
+    axes[1][0].grid(axis="y", alpha=0.24)
+
+    axes[1][1].plot(layer_x, old_retune_cos_wiki, marker="o", lw=2.2, color="#16a34a", label="old rows: wiki vs retuned")
+    if has_new:
+        axes[1][1].plot(layer_x, new_cos, marker="o", lw=2.2, color="#0ea5e9", label="new rows: code vs retuned")
+    axes[1][1].set_title("Cosine similarity after retune", weight="bold")
+    axes[1][1].set_ylabel("Mean row cosine")
+    axes[1][1].set_ylim(0.0, 1.02)
+    axes[1][1].set_xticks(layer_x)
+    axes[1][1].set_xticklabels(layer_labels)
+    axes[1][1].grid(alpha=0.24)
+    axes[1][1].legend(frameon=False)
+
+    fig.suptitle(
+        "FFN Router Weight Story\n"
+        "Code training barely changes old rows; router retune moves old/new rows",
+        fontsize=17,
+        weight="bold",
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.91))
+    fig.savefig(out_dir / "ffn_only_router_weight_story_dashboard.png", dpi=230)
+    plt.close(fig)
+
+
 def plot_recovery_ratio_heatmap(mats, layers, out_dir: Path):
     wiki_to_code = mats["old_l2/wiki_to_code"]
     wiki_to_retune = mats["old_l2/wiki_to_retune"]
@@ -441,8 +516,8 @@ def plot_recovery_ratio_heatmap(mats, layers, out_dir: Path):
     fig, ax = plt.subplots(figsize=(10.8, 5.2))
     image = ax.imshow(np.ma.masked_invalid(ratio), aspect="auto", cmap="RdYlGn_r", norm=norm)
     ax.set_title(
-        "Router Weight Recovery Ratio by Expert Row\n"
-        "lower than 1.0 = retune moved back toward wiki-only",
+        "Router Weight Ratio by Expert Row\n"
+        "diagnostic only: unstable when Wiki->Code distance is near zero",
         fontsize=15,
         weight="bold",
     )
@@ -504,7 +579,7 @@ def plot_recovery_scatter(mats, layers, out_dir: Path):
     ax.set_aspect("equal", adjustable="box")
     ax.set_xlabel("Distance moved by code training: ||code - wiki||")
     ax.set_ylabel("Distance after retune: ||retuned - wiki||")
-    ax.set_title("Router Weight Recovery Scatter\npoints below diagonal recovered toward wiki-only", fontsize=14, weight="bold")
+    ax.set_title("Router Weight Distance Scatter\nuse carefully when x-axis is near zero", fontsize=14, weight="bold")
     ax.grid(alpha=0.24)
     ax.legend(frameon=False, loc="upper left")
     cbar = fig.colorbar(scatter, ax=ax, fraction=0.046, pad=0.02)
@@ -678,6 +753,7 @@ def main():
             args.normalize_rows_for_pca,
         )
     heatmap_mats = plot_transition_heatmaps(stages, common_layers, out_dir, args.old_experts)
+    plot_weight_story_dashboard(heatmap_mats, common_layers, out_dir, args.old_experts)
     plot_layer_summary(heatmap_mats, common_layers, out_dir)
     plot_recovery_ratio_heatmap(heatmap_mats, common_layers, out_dir)
     plot_recovery_scatter(heatmap_mats, common_layers, out_dir)
