@@ -164,6 +164,13 @@ def percentile_bounds(points: np.ndarray, trim_percentile: float, pad_fraction: 
     return xmin - xpad, xmax + xpad, ymin - ypad, ymax + ypad
 
 
+def density_color_steps(color: str, num_steps: int, max_alpha: float):
+    rgb = matplotlib.colors.to_rgb(color)
+    min_alpha = max(0.06, max_alpha * 0.22)
+    alphas = np.linspace(min_alpha, max_alpha, num_steps)
+    return [(rgb[0], rgb[1], rgb[2], float(alpha)) for alpha in alphas]
+
+
 def draw_density_cloud(
     ax,
     points: np.ndarray,
@@ -196,16 +203,35 @@ def draw_density_cloud(
     if len(nonzero) == 0:
         return
 
-    levels = np.unique(np.percentile(nonzero, [45, 62, 78, 90, 97]))
+    levels = np.unique(
+        np.concatenate(
+            [
+                [float(nonzero.min())],
+                np.percentile(nonzero, [35, 50, 65, 78, 88, 95]),
+                [float(nonzero.max()) + 1e-6],
+            ]
+        )
+    )
     levels = levels[levels > 0]
-    if len(levels) < 2:
+    if len(levels) < 3:
         ax.scatter(clipped[:, 0], clipped[:, 1], s=10, alpha=0.35, c=color, label=label, edgecolors="none")
         return
 
     xcenters = (xedges[:-1] + xedges[1:]) / 2.0
     ycenters = (yedges[:-1] + yedges[1:]) / 2.0
-    ax.contourf(xcenters, ycenters, hist.T, levels=levels, colors=[color], alpha=alpha, antialiased=True)
-    ax.contour(xcenters, ycenters, hist.T, levels=levels, colors=[color], alpha=0.72, linewidths=0.8)
+    fill_colors = density_color_steps(color, len(levels) - 1, alpha)
+    line_levels = levels[1:-1]
+    line_widths = np.linspace(0.55, 1.45, len(line_levels)) if len(line_levels) else 0.8
+    ax.contourf(xcenters, ycenters, hist.T, levels=levels, colors=fill_colors, antialiased=True)
+    ax.contour(
+        xcenters,
+        ycenters,
+        hist.T,
+        levels=line_levels,
+        colors=[color],
+        alpha=0.80,
+        linewidths=line_widths,
+    )
     # A faint point layer keeps sparse tails visible without turning the plot back into a dot cloud.
     ax.scatter(clipped[:, 0], clipped[:, 1], s=5, alpha=0.08, c=color, edgecolors="none")
     ax.scatter([], [], c=color, alpha=0.75, label=label)
