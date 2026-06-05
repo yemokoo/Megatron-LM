@@ -11,9 +11,9 @@ export LOCAL_WEIGHTS="${LOCAL_WEIGHTS:-$LOCAL_BASE/weights}"
 export LOCAL_SSD_ROOT="${LOCAL_SSD_ROOT:-/tmp/flame-moe}"
 export G2_ROOT="${G2_ROOT:-$LOCAL_WEIGHTS/a100/mha/g2-checkpoints}"
 
-export SOURCE_WEIGHTS="${SOURCE_WEIGHTS:-$G2_ROOT/code/phase1/g2-top4-e8to16-ffn352-r256-wiki-to-code-shared-router-qkvo-all-experts-router-mha-a100-bf16-mb72-1800}"
+export SOURCE_WEIGHTS="${SOURCE_WEIGHTS:-$G2_ROOT/code/phase1/g2-exp2-top4-e8to16-ffn352-r256-wiki-to-code-new-experts-all-router-mha-a100-bf16-mb72-1800}"
 export SWEEP_ROOT="${SWEEP_ROOT:-$G2_ROOT/code/phase3_data_budget}"
-export RUN_ID="${RUN_ID:-g2-exp1-phase3-router-only-retune-wikicode-data-budget-100pct-checkpoints-from-all-experts-router-no-reinit-mb72-3600}"
+export RUN_ID="${RUN_ID:-g2-exp2-phase3-router-only-retune-wikicode-data-budget-100pct-checkpoints-from-new-experts-all-router-no-reinit-mb72-3600}"
 export TRAIN_WEIGHTS="${TRAIN_WEIGHTS:-$SWEEP_ROOT/$RUN_ID}"
 export MICRO_BATCH_SIZE="${MICRO_BATCH_SIZE:-72}"
 export GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-2304}"
@@ -23,11 +23,22 @@ export SAVE_EVERY_PERCENT_ITERS="${SAVE_EVERY_PERCENT_ITERS:-36}"
 export MASTER_PORT="${MASTER_PORT:-29810}"
 export WANDB_MODE="${WANDB_MODE:-offline}"
 export WANDB_PROJECT="${WANDB_PROJECT:-flame-continual-top2-qv-lora}"
-export WANDB_EXP_NAME="${WANDB_EXP_NAME:-G2 exp1 phase3 router data budget 1-100% wiki+code}"
+export WANDB_EXP_NAME="${WANDB_EXP_NAME:-G2 exp2 phase3 router data budget 1-100% wiki+code}"
 export PROBE_EVAL_ITERS="${PROBE_EVAL_ITERS:-25}"
 export SECONDARY_PROBE_EVAL_ITERS="${SECONDARY_PROBE_EVAL_ITERS:-25}"
 export TRAIN_ROUTER_USAGE_LOG_INTERVAL="${TRAIN_ROUTER_USAGE_LOG_INTERVAL:-0}"
 export DRY_RUN="${DRY_RUN:-0}"
+
+python - <<'PY'
+import importlib.util
+import sys
+
+missing = [name for name in ("grouped_gemm", "wandb") if importlib.util.find_spec(name) is None]
+if missing:
+    print("[ERROR] missing python packages:", ", ".join(missing), file=sys.stderr)
+    print("[HINT] install grouped_gemm/wandb in the active KT environment before launching.", file=sys.stderr)
+    raise SystemExit(1)
+PY
 
 if ps -ef | grep -E 'pretrain_gpt.py|torchrun' | grep -v grep >/dev/null; then
     echo "[ERROR] another training process is running"
@@ -42,7 +53,7 @@ fi
 
 source_step="$(tr -d '\n\r[:space:]' < "$SOURCE_WEIGHTS/latest_checkpointed_iteration.txt")"
 target_step="$((source_step + FULL_100PCT_RETUNE_ITERS))"
-outlog="g2_exp1_phase3_router_data_budget_100pct_checkpoints_$(date +%Y%m%d_%H%M%S).log"
+outlog="g2_exp2_phase3_router_data_budget_100pct_checkpoints_$(date +%Y%m%d_%H%M%S).log"
 
 copy_source_if_needed() {
     if [ -f "$TRAIN_WEIGHTS/latest_checkpointed_iteration.txt" ]; then
@@ -68,7 +79,7 @@ copy_source_if_needed() {
     } > "$TRAIN_WEIGHTS/PHASE3_SOURCE.txt"
 }
 
-echo "[CONFIG] G2 exp1 phase3 router-only data-budget run"
+echo "[CONFIG] G2 exp2 phase3 router-only data-budget run"
 echo "[CONFIG] source=$SOURCE_WEIGHTS"
 echo "[CONFIG] source_step=$source_step"
 echo "[CONFIG] train_weights=$TRAIN_WEIGHTS"
@@ -100,9 +111,12 @@ fi
 
 copy_source_if_needed
 
+echo "[OUTLOG] $outlog"
+
 WANDB_MODE="$WANDB_MODE" \
 RUN_ID="$RUN_ID" \
 TRAIN_WEIGHTS="$TRAIN_WEIGHTS" \
+TRAIN_ITERS="$target_step" \
 RETUNE_ITERS="$FULL_100PCT_RETUNE_ITERS" \
 MICRO_BATCH_SIZE="$MICRO_BATCH_SIZE" \
 GLOBAL_BATCH_SIZE="$GLOBAL_BATCH_SIZE" \
