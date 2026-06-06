@@ -255,16 +255,35 @@ def plot_single_probe_bar(
 ) -> None:
     plt = maybe_import_matplotlib()
     probe_points = nearest_points(by_probe(points)[probe], percents)
+    values = [point.next_token_acc for point in probe_points]
+    value_min = min(values)
+    value_max = max(values)
+    value_range = value_max - value_min
+    y_pad = max(value_range * 0.45, 0.0007)
+    y_floor = value_min - y_pad
+    y_top = value_max + y_pad
 
     x = list(range(len(percents)))
     fig, ax = plt.subplots(figsize=(12, 7))
-    ax.bar(
+    bars = ax.bar(
         x,
-        [point.next_token_acc for point in probe_points],
+        [value - y_floor for value in values],
+        bottom=y_floor,
         width=0.64,
         color=PROBE_COLOR[probe],
         label=PROBE_LABEL[probe],
     )
+    for bar, value in zip(bars, values):
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            value - max((y_top - y_floor) * 0.035, 0.00015),
+            f"{value:.4f}",
+            ha="center",
+            va="top",
+            color="white",
+            fontsize=13,
+            fontweight="bold",
+        )
     ax.set_title(
         f"Router-Only Finetune Data Budget: {PROBE_LABEL[probe]} Selected Milestones",
         fontsize=18,
@@ -274,6 +293,7 @@ def plot_single_probe_bar(
     ax.set_ylabel("Next-token accuracy")
     ax.set_xticks(x)
     ax.set_xticklabels([f"{percent:g}%" for percent in percents])
+    ax.set_ylim(y_floor, y_top)
     ax.grid(True, axis="y", alpha=0.25)
     ax.legend(frameon=False, loc="best")
     fig.tight_layout()
