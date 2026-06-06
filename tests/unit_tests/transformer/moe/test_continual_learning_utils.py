@@ -8,9 +8,11 @@ from megatron.core.transformer.moe.continual_learning_utils import (
     expand_moe_model,
     freeze_all_but_new_moe_params,
     freeze_all_but_new_shared_router_params,
+    freeze_all_but_partial_old_and_new_shared_router_hybrid_params,
     freeze_all_but_router_params,
     freeze_all_but_shared_router_params,
     teacher_student_router_kl,
+    load_partial_freeze_mask,
 )
 from megatron.core.transformer.moe.experts import GroupedMLP
 from megatron.core.transformer.moe.router import TopKRouter
@@ -127,6 +129,53 @@ class TwoRouterOnlyModel(torch.nn.Module):
         self.ffn_expert_router = TopKRouter(config)
 
 
+class MinimalSharedRouterHybridLayer(torch.nn.Module):
+    def __init__(self, layer_number, num_experts=8, hidden_size=3, expert_width=2):
+        super().__init__()
+        config = TransformerConfig(
+            num_layers=1,
+            hidden_size=hidden_size,
+            num_attention_heads=1,
+            num_moe_experts=num_experts,
+            moe_router_topk=4,
+            attn_lora_num_experts=num_experts,
+            attn_full_rank_lora_rank=2,
+            attn_full_rank_lora_alpha=2,
+            attn_full_rank_lora_targets="qkvo",
+            attn_full_rank_lora_active_targets="",
+            use_cpu_initialization=True,
+            params_dtype=torch.float32,
+        )
+        self.layer_number = layer_number
+        self.shared_expert_router = TopKRouter(config)
+        self.mlp = torch.nn.Module()
+        self.mlp.ffn_experts = MinimalGroupedMLP(
+            num_experts=num_experts,
+            hidden_size=hidden_size,
+            expert_width=expert_width,
+        )
+        self.self_attention = torch.nn.Module()
+        self.self_attention.attn_lora_experts = SharedFullRankLoraExperts(
+            config,
+            input_size=hidden_size,
+            query_output_size=hidden_size,
+            value_output_size=hidden_size,
+        )
+        self.dense = torch.nn.Linear(hidden_size, hidden_size)
+
+
+class MinimalSharedRouterHybridModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.layers = torch.nn.ModuleList(
+            [
+                MinimalSharedRouterHybridLayer(layer_number=2),
+                MinimalSharedRouterHybridLayer(layer_number=3),
+            ]
+        )
+        self.embedding = torch.nn.Linear(3, 3)
+
+
 def _two_router_test_config(num_experts=8, hidden_size=8, topk=4):
     return TransformerConfig(
         num_layers=1,
@@ -226,6 +275,47 @@ def _trainable_expert_and_router_loss(model):
     for param in model.attn_lora_experts.parameters():
         loss = loss + param.sum()
     return loss
+
+
+def _partial_shared_router_hybrid_loss(model):
+    loss = torch.tensor(0.0)
+    for layer in model.layers:
+        loss = loss + layer.shared_expert_router.weight.sum()
+        if getattr(layer.shared_expert_router, "expert_bias", None) is not None:
+            loss = loss + layer.shared_expert_router.expert_bias.sum()
+        loss = loss + layer.mlp.ffn_experts.weight1.sum()
+        loss = loss + layer.mlp.ffn_experts.weight2.sum()
+        for param in layer.self_attention.attn_lora_experts.parameters():
+            loss = loss + param.sum()
+    return loss
+
+
+def _assert_router_rows_masked(grad, frozen_rows, num_experts=8):
+    train_rows = [idx for idx in range(num_experts) if idx not in frozen_rows]
+    assert torch.count_nonzero(grad[frozen_rows]) == 0
+    assert torch.all(grad[train_rows] == 1)
+
+
+def _assert_grouped_mlp_experts_masked(module, frozen_rows, num_experts=8):
+    width1 = module.weight1.shape[1] // num_experts
+    width2 = module.weight2.shape[0] // num_experts
+    for expert_idx in range(num_experts):
+        weight1_grad = module.weight1.grad[:, expert_idx * width1 : (expert_idx + 1) * width1]
+        weight2_grad = module.weight2.grad[expert_idx * width2 : (expert_idx + 1) * width2, :]
+        if expert_idx in frozen_rows:
+            assert torch.count_nonzero(weight1_grad) == 0
+            assert torch.count_nonzero(weight2_grad) == 0
+        else:
+            assert torch.all(weight1_grad == 1)
+            assert torch.all(weight2_grad == 1)
+
+
+def _assert_attention_expert_rows_masked(module, frozen_rows, num_experts=8):
+    train_rows = [idx for idx in range(num_experts) if idx not in frozen_rows]
+    for param in module.parameters():
+        assert param.requires_grad
+        assert torch.count_nonzero(param.grad[frozen_rows]) == 0
+        assert torch.all(param.grad[train_rows] == 1)
 
 
 def test_freeze_all_but_new_moe_params_masks_existing_router_rows_by_default():
@@ -345,6 +435,53 @@ def test_freeze_all_but_new_shared_router_params_trains_only_new_router_rows():
     assert model.q_full_rank_lora.weight.grad is None
     assert not model.dense.weight.requires_grad
     assert model.dense.weight.grad is None
+
+
+def test_load_partial_freeze_mask_converts_layer_specific_1based_ids(tmp_path):
+    mask_path = tmp_path / "partial_freeze.json"
+    mask_path.write_text(
+        '{"expert_index_base": 1, "layers": {"2": [7, 2, 1, 4], "3": [5, 1, 3, 4]}}',
+        encoding="utf-8",
+    )
+
+    mask = load_partial_freeze_mask(mask_path, num_existing_experts=8)
+
+    assert mask == {
+        2: {6, 1, 0, 3},
+        3: {4, 0, 2, 3},
+    }
+
+
+def test_partial_old_expert_freeze_applies_different_masks_per_layer():
+    model = MinimalSharedRouterHybridModel()
+    frozen_by_layer = {
+        2: {0, 2},
+        3: {1, 3},
+    }
+
+    summary = freeze_all_but_partial_old_and_new_shared_router_hybrid_params(
+        model,
+        num_existing_experts=4,
+        frozen_existing_experts_by_layer=frozen_by_layer,
+    )
+    model.zero_grad(set_to_none=True)
+    _partial_shared_router_hybrid_loss(model).backward()
+
+    assert summary["layers"]["2"]["frozen_existing_experts_0based"] == [0, 2]
+    assert summary["layers"]["3"]["frozen_existing_experts_0based"] == [1, 3]
+    assert summary["layers"]["2"]["trainable_existing_experts_0based"] == [1, 3]
+    assert summary["layers"]["3"]["trainable_existing_experts_0based"] == [0, 2]
+
+    for layer in model.layers:
+        frozen = frozen_by_layer[layer.layer_number]
+        _assert_router_rows_masked(layer.shared_expert_router.weight.grad, frozen)
+        _assert_grouped_mlp_experts_masked(layer.mlp.ffn_experts, frozen)
+        _assert_attention_expert_rows_masked(layer.self_attention.attn_lora_experts, frozen)
+        assert not layer.dense.weight.requires_grad
+        assert layer.dense.weight.grad is None
+
+    assert not model.embedding.weight.requires_grad
+    assert model.embedding.weight.grad is None
 
 
 def test_allow_existing_router_grads_temporarily_bypasses_existing_row_mask():
