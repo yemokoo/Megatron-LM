@@ -28,13 +28,12 @@ from megatron.core.datasets.gpt_dataset import GPTDataset, GPTDatasetConfig, Moc
 from megatron.core.datasets.utils import get_blend_from_list
 from megatron.core.enums import ModelType
 from megatron.core.transformer.shared_router_hybrid import capture_shared_router_inputs
-from megatron.legacy.data.data_samplers import build_pretraining_data_loader
 from megatron.training import get_args, get_tokenizer, print_rank_0
 from megatron.training.checkpointing import load_checkpoint
 from megatron.training.initialize import initialize_megatron
 from megatron.training.training import _collect_current_shared_routers, _router_logits, get_model
 
-from pretrain_gpt import get_batch, is_dataset_built_on_rank, model_provider
+from pretrain_gpt import build_pretraining_data_loader, get_batch, is_dataset_built_on_rank, model_provider
 
 
 def add_router_softmax_args(parser):
