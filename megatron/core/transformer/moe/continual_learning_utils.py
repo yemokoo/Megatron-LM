@@ -1,6 +1,8 @@
+import json
 import re
 from contextlib import contextmanager
-from typing import Any, Dict, List
+from pathlib import Path
+from typing import Any, Dict, List, Set
 
 import torch
 import torch.nn.functional as F
@@ -208,6 +210,46 @@ def _freeze_router(module, num_existing_experts):
     module.weight.register_hook(_zero_existing_router_grads)
 
 
+def _zero_grad_rows(param, frozen_indices: Set[int], *, allow_router_grads: bool = False):
+    if param is None or not frozen_indices:
+        return
+    rows = tuple(sorted(int(idx) for idx in frozen_indices))
+
+    def _zero_rows(grad):
+        if allow_router_grads and _ALLOW_EXISTING_ROUTER_GRADS:
+            return grad
+        grad = grad.clone()
+        row_idx = torch.tensor(rows, device=grad.device, dtype=torch.long)
+        return grad.index_fill(0, row_idx, 0)
+
+    param.register_hook(_zero_rows)
+
+
+def _zero_grouped_mlp_expert_grads(module, frozen_indices: Set[int]):
+    if not frozen_indices:
+        return
+    weight1_per_expert = module.weight1.shape[1] // module.num_local_experts
+    weight2_per_expert = module.weight2.shape[0] // module.num_local_experts
+    frozen = tuple(sorted(int(idx) for idx in frozen_indices))
+
+    def _zero_weight1_rows(grad):
+        grad = grad.clone()
+        for expert_idx in frozen:
+            start = expert_idx * weight1_per_expert
+            grad[:, start : start + weight1_per_expert].zero_()
+        return grad
+
+    def _zero_weight2_rows(grad):
+        grad = grad.clone()
+        for expert_idx in frozen:
+            start = expert_idx * weight2_per_expert
+            grad[start : start + weight2_per_expert, :].zero_()
+        return grad
+
+    module.weight1.register_hook(_zero_weight1_rows)
+    module.weight2.register_hook(_zero_weight2_rows)
+
+
 def _freeze_grouped_experts(module, num_existing_experts):
     weight1_per_expert = module.weight1.shape[1] // module.num_local_experts
     weight2_per_expert = module.weight2.shape[0] // module.num_local_experts
@@ -262,6 +304,24 @@ def _freeze_shared_full_rank_lora_experts(module, num_existing_experts):
         param = getattr(module, attr_name, None)
         if param is not None:
             param.register_hook(_zero_existing_expert_grads)
+
+
+def _zero_shared_full_rank_lora_expert_grads(module, frozen_indices: Set[int]):
+    for attr_name in (
+        "qkv_lora_a",
+        "qkv_lora_b",
+        "q_lora_a",
+        "q_lora_b",
+        "k_lora_a",
+        "k_lora_b",
+        "v_lora_a",
+        "v_lora_b",
+        "proj_lora_a",
+        "proj_lora_b",
+    ):
+        param = getattr(module, attr_name, None)
+        if param is not None:
+            _zero_grad_rows(param, frozen_indices)
 
 
 def _freeze_qv_lora_router(module, num_existing_experts):
@@ -421,6 +481,189 @@ def freeze_all_but_new_moe_params(
         if proj_full_rank_lora is not None:
             for param in proj_full_rank_lora.parameters():
                 param.requires_grad = True
+
+
+def load_partial_freeze_mask(mask_path, num_existing_experts):
+    """Load a layer -> frozen existing expert ids mask.
+
+    JSON may be either:
+      {"layers": {"2": [7, 2, 1, 4], ...}, "expert_index_base": 1}
+    or a raw mapping:
+      {"2": [7, 2, 1, 4], ...}
+
+    Stored expert ids are 1-based by default for readability; returned ids are
+    always 0-based for tensor indexing.
+    """
+    path = Path(mask_path)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    mapping = payload.get("layers", payload)
+    index_base = int(payload.get("expert_index_base", 1))
+    if index_base not in (0, 1):
+        raise ValueError(f"expert_index_base must be 0 or 1, got {index_base}")
+
+    result: Dict[int, Set[int]] = {}
+    for layer_key, experts in mapping.items():
+        if not isinstance(experts, list):
+            continue
+        layer = int(layer_key)
+        frozen = {int(expert) - index_base for expert in experts}
+        invalid = sorted(idx for idx in frozen if idx < 0 or idx >= num_existing_experts)
+        if invalid:
+            raise ValueError(
+                f"Invalid frozen expert ids for layer {layer}: {invalid} "
+                f"(0-based, num_existing_experts={num_existing_experts})"
+            )
+        result[layer] = frozen
+    if not result:
+        raise ValueError(f"No layer freeze entries found in {mask_path}")
+    return result
+
+
+def _set_shared_lora_experts_trainable(module, frozen_existing_experts: Set[int]):
+    if isinstance(module, SharedQVLoraExperts):
+        for param in (
+            module.q_lora_a,
+            module.q_lora_b,
+            module.v_lora_a,
+            module.v_lora_b,
+            getattr(module, "o_lora_a", None),
+            getattr(module, "o_lora_b", None),
+        ):
+            if param is not None:
+                param.requires_grad = True
+                _zero_grad_rows(param, frozen_existing_experts)
+        return True
+
+    if isinstance(module, SharedFullRankLoraExperts):
+        for attr_name in (
+            "qkv_lora_a",
+            "qkv_lora_b",
+            "q_lora_a",
+            "q_lora_b",
+            "k_lora_a",
+            "k_lora_b",
+            "v_lora_a",
+            "v_lora_b",
+            "proj_lora_a",
+            "proj_lora_b",
+        ):
+            param = getattr(module, attr_name, None)
+            if param is not None:
+                param.requires_grad = True
+        _zero_shared_full_rank_lora_expert_grads(module, frozen_existing_experts)
+        return True
+
+    return False
+
+
+def _set_moe_experts_trainable(module, num_existing_experts, frozen_existing_experts: Set[int]):
+    if isinstance(module, SequentialMLP):
+        for expert_idx, expert in enumerate(module.local_experts):
+            trainable = expert_idx >= num_existing_experts or expert_idx not in frozen_existing_experts
+            for param in expert.parameters():
+                param.requires_grad = trainable
+        return True
+
+    if isinstance(module, GroupedMLP):
+        module.weight1.requires_grad = True
+        module.weight2.requires_grad = True
+        _zero_grouped_mlp_expert_grads(module, frozen_existing_experts)
+        return True
+
+    if isinstance(module, TEGroupedMLP):
+        for name, param in module.named_parameters():
+            match = _EXPERT_SUFFIX_RE.search(name)
+            if match is None:
+                continue
+            expert_idx = int(match.group(1))
+            param.requires_grad = (
+                expert_idx >= num_existing_experts or expert_idx not in frozen_existing_experts
+            )
+        return True
+
+    return False
+
+
+def freeze_all_but_partial_old_and_new_shared_router_hybrid_params(
+    model,
+    num_existing_experts,
+    frozen_existing_experts_by_layer: Dict[int, Set[int]],
+):
+    """Train new/code experts plus non-selected old/wiki experts.
+
+    Dense trunk parameters stay frozen. For each shared-router hybrid layer,
+    ``frozen_existing_experts_by_layer[layer_number]`` identifies old/wiki expert
+    rows to protect. Those rows are frozen consistently across:
+      - shared router rows
+      - FFN expert parameters
+      - attention expert parameters
+
+    All unselected old/wiki rows and all new/code rows remain trainable.
+    """
+    for param in model.parameters():
+        param.requires_grad = False
+
+    summary = {
+        "layers": {},
+        "num_existing_experts": int(num_existing_experts),
+        "mode": "partial_old_topk_freeze_new_and_unselected_old_train",
+    }
+
+    seen_layers = set()
+    for layer_module in model.modules():
+        router = getattr(layer_module, "shared_expert_router", None)
+        layer_number = getattr(layer_module, "layer_number", None)
+        if router is None or layer_number is None:
+            continue
+
+        layer_number = int(layer_number)
+        if layer_number not in frozen_existing_experts_by_layer:
+            raise ValueError(
+                f"Missing partial-freeze mask for shared-router layer {layer_number}. "
+                f"Available layers: {sorted(frozen_existing_experts_by_layer)}"
+            )
+        frozen = set(frozen_existing_experts_by_layer[layer_number])
+        seen_layers.add(layer_number)
+        num_total_experts = int(router.weight.shape[0])
+
+        router.weight.requires_grad = True
+        _zero_grad_rows(router.weight, frozen, allow_router_grads=True)
+        if getattr(router, "expert_bias", None) is not None:
+            router.expert_bias.requires_grad = True
+            _zero_grad_rows(router.expert_bias, frozen, allow_router_grads=True)
+
+        ffn_expert_modules = 0
+        for submodule in getattr(layer_module, "mlp", layer_module).modules():
+            if _set_moe_experts_trainable(submodule, num_existing_experts, frozen):
+                ffn_expert_modules += 1
+
+        attn_expert_modules = 0
+        self_attention = getattr(layer_module, "self_attention", None)
+        if self_attention is not None:
+            for submodule in self_attention.modules():
+                if _set_shared_lora_experts_trainable(submodule, frozen):
+                    attn_expert_modules += 1
+
+        trainable_existing = [
+            idx for idx in range(num_existing_experts) if idx not in frozen
+        ]
+        summary["layers"][str(layer_number)] = {
+            "frozen_existing_experts_0based": sorted(frozen),
+            "frozen_existing_experts_1based": [idx + 1 for idx in sorted(frozen)],
+            "trainable_existing_experts_0based": trainable_existing,
+            "trainable_existing_experts_1based": [idx + 1 for idx in trainable_existing],
+            "trainable_new_experts_0based": list(range(num_existing_experts, num_total_experts)),
+            "trainable_new_experts_1based": [
+                idx + 1 for idx in range(num_existing_experts, num_total_experts)
+            ],
+            "ffn_expert_modules": ffn_expert_modules,
+            "attention_expert_modules": attn_expert_modules,
+        }
+
+    missing = sorted(set(frozen_existing_experts_by_layer) - seen_layers)
+    if missing:
+        raise ValueError(f"Partial-freeze mask contains layers not found in model: {missing}")
+    return summary
 
 
 

@@ -764,6 +764,7 @@ def validate_args(args, defaults={}):
         args.shared_router_hybrid_train_all_experts_and_router_only,
         args.shared_router_hybrid_train_router_only,
         args.shared_router_hybrid_train_new_router_only,
+        bool(args.shared_router_hybrid_partial_freeze_mask),
     ]
     assert sum(bool(mode) for mode in shared_router_hybrid_train_modes) <= 1, (
         "Only one shared-router hybrid train-freeze mode can be enabled at a time."
@@ -774,6 +775,15 @@ def validate_args(args, defaults={}):
             or args.shared_router_hybrid_resume_from_num_experts is not None
         ), (
             "--shared-router-hybrid-train-new-router-only requires "
+            "--shared-router-hybrid-expand-from-num-experts or "
+            "--shared-router-hybrid-resume-from-num-experts."
+        )
+    if args.shared_router_hybrid_partial_freeze_mask:
+        assert (
+            args.shared_router_hybrid_expand_from_num_experts is not None
+            or args.shared_router_hybrid_resume_from_num_experts is not None
+        ), (
+            "--shared-router-hybrid-partial-freeze-mask requires "
             "--shared-router-hybrid-expand-from-num-experts or "
             "--shared-router-hybrid-resume-from-num-experts."
         )
@@ -2670,6 +2680,11 @@ def _add_experimental_args(parser):
                        help='Freeze every parameter except newly added shared-router rows '
                             'with expert id >= --shared-router-hybrid-*-from-num-experts. '
                             'Intended for code-row-only Phase 3 router retuning.')
+    group.add_argument('--shared-router-hybrid-partial-freeze-mask', type=str, default='',
+                       help='Path to a JSON layer->old expert ids mask for shared-router hybrid '
+                            'continual learning. The selected old/wiki router rows, FFN experts, '
+                            'and attention experts are frozen; unselected old rows plus all new '
+                            'code rows remain trainable while the dense trunk stays frozen.')
     group.add_argument('--shared-router-hybrid-topk-with-all-new-experts', action='store_true',
                        help='For shared-router hybrid training forwards, route through the normal '
                             'top-k experts plus every newly added expert id >= '

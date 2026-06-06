@@ -71,10 +71,12 @@ from megatron.core.transformer.moe.continual_learning_utils import (
     freeze_all_but_attn_lora_router_params,
     freeze_all_but_new_moe_params,
     freeze_all_but_new_shared_router_params,
+    freeze_all_but_partial_old_and_new_shared_router_hybrid_params,
     freeze_all_but_router_params,
     freeze_all_but_shared_router_params,
     freeze_preexisting_moe_params,
     inspect_moe_expansion,
+    load_partial_freeze_mask,
     reinitialize_shared_router_params,
     teacher_student_router_kl,
 )
@@ -186,6 +188,29 @@ def _load_shared_router_hybrid_source_model(
     args.consumed_train_samples = original_consumed_train_samples
     args.consumed_valid_samples = original_consumed_valid_samples
     return source_model
+
+
+def _apply_shared_router_hybrid_partial_freeze(target_shard, args, num_existing_experts):
+    mask = load_partial_freeze_mask(
+        args.shared_router_hybrid_partial_freeze_mask,
+        num_existing_experts,
+    )
+    summary = freeze_all_but_partial_old_and_new_shared_router_hybrid_params(
+        target_shard,
+        num_existing_experts,
+        mask,
+    )
+    print_rank_0(
+        "Applied shared-router hybrid partial old-expert freeze from "
+        f"{args.shared_router_hybrid_partial_freeze_mask}."
+    )
+    if torch.distributed.get_rank() == 0:
+        audit_dir = os.path.join(args.save, "partial_freeze_audit")
+        os.makedirs(audit_dir, exist_ok=True)
+        audit_path = os.path.join(audit_dir, "shared_router_hybrid_partial_freeze.json")
+        with open(audit_path, "w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2)
+    return summary
 
 
 def _load_teacher_model_from_checkpoint(
@@ -1728,6 +1753,12 @@ def setup_model_and_optimizer(model_provider_func,
                     target_shard,
                     args.shared_router_hybrid_expand_from_num_experts,
                 )
+            elif args.shared_router_hybrid_partial_freeze_mask:
+                _apply_shared_router_hybrid_partial_freeze(
+                    target_shard,
+                    args,
+                    args.shared_router_hybrid_expand_from_num_experts,
+                )
             elif args.shared_router_hybrid_train_all_experts_and_router_only:
                 freeze_all_but_new_moe_params(
                     target_shard,
@@ -1956,6 +1987,12 @@ def setup_model_and_optimizer(model_provider_func,
                 elif args.shared_router_hybrid_train_new_router_only:
                     freeze_all_but_new_shared_router_params(
                         target_shard,
+                        args.shared_router_hybrid_resume_from_num_experts,
+                    )
+                elif args.shared_router_hybrid_partial_freeze_mask:
+                    _apply_shared_router_hybrid_partial_freeze(
+                        target_shard,
+                        args,
                         args.shared_router_hybrid_resume_from_num_experts,
                     )
                 elif args.shared_router_hybrid_train_all_experts_and_router_only:
