@@ -291,6 +291,7 @@ def _partial_shared_router_hybrid_loss(model):
 
 
 def _assert_router_rows_masked(grad, frozen_rows, num_experts=8):
+    frozen_rows = sorted(frozen_rows)
     train_rows = [idx for idx in range(num_experts) if idx not in frozen_rows]
     assert torch.count_nonzero(grad[frozen_rows]) == 0
     assert torch.all(grad[train_rows] == 1)
@@ -311,6 +312,7 @@ def _assert_grouped_mlp_experts_masked(module, frozen_rows, num_experts=8):
 
 
 def _assert_attention_expert_rows_masked(module, frozen_rows, num_experts=8):
+    frozen_rows = sorted(frozen_rows)
     train_rows = [idx for idx in range(num_experts) if idx not in frozen_rows]
     for param in module.parameters():
         assert param.requires_grad
