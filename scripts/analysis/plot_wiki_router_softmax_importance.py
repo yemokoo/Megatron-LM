@@ -33,7 +33,13 @@ from megatron.training.checkpointing import load_checkpoint
 from megatron.training.initialize import initialize_megatron
 from megatron.training.training import _collect_current_shared_routers, _router_logits, get_model
 
-from pretrain_gpt import build_pretraining_data_loader, get_batch, is_dataset_built_on_rank, model_provider
+from pretrain_gpt import (
+    _flatten_layer_hidden,
+    build_pretraining_data_loader,
+    get_batch,
+    is_dataset_built_on_rank,
+    model_provider,
+)
 
 
 def add_router_softmax_args(parser):
@@ -67,6 +73,21 @@ def add_router_softmax_args(parser):
         type=int,
         default=4,
         help="Highlight this many experts in each bar plot.",
+    )
+    group.add_argument(
+        "--router-softmax-mask-topk",
+        type=int,
+        default=4,
+        help="Number of top experts per layer to save in the freeze-mask JSON.",
+    )
+    group.add_argument(
+        "--router-softmax-max-tokens",
+        type=int,
+        default=0,
+        help=(
+            "Optional approximate global cap on valid tokens to score. "
+            "Use 1048576 for a 1M-token miniset. 0 means no cap."
+        ),
     )
     return parser
 
@@ -144,9 +165,25 @@ def collect_softmax_means(model):
     for module in modules:
         module.eval()
 
+    local_token_limit = 0
+    if args.router_softmax_max_tokens and args.router_softmax_max_tokens > 0:
+        dp_world_size = max(1, mpu.get_data_parallel_world_size())
+        local_token_limit = math.ceil(args.router_softmax_max_tokens / dp_world_size)
+    local_tokens = 0
+
     with torch.no_grad():
         for step in range(args.router_softmax_eval_iters):
-            tokens, labels, _loss_mask, attention_mask, position_ids = get_batch(iterator)
+            tokens, labels, loss_mask, attention_mask, position_ids = get_batch(iterator)
+            flat_mask = loss_mask.reshape(-1).bool()
+            candidate_indices = torch.nonzero(flat_mask, as_tuple=False).view(-1)
+            if candidate_indices.numel() == 0:
+                continue
+            if local_token_limit > 0:
+                remaining = local_token_limit - local_tokens
+                if remaining <= 0:
+                    break
+                candidate_indices = candidate_indices[:remaining]
+
             with capture_shared_router_inputs() as captured:
                 modules[0](tokens, position_ids, attention_mask, labels=labels)
 
@@ -158,14 +195,23 @@ def collect_softmax_means(model):
                 if router is None:
                     continue
 
-                flat_hidden = hidden_states.detach().reshape(-1, hidden_states.shape[-1])
+                flat_hidden = _flatten_layer_hidden(hidden_states.detach(), labels)
+                flat_hidden = flat_hidden.index_select(0, candidate_indices)
                 logits = _router_logits(router, flat_hidden)
                 probs = torch.softmax(logits.float(), dim=-1)
                 sums[layer] += probs.double().sum(dim=0)
                 counts[layer] += probs.shape[0]
 
+            local_tokens += int(candidate_indices.numel())
             if torch.distributed.get_rank() == 0 and (step + 1) % max(1, args.log_interval) == 0:
-                print_rank_0(f"[router-softmax] processed {step + 1}/{args.router_softmax_eval_iters}")
+                suffix = f", local_tokens={local_tokens}"
+                if local_token_limit > 0:
+                    suffix += f"/{local_token_limit}"
+                print_rank_0(
+                    f"[router-softmax] processed {step + 1}/{args.router_softmax_eval_iters}{suffix}"
+                )
+            if local_token_limit > 0 and local_tokens >= local_token_limit:
+                break
 
     for module, was_training in zip(modules, prior_states):
         if was_training:
@@ -214,6 +260,21 @@ def write_csv(path: Path, rows: list[dict], fieldnames: list[str]) -> None:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
+
+
+def build_topk_freeze_mask(layer_means: dict[int, torch.Tensor], topk: int) -> dict:
+    num_experts = len(next(iter(layer_means.values())))
+    topk = max(1, min(int(topk), num_experts))
+    layers = {}
+    for layer, values in sorted(layer_means.items()):
+        order = torch.argsort(values, descending=True).tolist()
+        layers[str(layer)] = [expert_idx + 1 for expert_idx in order[:topk]]
+    return {
+        "expert_index_base": 1,
+        "selection": "topk_by_mean_router_softmax_pre_topk_per_layer",
+        "topk": topk,
+        "layers": layers,
+    }
 
 
 def plot_results(out_dir: Path, layer_means: dict[int, torch.Tensor], avg_rows: list[dict]) -> None:
@@ -355,6 +416,7 @@ def main() -> None:
             "checkpoint_iteration": int(iteration),
             "data_path": args.router_softmax_data_path or args.data_path,
             "eval_iters": int(args.router_softmax_eval_iters),
+            "max_tokens": int(args.router_softmax_max_tokens),
             "global_batch_size": int(args.global_batch_size),
             "sequence_length": int(args.seq_length),
             "layers": sorted(layer_means),
@@ -362,6 +424,15 @@ def main() -> None:
         }
         (out_dir / "router_softmax_metadata.json").write_text(
             json.dumps(metadata, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        mask = build_topk_freeze_mask(layer_means, args.router_softmax_mask_topk)
+        mask["load"] = args.load
+        mask["checkpoint_iteration"] = int(iteration)
+        mask["max_tokens"] = int(args.router_softmax_max_tokens)
+        mask["data_path"] = args.router_softmax_data_path or args.data_path
+        (out_dir / f"router_softmax_top{mask['topk']}_freeze_mask.json").write_text(
+            json.dumps(mask, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
         plot_results(out_dir, layer_means, avg_rows)

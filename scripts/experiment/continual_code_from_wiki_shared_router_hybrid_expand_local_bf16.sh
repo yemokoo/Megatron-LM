@@ -136,6 +136,7 @@ export SHARED_ROUTER_TRAIN_MASK_EXISTING_EXPERTS="${SHARED_ROUTER_TRAIN_MASK_EXI
 export SHARED_ROUTER_TRAIN_MASK_EXISTING_EXPERTS_FROM_NUM_EXPERTS="${SHARED_ROUTER_TRAIN_MASK_EXISTING_EXPERTS_FROM_NUM_EXPERTS:-$SOURCE_NUM_EXPERTS}"
 export SHARED_ROUTER_HYBRID_TRAIN_ALL_EXPERTS_AND_ROUTER="${SHARED_ROUTER_HYBRID_TRAIN_ALL_EXPERTS_AND_ROUTER:-0}"
 export SHARED_ROUTER_HYBRID_TRAIN_ALL_ROUTER_ROWS="${SHARED_ROUTER_HYBRID_TRAIN_ALL_ROUTER_ROWS:-0}"
+export SHARED_ROUTER_HYBRID_PARTIAL_FREEZE_MASK="${SHARED_ROUTER_HYBRID_PARTIAL_FREEZE_MASK:-}"
 export SHARED_ROUTER_HYBRID_TOPK_WITH_ALL_NEW_EXPERTS="${SHARED_ROUTER_HYBRID_TOPK_WITH_ALL_NEW_EXPERTS:-0}"
 export SHARED_ROUTER_HYBRID_ALL_NEW_EXPERTS_FROM_NUM_EXPERTS="${SHARED_ROUTER_HYBRID_ALL_NEW_EXPERTS_FROM_NUM_EXPERTS:-$SOURCE_NUM_EXPERTS}"
 export STAGE1_WEIGHTS_DIR="${STAGE1_WEIGHTS_DIR:-}"
@@ -295,6 +296,7 @@ for idx_path in sorted(dataset_dir.glob('*.idx')):
     shards.append({'prefix': prefix.name, 'documents': shard_docs, 'tokens': shard_tokens})
 
 metadata = {
+    'partial_freeze_enabled': os.environ.get('SHARED_ROUTER_HYBRID_PARTIAL_FREEZE_MASK', '') != '',
     'stage': 'code_from_wiki_shared_router_hybrid_expand',
     'run_id': os.environ['RUN_ID'],
     'stage1_weights_dir': os.environ['STAGE1_WEIGHTS_DIR'],
@@ -324,8 +326,12 @@ metadata = {
     'shared_router_hybrid': True,
     'shared_router_train_mask_existing_experts': os.environ.get('SHARED_ROUTER_TRAIN_MASK_EXISTING_EXPERTS', '0') == '1',
     'shared_router_train_mask_existing_experts_from_num_experts': int(os.environ.get('SHARED_ROUTER_TRAIN_MASK_EXISTING_EXPERTS_FROM_NUM_EXPERTS', '0')),
-    'train_new_experts_and_router_only': os.environ.get('SHARED_ROUTER_HYBRID_TRAIN_ALL_EXPERTS_AND_ROUTER', '0') != '1',
+    'train_new_experts_and_router_only': (
+        os.environ.get('SHARED_ROUTER_HYBRID_TRAIN_ALL_EXPERTS_AND_ROUTER', '0') != '1'
+        and os.environ.get('SHARED_ROUTER_HYBRID_PARTIAL_FREEZE_MASK', '') == ''
+    ),
     'shared_router_hybrid_train_all_experts_and_router': os.environ.get('SHARED_ROUTER_HYBRID_TRAIN_ALL_EXPERTS_AND_ROUTER', '0') == '1',
+    'shared_router_hybrid_partial_freeze_mask': os.environ.get('SHARED_ROUTER_HYBRID_PARTIAL_FREEZE_MASK', ''),
     'shared_router_hybrid_train_all_router_rows': (
         os.environ.get('SHARED_ROUTER_HYBRID_TRAIN_ALL_EXPERTS_AND_ROUTER', '0') == '1'
         or os.environ.get('SHARED_ROUTER_HYBRID_TRAIN_ALL_ROUTER_ROWS', '0') == '1'
@@ -405,12 +411,16 @@ if [ -n "$RESUME_FROM_WEIGHTS" ]; then
     )
     CHECKPOINT_LOAD_ARGS=()
 fi
-if [ "$SHARED_ROUTER_HYBRID_TRAIN_ALL_EXPERTS_AND_ROUTER" = "1" ]; then
+if [ -n "$SHARED_ROUTER_HYBRID_PARTIAL_FREEZE_MASK" ]; then
+    SHARED_ROUTER_ARGS+=(
+        --shared-router-hybrid-partial-freeze-mask "$SHARED_ROUTER_HYBRID_PARTIAL_FREEZE_MASK"
+    )
+elif [ "$SHARED_ROUTER_HYBRID_TRAIN_ALL_EXPERTS_AND_ROUTER" = "1" ]; then
     SHARED_ROUTER_ARGS+=(--shared-router-hybrid-train-all-experts-and-router-only)
 else
     SHARED_ROUTER_ARGS+=(--shared-router-hybrid-train-new-experts-and-router-only)
 fi
-if [ "$SHARED_ROUTER_HYBRID_TRAIN_ALL_ROUTER_ROWS" = "1" ]; then
+if [ -z "$SHARED_ROUTER_HYBRID_PARTIAL_FREEZE_MASK" ] && [ "$SHARED_ROUTER_HYBRID_TRAIN_ALL_ROUTER_ROWS" = "1" ]; then
     SHARED_ROUTER_ARGS+=(--shared-router-hybrid-train-all-router-rows)
 fi
 
