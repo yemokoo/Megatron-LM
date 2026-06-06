@@ -103,14 +103,17 @@ def parse_probe_points(log_path: Path, source_step: int, full_retune_iters: int)
             if match is None:
                 continue
             iteration = int(match.group("iteration"))
-            retune_step = iteration - source_step
+            local_iteration = int(match.group("local_iteration"))
+            # The displayed probe iteration may include PROBE_STEP_OFFSET for W&B
+            # alignment. local_iteration is the actual checkpoint/training step.
+            retune_step = local_iteration - source_step
             if retune_step < 0:
                 continue
             points.append(
                 ProbePoint(
                     probe=match.group("probe"),
                     iteration=iteration,
-                    local_iteration=int(match.group("local_iteration")),
+                    local_iteration=local_iteration,
                     retune_step=retune_step,
                     data_percent=retune_step / full_retune_iters * 100.0,
                     next_token_acc=float(match.group("acc")),
@@ -208,26 +211,32 @@ def maybe_import_matplotlib():
     return plt
 
 
-def plot_line(points: Sequence[ProbePoint], out_base: Path, write_png: bool) -> None:
+def plot_single_probe_line(
+    points: Sequence[ProbePoint], probe: str, out_base: Path, write_png: bool
+) -> None:
     plt = maybe_import_matplotlib()
-    grouped = by_probe(points)
+    probe_points = by_probe(points).get(probe, [])
+    if not probe_points:
+        raise ValueError(f"no points for {probe}")
 
     fig, ax = plt.subplots(figsize=(13, 7))
-    for probe in ("wiki_probe", "code_probe"):
-        probe_points = grouped.get(probe, [])
-        ax.plot(
-            [point.data_percent for point in probe_points],
-            [point.next_token_acc for point in probe_points],
-            marker="o",
-            markersize=3.0,
-            linewidth=2.2,
-            color=PROBE_COLOR[probe],
-            label=PROBE_LABEL[probe],
-        )
-    ax.set_title("Router-Only Finetune Data Budget: Probe Accuracy Every 1%", fontsize=18, weight="bold")
+    ax.plot(
+        [point.data_percent for point in probe_points],
+        [point.next_token_acc for point in probe_points],
+        marker="o",
+        markersize=3.0,
+        linewidth=2.4,
+        color=PROBE_COLOR[probe],
+        label=PROBE_LABEL[probe],
+    )
+    ax.set_title(
+        f"Router-Only Finetune Data Budget: {PROBE_LABEL[probe]} Accuracy Every 1%",
+        fontsize=18,
+        weight="bold",
+    )
     ax.set_xlabel("Retune data budget (%)")
     ax.set_ylabel("Next-token accuracy")
-    ax.set_xlim(0, 100)
+    ax.set_xlim(1, 100)
     ax.grid(True, alpha=0.25)
     ax.legend(frameon=False, loc="best")
     fig.tight_layout()
@@ -237,30 +246,30 @@ def plot_line(points: Sequence[ProbePoint], out_base: Path, write_png: bool) -> 
     plt.close(fig)
 
 
-def plot_bar(points: Sequence[ProbePoint], percents: Sequence[float], out_base: Path, write_png: bool) -> None:
+def plot_single_probe_bar(
+    points: Sequence[ProbePoint],
+    probe: str,
+    percents: Sequence[float],
+    out_base: Path,
+    write_png: bool,
+) -> None:
     plt = maybe_import_matplotlib()
-    grouped = by_probe(points)
-    wiki_points = nearest_points(grouped["wiki_probe"], percents)
-    code_points = nearest_points(grouped["code_probe"], percents)
+    probe_points = nearest_points(by_probe(points)[probe], percents)
 
     x = list(range(len(percents)))
-    width = 0.38
     fig, ax = plt.subplots(figsize=(12, 7))
     ax.bar(
-        [value - width / 2 for value in x],
-        [point.next_token_acc for point in wiki_points],
-        width=width,
-        color=PROBE_COLOR["wiki_probe"],
-        label=PROBE_LABEL["wiki_probe"],
+        x,
+        [point.next_token_acc for point in probe_points],
+        width=0.64,
+        color=PROBE_COLOR[probe],
+        label=PROBE_LABEL[probe],
     )
-    ax.bar(
-        [value + width / 2 for value in x],
-        [point.next_token_acc for point in code_points],
-        width=width,
-        color=PROBE_COLOR["code_probe"],
-        label=PROBE_LABEL["code_probe"],
+    ax.set_title(
+        f"Router-Only Finetune Data Budget: {PROBE_LABEL[probe]} Selected Milestones",
+        fontsize=18,
+        weight="bold",
     )
-    ax.set_title("Router-Only Finetune Data Budget: Selected Probe Milestones", fontsize=18, weight="bold")
     ax.set_xlabel("Retune data budget (%)")
     ax.set_ylabel("Next-token accuracy")
     ax.set_xticks(x)
@@ -285,8 +294,22 @@ def main() -> None:
     points = parse_probe_points(log_path, source_step, args.full_retune_iters)
     write_csv(points, out_dir / "router_data_budget_probe_points.csv")
     write_milestone_csv(points, percents, out_dir / "router_data_budget_probe_milestones.csv")
-    plot_line(points, out_dir / "router_data_budget_probe_accuracy_line", not args.no_png)
-    plot_bar(points, percents, out_dir / "router_data_budget_probe_accuracy_bars", not args.no_png)
+    plot_single_probe_line(points, "wiki_probe", out_dir / "router_data_budget_wiki_accuracy_line", not args.no_png)
+    plot_single_probe_line(points, "code_probe", out_dir / "router_data_budget_code_accuracy_line", not args.no_png)
+    plot_single_probe_bar(
+        points,
+        "wiki_probe",
+        percents,
+        out_dir / "router_data_budget_wiki_accuracy_bars",
+        not args.no_png,
+    )
+    plot_single_probe_bar(
+        points,
+        "code_probe",
+        percents,
+        out_dir / "router_data_budget_code_accuracy_bars",
+        not args.no_png,
+    )
 
     print(f"[DONE] parsed {len(points)} probe points from {log_path}")
     print(f"[DONE] wrote outputs to {out_dir}")
