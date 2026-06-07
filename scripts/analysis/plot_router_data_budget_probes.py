@@ -77,6 +77,15 @@ def parse_args() -> argparse.Namespace:
         default="1,5,10,25,50,100",
         help="Comma-separated x-axis percent milestones for the bar plot.",
     )
+    parser.add_argument(
+        "--bar-step-percent",
+        type=float,
+        default=None,
+        help=(
+            "Generate evenly-spaced bar milestones from this percent to 100. "
+            "For example, 5 produces 5,10,...,100 and overrides --bar-percents."
+        ),
+    )
     parser.add_argument("--no-png", action="store_true", help="Skip optional PNG generation.")
     return parser.parse_args()
 
@@ -168,6 +177,33 @@ def nearest_points(points: Sequence[ProbePoint], percents: Sequence[float]) -> L
     for percent in percents:
         selected.append(min(points, key=lambda point: abs(point.data_percent - percent)))
     return selected
+
+
+def parse_bar_percents(args: argparse.Namespace) -> List[float]:
+    if args.bar_step_percent is not None:
+        if args.bar_step_percent <= 0 or args.bar_step_percent > 100:
+            raise ValueError("--bar-step-percent must be in (0, 100].")
+        percents = []
+        current = args.bar_step_percent
+        while current <= 100.0 + 1e-9:
+            percents.append(round(current, 6))
+            current += args.bar_step_percent
+        if percents[-1] != 100.0:
+            percents.append(100.0)
+        return percents
+    return [float(value.strip()) for value in args.bar_percents.split(",") if value.strip()]
+
+
+def percent_suffix(percents: Sequence[float]) -> str:
+    if len(percents) >= 2:
+        diffs = [
+            round(percents[idx + 1] - percents[idx], 6)
+            for idx in range(len(percents) - 1)
+        ]
+        if max(diffs) - min(diffs) < 1e-6:
+            step = diffs[0]
+            return f"every_{step:g}pct".replace(".", "p")
+    return "selected"
 
 
 def write_milestone_csv(points: Sequence[ProbePoint], percents: Sequence[float], csv_path: Path) -> None:
@@ -264,7 +300,9 @@ def plot_single_probe_bar(
     y_top = value_max + y_pad
 
     x = list(range(len(percents)))
-    fig, ax = plt.subplots(figsize=(12, 7))
+    # Long milestone bars need horizontal space; otherwise 20 labels collapse.
+    fig_width = max(12.0, len(percents) * 0.72)
+    fig, ax = plt.subplots(figsize=(fig_width, 7))
     bars = ax.bar(
         x,
         [value - y_floor for value in values],
@@ -281,7 +319,7 @@ def plot_single_probe_bar(
             ha="center",
             va="top",
             color="white",
-            fontsize=13,
+            fontsize=11 if len(percents) > 12 else 13,
             fontweight="bold",
         )
     ax.set_title(
@@ -292,7 +330,7 @@ def plot_single_probe_bar(
     ax.set_xlabel("Retune data budget (%)")
     ax.set_ylabel("Next-token accuracy")
     ax.set_xticks(x)
-    ax.set_xticklabels([f"{percent:g}%" for percent in percents])
+    ax.set_xticklabels([f"{percent:g}%" for percent in percents], rotation=0)
     ax.set_ylim(y_floor, y_top)
     ax.grid(True, axis="y", alpha=0.25)
     ax.legend(frameon=False, loc="best")
@@ -309,7 +347,8 @@ def main() -> None:
     log_path = Path(args.log) if args.log else run_dir / "logs" / "phase3_run.log"
     source_step = read_source_step(run_dir, args.source_step)
     out_dir = Path(args.out_dir)
-    percents = [float(value.strip()) for value in args.bar_percents.split(",") if value.strip()]
+    percents = parse_bar_percents(args)
+    bar_suffix = percent_suffix(percents)
 
     points = parse_probe_points(log_path, source_step, args.full_retune_iters)
     write_csv(points, out_dir / "router_data_budget_probe_points.csv")
@@ -320,14 +359,14 @@ def main() -> None:
         points,
         "wiki_probe",
         percents,
-        out_dir / "router_data_budget_wiki_accuracy_bars",
+        out_dir / f"router_data_budget_wiki_accuracy_bars_{bar_suffix}",
         not args.no_png,
     )
     plot_single_probe_bar(
         points,
         "code_probe",
         percents,
-        out_dir / "router_data_budget_code_accuracy_bars",
+        out_dir / f"router_data_budget_code_accuracy_bars_{bar_suffix}",
         not args.no_png,
     )
 
