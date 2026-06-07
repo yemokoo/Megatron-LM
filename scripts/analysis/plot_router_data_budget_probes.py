@@ -120,12 +120,36 @@ def parse_args() -> argparse.Namespace:
         "--plateau-percent",
         type=float,
         default=25.0,
-        help="Percent where the plateau/convergence band starts.",
+        help="Percent where the optional post-percent range band starts.",
     )
     parser.add_argument(
         "--no-plateau-band",
         action="store_true",
-        help="Do not draw the post-plateau min/max band and mean line.",
+        default=True,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--show-plateau-band",
+        action="store_false",
+        dest="no_plateau_band",
+        help="Draw the post-percent min/max band and mean line.",
+    )
+    parser.add_argument(
+        "--reference-percent",
+        type=float,
+        default=100.0,
+        help="Reference percent for convergence band, usually the 100%% result.",
+    )
+    parser.add_argument(
+        "--convergence-tolerance",
+        type=float,
+        default=0.0005,
+        help="Accuracy tolerance around the reference value used to mark early plateau.",
+    )
+    parser.add_argument(
+        "--no-convergence-band",
+        action="store_true",
+        help="Do not draw the reference +/- tolerance band or first-within-tolerance marker.",
     )
     parser.add_argument("--no-png", action="store_true", help="Skip optional PNG generation.")
     return parser.parse_args()
@@ -355,11 +379,23 @@ def plot_single_probe_bar(
     fig_height: float,
     plateau_percent: float,
     show_plateau_band: bool,
+    reference_percent: float,
+    convergence_tolerance: float,
+    show_convergence_band: bool,
 ) -> None:
     plt = maybe_import_matplotlib()
     all_probe_points = by_probe(points)[probe]
     probe_points = nearest_points(all_probe_points, percents)
     values = [point.next_token_acc for point in probe_points]
+    reference_point = min(all_probe_points, key=lambda point: abs(point.data_percent - reference_percent))
+    reference_value = reference_point.next_token_acc
+    convergence_low = reference_value - convergence_tolerance
+    convergence_high = reference_value + convergence_tolerance
+    first_converged_index = None
+    for idx, point in enumerate(probe_points):
+        if abs(point.next_token_acc - reference_value) <= convergence_tolerance:
+            first_converged_index = idx
+            break
     plateau_values = [
         point.next_token_acc
         for point in all_probe_points
@@ -367,8 +403,9 @@ def plot_single_probe_bar(
     ]
     if not plateau_values:
         plateau_values = values
-    value_min = min(values + plateau_values)
-    value_max = max(values + plateau_values)
+    band_values = [convergence_low, convergence_high] if show_convergence_band else []
+    value_min = min(values + plateau_values + band_values)
+    value_max = max(values + plateau_values + band_values)
     value_range = value_max - value_min
     y_span = max(value_range * 1.8, min_y_span)
     y_mid = (value_min + value_max) / 2
@@ -379,6 +416,47 @@ def plot_single_probe_bar(
     # Long milestone bars need horizontal space; otherwise 20 labels collapse.
     width = fig_width if fig_width is not None else max(16.0, len(percents) * 0.95)
     fig, ax = plt.subplots(figsize=(width, fig_height))
+
+    if show_convergence_band:
+        ax.axhspan(
+            convergence_low,
+            convergence_high,
+            color="#2563eb",
+            alpha=0.10,
+            label=f"{reference_percent:g}% +/- {convergence_tolerance:g}",
+            zorder=0,
+        )
+        ax.axhline(
+            reference_value,
+            color="#2563eb",
+            linestyle="--",
+            linewidth=1.6,
+            alpha=0.85,
+            label=f"{reference_percent:g}% reference",
+            zorder=1,
+        )
+        if first_converged_index is not None:
+            first_point = probe_points[first_converged_index]
+            ax.axvline(
+                first_converged_index,
+                color="#111827",
+                linestyle=":",
+                linewidth=1.6,
+                alpha=0.85,
+                zorder=1,
+            )
+            ax.text(
+                first_converged_index,
+                y_top - y_span * 0.04,
+                f"within {convergence_tolerance:g}\nfrom {first_point.data_percent:g}%",
+                ha="center",
+                va="top",
+                color="#111827",
+                fontsize=max(value_font_size, 8.0),
+                fontweight="bold",
+                bbox={"facecolor": "white", "edgecolor": "#d1d5db", "alpha": 0.88, "pad": 3},
+                zorder=4,
+            )
 
     if show_plateau_band:
         band_min = min(plateau_values)
@@ -492,6 +570,9 @@ def main() -> None:
         args.bar_fig_height,
         args.plateau_percent,
         not args.no_plateau_band,
+        args.reference_percent,
+        args.convergence_tolerance,
+        not args.no_convergence_band,
     )
     plot_single_probe_bar(
         points,
@@ -506,6 +587,9 @@ def main() -> None:
         args.bar_fig_height,
         args.plateau_percent,
         not args.no_plateau_band,
+        args.reference_percent,
+        args.convergence_tolerance,
+        not args.no_convergence_band,
     )
 
     print(f"[DONE] parsed {len(points)} probe points from {log_path}")
