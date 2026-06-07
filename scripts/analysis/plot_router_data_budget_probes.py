@@ -86,6 +86,47 @@ def parse_args() -> argparse.Namespace:
             "For example, 5 produces 5,10,...,100 and overrides --bar-percents."
         ),
     )
+    parser.add_argument(
+        "--bar-min-y-span",
+        type=float,
+        default=0.006,
+        help="Minimum y-axis span for bar plots so tiny noise is not visually over-amplified.",
+    )
+    parser.add_argument(
+        "--bar-value-font-size",
+        type=float,
+        default=8.5,
+        help="Font size for value labels on bar plots.",
+    )
+    parser.add_argument(
+        "--bar-label-position",
+        choices=("outside", "inside", "none"),
+        default="outside",
+        help="Where to draw per-bar value labels.",
+    )
+    parser.add_argument(
+        "--bar-fig-width",
+        type=float,
+        default=None,
+        help="Optional explicit bar-plot figure width in inches.",
+    )
+    parser.add_argument(
+        "--bar-fig-height",
+        type=float,
+        default=7.0,
+        help="Bar-plot figure height in inches.",
+    )
+    parser.add_argument(
+        "--plateau-percent",
+        type=float,
+        default=25.0,
+        help="Percent where the plateau/convergence band starts.",
+    )
+    parser.add_argument(
+        "--no-plateau-band",
+        action="store_true",
+        help="Do not draw the post-plateau min/max band and mean line.",
+    )
     parser.add_argument("--no-png", action="store_true", help="Skip optional PNG generation.")
     return parser.parse_args()
 
@@ -206,6 +247,25 @@ def percent_suffix(percents: Sequence[float]) -> str:
     return "selected"
 
 
+def percent_step(percents: Sequence[float]) -> float | None:
+    if len(percents) < 2:
+        return None
+    diffs = [
+        round(percents[idx + 1] - percents[idx], 6)
+        for idx in range(len(percents) - 1)
+    ]
+    if max(diffs) - min(diffs) < 1e-6:
+        return diffs[0]
+    return None
+
+
+def bar_title_suffix(percents: Sequence[float]) -> str:
+    step = percent_step(percents)
+    if step is not None:
+        return f"Every {step:g}%"
+    return "Selected Milestones"
+
+
 def write_milestone_csv(points: Sequence[ProbePoint], percents: Sequence[float], csv_path: Path) -> None:
     grouped = by_probe(points)
     csv_path.parent.mkdir(parents=True, exist_ok=True)
@@ -288,21 +348,68 @@ def plot_single_probe_bar(
     percents: Sequence[float],
     out_base: Path,
     write_png: bool,
+    min_y_span: float,
+    value_font_size: float,
+    label_position: str,
+    fig_width: float | None,
+    fig_height: float,
+    plateau_percent: float,
+    show_plateau_band: bool,
 ) -> None:
     plt = maybe_import_matplotlib()
-    probe_points = nearest_points(by_probe(points)[probe], percents)
+    all_probe_points = by_probe(points)[probe]
+    probe_points = nearest_points(all_probe_points, percents)
     values = [point.next_token_acc for point in probe_points]
-    value_min = min(values)
-    value_max = max(values)
+    plateau_values = [
+        point.next_token_acc
+        for point in all_probe_points
+        if point.data_percent >= plateau_percent
+    ]
+    if not plateau_values:
+        plateau_values = values
+    value_min = min(values + plateau_values)
+    value_max = max(values + plateau_values)
     value_range = value_max - value_min
-    y_pad = max(value_range * 0.45, 0.0007)
-    y_floor = value_min - y_pad
-    y_top = value_max + y_pad
+    y_span = max(value_range * 1.8, min_y_span)
+    y_mid = (value_min + value_max) / 2
+    y_floor = y_mid - y_span / 2
+    y_top = y_mid + y_span / 2
 
     x = list(range(len(percents)))
     # Long milestone bars need horizontal space; otherwise 20 labels collapse.
-    fig_width = max(12.0, len(percents) * 0.72)
-    fig, ax = plt.subplots(figsize=(fig_width, 7))
+    width = fig_width if fig_width is not None else max(16.0, len(percents) * 0.95)
+    fig, ax = plt.subplots(figsize=(width, fig_height))
+
+    if show_plateau_band:
+        band_min = min(plateau_values)
+        band_max = max(plateau_values)
+        band_mean = sum(plateau_values) / len(plateau_values)
+        ax.axhspan(
+            band_min,
+            band_max,
+            color=PROBE_COLOR[probe],
+            alpha=0.12,
+            label=f">= {plateau_percent:g}% range",
+            zorder=0,
+        )
+        ax.axhline(
+            band_mean,
+            color="#111827",
+            linestyle="--",
+            linewidth=1.6,
+            alpha=0.8,
+            label=f">= {plateau_percent:g}% mean",
+            zorder=1,
+        )
+        plateau_idx = min(range(len(percents)), key=lambda idx: abs(percents[idx] - plateau_percent))
+        ax.axvline(
+            plateau_idx - 0.5,
+            color="#6b7280",
+            linestyle=":",
+            linewidth=1.4,
+            alpha=0.75,
+        )
+
     bars = ax.bar(
         x,
         [value - y_floor for value in values],
@@ -310,20 +417,37 @@ def plot_single_probe_bar(
         width=0.64,
         color=PROBE_COLOR[probe],
         label=PROBE_LABEL[probe],
+        zorder=2,
     )
-    for bar, value in zip(bars, values):
-        ax.text(
-            bar.get_x() + bar.get_width() / 2,
-            value - max((y_top - y_floor) * 0.035, 0.00015),
-            f"{value:.4f}",
-            ha="center",
-            va="top",
-            color="white",
-            fontsize=11 if len(percents) > 12 else 13,
-            fontweight="bold",
-        )
+    if label_position != "none":
+        for bar, value in zip(bars, values):
+            if label_position == "outside":
+                y = min(value + y_span * 0.025, y_top - y_span * 0.02)
+                ax.text(
+                    bar.get_x() + bar.get_width() / 2,
+                    y,
+                    f"{value:.4f}",
+                    ha="center",
+                    va="bottom",
+                    rotation=90 if len(percents) > 12 else 0,
+                    color="#111827",
+                    fontsize=value_font_size,
+                    fontweight="bold",
+                    clip_on=False,
+                )
+            else:
+                ax.text(
+                    bar.get_x() + bar.get_width() / 2,
+                    value - y_span * 0.035,
+                    f"{value:.4f}",
+                    ha="center",
+                    va="top",
+                    color="white",
+                    fontsize=value_font_size,
+                    fontweight="bold",
+                )
     ax.set_title(
-        f"Router-Only Finetune Data Budget: {PROBE_LABEL[probe]} Selected Milestones",
+        f"Router-Only Finetune Data Budget: {PROBE_LABEL[probe]} {bar_title_suffix(percents)}",
         fontsize=18,
         weight="bold",
     )
@@ -361,6 +485,13 @@ def main() -> None:
         percents,
         out_dir / f"router_data_budget_wiki_accuracy_bars_{bar_suffix}",
         not args.no_png,
+        args.bar_min_y_span,
+        args.bar_value_font_size,
+        args.bar_label_position,
+        args.bar_fig_width,
+        args.bar_fig_height,
+        args.plateau_percent,
+        not args.no_plateau_band,
     )
     plot_single_probe_bar(
         points,
@@ -368,6 +499,13 @@ def main() -> None:
         percents,
         out_dir / f"router_data_budget_code_accuracy_bars_{bar_suffix}",
         not args.no_png,
+        args.bar_min_y_span,
+        args.bar_value_font_size,
+        args.bar_label_position,
+        args.bar_fig_width,
+        args.bar_fig_height,
+        args.plateau_percent,
+        not args.no_plateau_band,
     )
 
     print(f"[DONE] parsed {len(points)} probe points from {log_path}")
