@@ -88,10 +88,18 @@ export LR_WSD_DECAY_ITERS="${LR_WSD_DECAY_ITERS:-$RETUNE_ITERS}"
 export MODEL_CONFIG_SCRIPT="${MODEL_CONFIG_SCRIPT:-configs/model/flame-shared-router-hybrid-experts.sh}"
 export DATASET_SPLIT="${DATASET_SPLIT:-100,0,0}"
 
-export TRAIN_DATASET_WIKI="${TRAIN_DATASET_WIKI:-$(dataset_dir_for_task wiki)}"
-export TRAIN_DATASET_CODE="${TRAIN_DATASET_CODE:-$(dataset_dir_for_task code)}"
-export DATASET_NAME="${DATASET_NAME:-wiki_code_mixed_exact}"
-export DATASET_SOURCE="${DATASET_SOURCE:-Wikipedia exact train + Python code exact train}"
+export ROUTER_FINETUNE_DATASET_ROOT="${ROUTER_FINETUNE_DATASET_ROOT:-}"
+if [ -n "$ROUTER_FINETUNE_DATASET_ROOT" ]; then
+    export TRAIN_DATASET_WIKI="${TRAIN_DATASET_WIKI:-$ROUTER_FINETUNE_DATASET_ROOT/wiki/train}"
+    export TRAIN_DATASET_CODE="${TRAIN_DATASET_CODE:-$ROUTER_FINETUNE_DATASET_ROOT/code/train}"
+    export DATASET_NAME="${DATASET_NAME:-wiki_code_fixed_router_finetune_subset}"
+    export DATASET_SOURCE="${DATASET_SOURCE:-Fixed router-finetune wiki/code subset at $ROUTER_FINETUNE_DATASET_ROOT}"
+else
+    export TRAIN_DATASET_WIKI="${TRAIN_DATASET_WIKI:-$(dataset_dir_for_task wiki)}"
+    export TRAIN_DATASET_CODE="${TRAIN_DATASET_CODE:-$(dataset_dir_for_task code)}"
+    export DATASET_NAME="${DATASET_NAME:-wiki_code_mixed_exact}"
+    export DATASET_SOURCE="${DATASET_SOURCE:-Wikipedia exact train + Python code exact train}"
+fi
 export PROBE_DATASET="${PROBE_DATASET:-$(probe_dir_for_task code)}"
 export PROBE_NAME="${PROBE_NAME:-code_probe}"
 export PROBE_EVAL_ITERS="${PROBE_EVAL_ITERS:-25}"
@@ -177,6 +185,14 @@ for line in sys.stdin:
 echo "phase3 router-only mixed run log: $RUN_LOG"
 echo "phase3 router-only mixed gpu log: $GPU_LOG"
 echo "phase3 router-only mixed metadata: $RUN_METADATA"
+for dataset_dir in "$TRAIN_DATASET_WIKI" "$TRAIN_DATASET_CODE"; do
+    if ! compgen -G "$dataset_dir/*.bin" >/dev/null; then
+        echo "ERROR: no .bin files found in train dataset: $dataset_dir" >&2
+        exit 1
+    fi
+done
+echo "phase3 router-only mixed wiki train dataset: $TRAIN_DATASET_WIKI"
+echo "phase3 router-only mixed code train dataset: $TRAIN_DATASET_CODE"
 rsync -rlptD --info=progress2 "$TRAIN_DATASET_WIKI/" "$SSD_WIKI_TRAIN/"
 rsync -rlptD --info=progress2 "$TRAIN_DATASET_CODE/" "$SSD_CODE_TRAIN/"
 
@@ -211,6 +227,9 @@ metadata = {
     'target_iteration': int(os.environ['TRAIN_ITERS']),
     'dataset_name': os.environ['DATASET_NAME'],
     'dataset_source': os.environ['DATASET_SOURCE'],
+    'router_finetune_dataset_root': os.environ.get('ROUTER_FINETUNE_DATASET_ROOT') or None,
+    'train_dataset_wiki_source': os.environ['TRAIN_DATASET_WIKI'],
+    'train_dataset_code_source': os.environ['TRAIN_DATASET_CODE'],
     'wiki_train': wiki,
     'code_train': code,
     'combined_tokens': wiki['tokens'] + code['tokens'],
