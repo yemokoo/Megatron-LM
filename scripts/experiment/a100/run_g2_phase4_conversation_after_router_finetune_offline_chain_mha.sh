@@ -44,6 +44,7 @@ PHASE4_ROOT="${PHASE4_ROOT:-$G2_ROOT/conversation/phase4}"
 CONVERSATION_TRAIN="${CONVERSATION_TRAIN:-$PROJECT_ROOT/data/conversation/train}"
 CODE_PROBE_DATASET="${CODE_PROBE_DATASET:-$PROJECT_ROOT/data/code/test}"
 WIKI_PROBE_DATASET="${WIKI_PROBE_DATASET:-$PROJECT_ROOT/data/wiki/test}"
+CONVERSATION_PROBE_DATASET="${CONVERSATION_PROBE_DATASET:-$PROJECT_ROOT/data/conversation/test}"
 
 FFN_SOURCE="${FFN_SOURCE:-$G2_ROOT/code/phase3/g2matched-attn-freeze-phase3-router-only-retune-wikicode-no-reinit-mb96-1800}"
 EXP1_FREEZE_WIKI_SOURCE="${EXP1_FREEZE_WIKI_SOURCE:-$G2_ROOT/code/phase3/g2-exp2-phase3-router-only-retune-wikicode-from-new-experts-all-router-no-reinit-mb72-1800}"
@@ -147,8 +148,13 @@ common_env=(
     PROBE_DATASET="$CODE_PROBE_DATASET"
     SECONDARY_PROBE_NAME=wiki_probe
     SECONDARY_PROBE_DATASET="$WIKI_PROBE_DATASET"
+    TERTIARY_PROBE_NAME=conversation_probe
+    TERTIARY_PROBE_DATASET="$CONVERSATION_PROBE_DATASET"
+    TERTIARY_PROBE_EVAL_ITERS=25
+    TERTIARY_PROBE_EVAL_INTERVAL=50
     PROBE_STEP_OFFSET="$SOURCE_LOGICAL_STEP"
     SECONDARY_PROBE_STEP_OFFSET="$SOURCE_LOGICAL_STEP"
+    TERTIARY_PROBE_STEP_OFFSET="$SOURCE_LOGICAL_STEP"
     WANDB_STEP_OFFSET="$SOURCE_LOGICAL_STEP"
     RUN_INITIAL_PROBE_EVAL=1
     RUN_INITIAL_VALID_EVAL=1
@@ -231,7 +237,7 @@ echo "[CONFIG] G2 phase4 conversation after router finetune offline chain"
 echo "[CONFIG] conversation=$CONVERSATION_TRAIN"
 echo "[CONFIG] tokens=${CONVERSATION_TOKEN_COUNT}, required_tokens=${REQUIRED_TOKEN_COUNT}, approx_epochs=${APPROX_EPOCHS}"
 echo "[CONFIG] train_iters=$TRAIN_ITERS, logical_steps=${SOURCE_LOGICAL_STEP}->${TARGET_LOGICAL_STEP}"
-echo "[CONFIG] probes=code_probe + wiki_probe, target learning tracked by conversation train LM loss"
+echo "[CONFIG] probes=code_probe + wiki_probe + conversation_probe"
 echo "[CONFIG] experts=${SOURCE_NUM_EXPERTS}->${NUM_EXPERTS}, topk=${MOE_ROUTER_TOPK}"
 echo "[CONFIG] ffn_source=$FFN_SOURCE"
 echo "[CONFIG] exp1_freeze_wiki_source=$EXP1_FREEZE_WIKI_SOURCE"
@@ -239,6 +245,7 @@ echo "[CONFIG] exp2_unfreeze_wiki_source=$EXP2_UNFREEZE_WIKI_SOURCE"
 echo "[CONFIG] phase4_root=$PHASE4_ROOT"
 
 check_dataset "conversation train" "$CONVERSATION_TRAIN"
+check_dataset "conversation probe" "$CONVERSATION_PROBE_DATASET"
 check_dataset "code probe" "$CODE_PROBE_DATASET"
 check_dataset "wiki probe" "$WIKI_PROBE_DATASET"
 check_completed_source "ffn_only" "$FFN_SOURCE" 3600

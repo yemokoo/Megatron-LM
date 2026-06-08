@@ -158,8 +158,13 @@ export SECONDARY_PROBE_DATASET="${SECONDARY_PROBE_DATASET:-$(probe_dir_for_task 
 export SECONDARY_PROBE_NAME="${SECONDARY_PROBE_NAME:-wiki_probe}"
 export SECONDARY_PROBE_EVAL_ITERS="${SECONDARY_PROBE_EVAL_ITERS:-25}"
 export SECONDARY_PROBE_EVAL_INTERVAL="${SECONDARY_PROBE_EVAL_INTERVAL:-100}"
+export TERTIARY_PROBE_DATASET="${TERTIARY_PROBE_DATASET:-}"
+export TERTIARY_PROBE_NAME="${TERTIARY_PROBE_NAME:-}"
+export TERTIARY_PROBE_EVAL_ITERS="${TERTIARY_PROBE_EVAL_ITERS:-25}"
+export TERTIARY_PROBE_EVAL_INTERVAL="${TERTIARY_PROBE_EVAL_INTERVAL:-0}"
 export PROBE_STEP_OFFSET="${PROBE_STEP_OFFSET:-}"
 export SECONDARY_PROBE_STEP_OFFSET="${SECONDARY_PROBE_STEP_OFFSET:-}"
+export TERTIARY_PROBE_STEP_OFFSET="${TERTIARY_PROBE_STEP_OFFSET:-}"
 export RUN_INITIAL_PROBE_EVAL="${RUN_INITIAL_PROBE_EVAL:-1}"
 export RUN_INITIAL_VALID_EVAL="${RUN_INITIAL_VALID_EVAL:-1}"
 export WANDB_STEP_OFFSET="${WANDB_STEP_OFFSET:-}"
@@ -183,6 +188,7 @@ router_memory_requested() {
 export STAGE1_WEIGHTS_DIR="$(resolve_stage1_dir)"
 export PROBE_STEP_OFFSET="${PROBE_STEP_OFFSET:-$(read_stage1_train_iters)}"
 export SECONDARY_PROBE_STEP_OFFSET="${SECONDARY_PROBE_STEP_OFFSET:-$PROBE_STEP_OFFSET}"
+export TERTIARY_PROBE_STEP_OFFSET="${TERTIARY_PROBE_STEP_OFFSET:-$PROBE_STEP_OFFSET}"
 export WANDB_STEP_OFFSET="${WANDB_STEP_OFFSET:-$PROBE_STEP_OFFSET}"
 
 if [ "$DIRECT_LOCAL_SAVE" = "1" ]; then
@@ -462,6 +468,17 @@ if [ "$RUN_INITIAL_PROBE_EVAL" = "1" ]; then
     INITIAL_PROBE_ARGS+=(--run-initial-probe-eval)
 fi
 
+TERTIARY_PROBE_ARGS=()
+if [ -n "$TERTIARY_PROBE_DATASET" ]; then
+    TERTIARY_PROBE_ARGS+=(
+        --tertiary-probe-name "$TERTIARY_PROBE_NAME"
+        --tertiary-probe-eval-iters "$TERTIARY_PROBE_EVAL_ITERS"
+        --tertiary-probe-eval-interval "$TERTIARY_PROBE_EVAL_INTERVAL"
+        --tertiary-probe-step-offset "$TERTIARY_PROBE_STEP_OFFSET"
+        --tertiary-probe-data-path $(build_data_path "$TERTIARY_PROBE_DATASET")
+    )
+fi
+
 ROUTER_MEMORY_ARGS=()
 if router_memory_requested; then
     ROUTER_MEMORY_ARGS+=(
@@ -548,6 +565,7 @@ torchrun \
     --secondary-probe-eval-interval "$SECONDARY_PROBE_EVAL_INTERVAL" \
     --secondary-probe-step-offset "$SECONDARY_PROBE_STEP_OFFSET" \
     --secondary-probe-data-path $(build_data_path "$SECONDARY_PROBE_DATASET") \
+    "${TERTIARY_PROBE_ARGS[@]}" \
     "${ROUTER_MEMORY_ARGS[@]}" \
     "${WANDB_ARGS[@]}"
 
