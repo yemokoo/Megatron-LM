@@ -16,12 +16,14 @@ export EVAL_INTERVAL="${EVAL_INTERVAL:-1800}"
 export LOG_INTERVAL="${LOG_INTERVAL:-20}"
 export PROBE_EVAL_INTERVAL="${PROBE_EVAL_INTERVAL:-50}"
 export SECONDARY_PROBE_EVAL_INTERVAL="${SECONDARY_PROBE_EVAL_INTERVAL:-50}"
+export TERTIARY_PROBE_EVAL_INTERVAL="${TERTIARY_PROBE_EVAL_INTERVAL:-50}"
 export GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-2304}"
 export SEQ_LENGTH="${SEQ_LENGTH:-512}"
 export SOURCE_LOGICAL_STEP="${SOURCE_LOGICAL_STEP:-5400}"
 export TARGET_LOGICAL_STEP="$((SOURCE_LOGICAL_STEP + TRAIN_ITERS))"
 export PAUSE_SECONDS="${PAUSE_SECONDS:-180}"
 export DEBUG_TRAINABLE_PARAMS_AND_EXIT="${DEBUG_TRAINABLE_PARAMS_AND_EXIT:-0}"
+export RUN_ONLY_STAGE="${RUN_ONLY_STAGE:-all}"
 
 export SOURCE_NUM_EXPERTS="${SOURCE_NUM_EXPERTS:-16}"
 export NUM_EXPERTS="${NUM_EXPERTS:-24}"
@@ -152,7 +154,7 @@ common_env=(
     TERTIARY_PROBE_NAME=conversation_probe
     TERTIARY_PROBE_DATASET="$CONVERSATION_PROBE_DATASET"
     TERTIARY_PROBE_EVAL_ITERS=25
-    TERTIARY_PROBE_EVAL_INTERVAL=50
+    TERTIARY_PROBE_EVAL_INTERVAL="$TERTIARY_PROBE_EVAL_INTERVAL"
     PROBE_STEP_OFFSET="$SOURCE_LOGICAL_STEP"
     SECONDARY_PROBE_STEP_OFFSET="$SOURCE_LOGICAL_STEP"
     TERTIARY_PROBE_STEP_OFFSET="$SOURCE_LOGICAL_STEP"
@@ -247,6 +249,7 @@ echo "[CONFIG] conversation=$CONVERSATION_TRAIN"
 echo "[CONFIG] tokens=${CONVERSATION_TOKEN_COUNT}, required_tokens=${REQUIRED_TOKEN_COUNT}, approx_epochs=${APPROX_EPOCHS}"
 echo "[CONFIG] train_iters=$TRAIN_ITERS, logical_steps=${SOURCE_LOGICAL_STEP}->${TARGET_LOGICAL_STEP}"
 echo "[CONFIG] debug_trainable_params_and_exit=$DEBUG_TRAINABLE_PARAMS_AND_EXIT"
+echo "[CONFIG] run_only_stage=$RUN_ONLY_STAGE"
 echo "[CONFIG] probes=code_probe + wiki_probe + conversation_probe"
 echo "[CONFIG] experts=${SOURCE_NUM_EXPERTS}->${NUM_EXPERTS}, topk=${MOE_ROUTER_TOPK}"
 echo "[CONFIG] ffn_source=$FFN_SOURCE"
@@ -262,26 +265,56 @@ check_completed_source "ffn_only" "$FFN_SOURCE" 3600
 check_completed_source "exp1_freeze_wiki" "$EXP1_FREEZE_WIKI_SOURCE" 3600
 check_completed_source "exp2_unfreeze_wiki" "$EXP2_UNFREEZE_WIKI_SOURCE" 3600
 
-run_ffn_only
-pause_after_stage
-
-run_shared_router \
-    "exp1_freeze_wiki" \
-    "$EXP1_FREEZE_WIKI_SOURCE" \
-    0 \
-    0 \
-    "${EXP1_RUN_ID:-g2-exp1-freeze-wiki-phase4-conversation-from-router-retuned-e16to24-mb72-1800}" \
-    "${EXP1_WANDB_EXP_NAME:-G2 - exp1 freeze-wiki - phase4 conversation offline}" \
-    "${EXP1_MASTER_PORT:-29812}"
-pause_after_stage
-
-run_shared_router \
-    "exp2_unfreeze_wiki" \
-    "$EXP2_UNFREEZE_WIKI_SOURCE" \
-    1 \
-    1 \
-    "${EXP2_RUN_ID:-g2-exp2-unfreeze-wiki-phase4-conversation-from-router-retuned-e16to24-mb72-1800}" \
-    "${EXP2_WANDB_EXP_NAME:-G2 - exp2 unfreeze-wiki - phase4 conversation offline}" \
-    "${EXP2_MASTER_PORT:-29813}"
+case "$RUN_ONLY_STAGE" in
+    all)
+        run_ffn_only
+        pause_after_stage
+        run_shared_router \
+            "exp1_freeze_wiki" \
+            "$EXP1_FREEZE_WIKI_SOURCE" \
+            0 \
+            0 \
+            "${EXP1_RUN_ID:-g2-exp1-freeze-wiki-phase4-conversation-from-router-retuned-e16to24-mb72-1800}" \
+            "${EXP1_WANDB_EXP_NAME:-G2 - exp1 freeze-wiki - phase4 conversation offline}" \
+            "${EXP1_MASTER_PORT:-29812}"
+        pause_after_stage
+        run_shared_router \
+            "exp2_unfreeze_wiki" \
+            "$EXP2_UNFREEZE_WIKI_SOURCE" \
+            1 \
+            1 \
+            "${EXP2_RUN_ID:-g2-exp2-unfreeze-wiki-phase4-conversation-from-router-retuned-e16to24-mb72-1800}" \
+            "${EXP2_WANDB_EXP_NAME:-G2 - exp2 unfreeze-wiki - phase4 conversation offline}" \
+            "${EXP2_MASTER_PORT:-29813}"
+        ;;
+    ffn_only)
+        run_ffn_only
+        ;;
+    exp1_freeze_wiki)
+        run_shared_router \
+            "exp1_freeze_wiki" \
+            "$EXP1_FREEZE_WIKI_SOURCE" \
+            0 \
+            0 \
+            "${EXP1_RUN_ID:-g2-exp1-freeze-wiki-phase4-conversation-from-router-retuned-e16to24-mb72-1800}" \
+            "${EXP1_WANDB_EXP_NAME:-G2 - exp1 freeze-wiki - phase4 conversation offline}" \
+            "${EXP1_MASTER_PORT:-29812}"
+        ;;
+    exp2_unfreeze_wiki)
+        run_shared_router \
+            "exp2_unfreeze_wiki" \
+            "$EXP2_UNFREEZE_WIKI_SOURCE" \
+            1 \
+            1 \
+            "${EXP2_RUN_ID:-g2-exp2-unfreeze-wiki-phase4-conversation-from-router-retuned-e16to24-mb72-1800}" \
+            "${EXP2_WANDB_EXP_NAME:-G2 - exp2 unfreeze-wiki - phase4 conversation offline}" \
+            "${EXP2_MASTER_PORT:-29813}"
+        ;;
+    *)
+        echo "[ERROR] invalid RUN_ONLY_STAGE=$RUN_ONLY_STAGE" >&2
+        echo "        choose one of: all, ffn_only, exp1_freeze_wiki, exp2_unfreeze_wiki" >&2
+        exit 1
+        ;;
+esac
 
 echo "[ALL DONE] $(date)"
