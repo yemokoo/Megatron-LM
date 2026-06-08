@@ -1523,19 +1523,20 @@ def _debug_expert_row_grad_sums(name, param, num_experts):
         return None
 
     kind = _debug_param_kind(name)
+    grad_tensor = _param_grad_tensor(param)
     if kind == 'ffn_local_expert':
         expert_idx = _debug_local_expert_index(name)
         if expert_idx is None or expert_idx >= num_experts:
             return None
         row_sums = [0.0 for _ in range(num_experts)]
-        if param.grad is not None:
-            row_sums[expert_idx] = float(param.grad.detach().float().abs().sum().item())
+        if grad_tensor is not None:
+            row_sums[expert_idx] = float(grad_tensor.detach().float().abs().sum().item())
         return row_sums
 
-    if param.grad is None:
+    if grad_tensor is None:
         return None
 
-    grad = param.grad.detach().float()
+    grad = grad_tensor.detach().float()
 
     if kind in ('router_weight', 'router_bias', 'attention_expert'):
         if grad.dim() < 1 or grad.shape[0] < num_experts:
