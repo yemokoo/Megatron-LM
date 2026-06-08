@@ -1481,6 +1481,251 @@ def get_optimizer_param_scheduler(optimizer):
     return opt_param_scheduler
 
 
+def _debug_num_existing_experts(args):
+    for attr in (
+        'moe_expand_from_num_experts',
+        'moe_resume_from_num_experts',
+        'shared_router_hybrid_expand_from_num_experts',
+        'shared_router_hybrid_resume_from_num_experts',
+        'attn_lora_expand_from_num_experts',
+        'attn_lora_resume_from_num_experts',
+    ):
+        value = getattr(args, attr, None)
+        if value is not None:
+            return int(value)
+    return None
+
+
+def _debug_param_kind(name):
+    if name.endswith('router.weight') or name.endswith('expert_router.weight'):
+        return 'router_weight'
+    if name.endswith('expert_bias') and 'router' in name:
+        return 'router_bias'
+    if 'ffn_experts.weight1' in name:
+        return 'ffn_expert_weight1'
+    if 'ffn_experts.weight2' in name:
+        return 'ffn_expert_weight2'
+    if 'attn_lora_experts' in name:
+        return 'attention_expert'
+    return 'other'
+
+
+def _debug_expert_row_grad_sums(name, param, num_experts):
+    if param.grad is None or num_experts is None or num_experts <= 0:
+        return None
+
+    kind = _debug_param_kind(name)
+    grad = param.grad.detach().float()
+
+    if kind in ('router_weight', 'router_bias', 'attention_expert'):
+        if grad.dim() < 1 or grad.shape[0] < num_experts:
+            return None
+        return [float(grad[idx].abs().sum().item()) for idx in range(num_experts)]
+
+    if kind == 'ffn_expert_weight1':
+        if grad.dim() < 2 or grad.shape[1] % num_experts != 0:
+            return None
+        width = grad.shape[1] // num_experts
+        return [
+            float(grad[:, idx * width : (idx + 1) * width].abs().sum().item())
+            for idx in range(num_experts)
+        ]
+
+    if kind == 'ffn_expert_weight2':
+        if grad.dim() < 2 or grad.shape[0] % num_experts != 0:
+            return None
+        width = grad.shape[0] // num_experts
+        return [
+            float(grad[idx * width : (idx + 1) * width, :].abs().sum().item())
+            for idx in range(num_experts)
+        ]
+
+    return None
+
+
+def _debug_expected_rows_for_param(args, name, num_experts, num_existing_experts):
+    kind = _debug_param_kind(name)
+    if kind == 'other' or num_experts is None or num_existing_experts is None:
+        return None
+
+    all_rows = list(range(num_experts))
+    new_rows = list(range(num_existing_experts, num_experts))
+
+    if getattr(args, 'shared_router_hybrid_model', False):
+        if getattr(args, 'shared_router_hybrid_train_all_experts_and_router_only', False):
+            return all_rows
+        if getattr(args, 'shared_router_hybrid_train_new_experts_and_router_only', False):
+            if kind in ('router_weight', 'router_bias') and getattr(
+                args, 'shared_router_hybrid_train_all_router_rows', False
+            ):
+                return all_rows
+            return new_rows
+        if getattr(args, 'shared_router_hybrid_train_router_only', False):
+            return all_rows if kind in ('router_weight', 'router_bias') else []
+        if getattr(args, 'shared_router_hybrid_train_new_router_only', False):
+            return new_rows if kind in ('router_weight', 'router_bias') else []
+        return new_rows
+
+    if getattr(args, 'moe_train_new_experts_and_router_only', False):
+        return new_rows
+    if getattr(args, 'moe_train_router_only', False):
+        return all_rows if kind in ('router_weight', 'router_bias') else []
+    return new_rows
+
+
+def _debug_trainable_params_and_maybe_exit(model, unwrapped_model):
+    args = get_args()
+    if not getattr(args, 'debug_trainable_params_and_exit', False):
+        return
+
+    num_experts = int(args.num_experts) if getattr(args, 'num_experts', None) else None
+    num_existing_experts = _debug_num_existing_experts(args)
+    path = getattr(args, 'debug_trainable_params_path', None)
+    if not path:
+        path = os.path.join(args.save or os.getcwd(), 'logs', 'trainable_params_debug.json')
+
+    for shard in unwrapped_model:
+        shard.zero_grad(set_to_none=True)
+
+    loss = None
+    row_param_names = set()
+    unexpected_trainable = []
+    frozen_row_aware = []
+    totals = {
+        'parameters': 0,
+        'trainable_parameters': 0,
+        'row_aware_parameters': 0,
+        'trainable_row_aware_parameters': 0,
+    }
+
+    for shard_idx, shard in enumerate(unwrapped_model):
+        for name, param in shard.named_parameters():
+            full_name = f'shard{shard_idx}.{name}'
+            totals['parameters'] += int(param.numel())
+            if param.requires_grad:
+                totals['trainable_parameters'] += int(param.numel())
+
+            kind = _debug_param_kind(name)
+            if kind == 'other':
+                if param.requires_grad:
+                    unexpected_trainable.append(
+                        {
+                            'name': full_name,
+                            'shape': list(param.shape),
+                            'numel': int(param.numel()),
+                        }
+                    )
+                continue
+
+            totals['row_aware_parameters'] += int(param.numel())
+            row_param_names.add(full_name)
+            if param.requires_grad:
+                totals['trainable_row_aware_parameters'] += int(param.numel())
+                term = param.float().sum()
+                loss = term if loss is None else loss + term
+            else:
+                frozen_row_aware.append(
+                    {
+                        'name': full_name,
+                        'kind': kind,
+                        'shape': list(param.shape),
+                    }
+                )
+
+    if loss is not None:
+        loss.backward()
+
+    checks = []
+    failures = []
+    tolerance = 0.0
+
+    for shard_idx, shard in enumerate(unwrapped_model):
+        for name, param in shard.named_parameters():
+            full_name = f'shard{shard_idx}.{name}'
+            if full_name not in row_param_names:
+                continue
+
+            expected = _debug_expected_rows_for_param(args, name, num_experts, num_existing_experts)
+            row_sums = _debug_expert_row_grad_sums(name, param, num_experts)
+            observed = None if row_sums is None else [
+                idx for idx, value in enumerate(row_sums) if value > tolerance
+            ]
+            check = {
+                'name': full_name,
+                'kind': _debug_param_kind(name),
+                'shape': list(param.shape),
+                'requires_grad': bool(param.requires_grad),
+                'expected_train_rows_0based': expected,
+                'observed_train_rows_0based': observed,
+                'row_grad_abs_sums': row_sums,
+            }
+            checks.append(check)
+            if expected is not None:
+                if observed is None:
+                    failures.append({'name': full_name, 'reason': 'missing row gradient'})
+                elif observed != expected:
+                    failures.append(
+                        {
+                            'name': full_name,
+                            'reason': 'row gradient mask mismatch',
+                            'expected': expected,
+                            'observed': observed,
+                        }
+                    )
+
+    if unexpected_trainable:
+        failures.append(
+            {
+                'reason': 'unexpected non-router/non-expert trainable params',
+                'count': len(unexpected_trainable),
+                'examples': unexpected_trainable[:20],
+            }
+        )
+
+    summary = {
+        'status': 'pass' if not failures else 'fail',
+        'num_experts': num_experts,
+        'num_existing_experts': num_existing_experts,
+        'shared_router_hybrid_model': bool(getattr(args, 'shared_router_hybrid_model', False)),
+        'moe_train_new_experts_and_router_only': bool(
+            getattr(args, 'moe_train_new_experts_and_router_only', False)
+        ),
+        'shared_router_hybrid_train_new_experts_and_router_only': bool(
+            getattr(args, 'shared_router_hybrid_train_new_experts_and_router_only', False)
+        ),
+        'shared_router_hybrid_train_all_experts_and_router_only': bool(
+            getattr(args, 'shared_router_hybrid_train_all_experts_and_router_only', False)
+        ),
+        'shared_router_hybrid_train_all_router_rows': bool(
+            getattr(args, 'shared_router_hybrid_train_all_router_rows', False)
+        ),
+        'totals': totals,
+        'unexpected_trainable_params': unexpected_trainable[:200],
+        'frozen_row_aware_params': frozen_row_aware[:200],
+        'row_checks': checks,
+        'failures': failures,
+    }
+
+    if torch.distributed.get_rank() == 0:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(summary, f, indent=2)
+        print_rank_0(f"[debug-trainable] wrote {path}")
+        print_rank_0(
+            "[debug-trainable] "
+            f"status={summary['status']} trainable={totals['trainable_parameters']} "
+            f"unexpected_nonexpert={len(unexpected_trainable)} row_checks={len(checks)}"
+        )
+
+    torch.distributed.barrier()
+    if failures:
+        raise RuntimeError(
+            "debug trainable parameter check failed; inspect "
+            f"{path} for row-level mismatches."
+        )
+    sys.exit(0)
+
+
 def setup_model_and_optimizer(model_provider_func,
                               model_type,
                               no_wd_decay_cond=None,
@@ -2103,6 +2348,8 @@ def setup_model_and_optimizer(model_provider_func,
         print_rank_0("> converted checkpoint: %s -> %s." % (load_ckpt_format, args.ckpt_format))
         torch.distributed.barrier()
         exit()
+
+    _debug_trainable_params_and_maybe_exit(model, unwrapped_model)
 
     return model, optimizer, opt_param_scheduler
 

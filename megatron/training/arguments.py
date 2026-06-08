@@ -2106,6 +2106,14 @@ def _add_validation_args(parser):
     group.add_argument('--diagnostic-override-consumed-train-samples', type=int, default=None,
                        help='Diagnostic-only override for args.consumed_train_samples after '
                             'checkpoint load and before dataloader construction.')
+    group.add_argument('--debug-trainable-params-and-exit', action='store_true',
+                       default=False,
+                       help='After checkpoint load/expansion/freeze setup, run a synthetic '
+                            'expert/router backward pass, write trainable/frozen row diagnostics, '
+                            'and exit before training.')
+    group.add_argument('--debug-trainable-params-path', type=str, default=None,
+                       help='Optional JSON path for --debug-trainable-params-and-exit. '
+                            'Defaults to <save>/logs/trainable_params_debug.json.')
 
     return parser
 
