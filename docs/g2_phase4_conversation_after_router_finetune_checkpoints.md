@@ -65,7 +65,7 @@ Training mode:
 - Existing FFN experts and existing router rows are frozen.
 - Newly added conversation FFN experts and new router rows are trained.
 - There are no attention experts in this baseline.
-- Main attention matrices, dense FFN, embeddings, and output weights are frozen.
+- Main attention matrices, dense/full-rank attention LoRA adapters, dense FFN, embeddings, and output weights are frozen.
 - No old-model KD.
 
 ## Run 2: Experiment 1 Freeze-Wiki

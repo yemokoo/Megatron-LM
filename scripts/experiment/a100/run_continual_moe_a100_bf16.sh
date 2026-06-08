@@ -7,6 +7,7 @@ export SOURCE_TASK="${SOURCE_TASK:?SOURCE_TASK must be set}"
 export TARGET_TASK="${TARGET_TASK:?TARGET_TASK must be set}"
 export FREEZE_SHARED="${FREEZE_SHARED:-0}"
 export TRAIN_ATTENTION_WITH_NEW_EXPERTS="${TRAIN_ATTENTION_WITH_NEW_EXPERTS:-0}"
+export FREEZE_DENSE_ATTENTION_LORA_WITH_NEW_EXPERTS="${FREEZE_DENSE_ATTENTION_LORA_WITH_NEW_EXPERTS:-0}"
 
 if [ "$SOURCE_TASK" = "wiki" ] && [ "$TARGET_TASK" = "code" ]; then
     export STAGE_NAME="${STAGE_NAME:-a_to_b}"
@@ -359,6 +360,9 @@ if [ "$TRAIN_NEW_EXPERTS_AND_ROUTER_ONLY" = "1" ]; then
     SAVE_ARGS+=(--moe-train-new-experts-and-router-only)
     if [ "$TRAIN_ATTENTION_WITH_NEW_EXPERTS" = "1" ]; then
         SAVE_ARGS+=(--moe-train-attention-with-new-experts)
+    fi
+    if [ "$FREEZE_DENSE_ATTENTION_LORA_WITH_NEW_EXPERTS" = "1" ]; then
+        SAVE_ARGS+=(--moe-freeze-dense-attention-lora-with-new-experts)
     fi
 fi
 
