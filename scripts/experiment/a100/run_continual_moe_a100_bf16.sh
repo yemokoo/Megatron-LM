@@ -20,6 +20,10 @@ elif [ "$SOURCE_TASK" = "wiki" ] && [ "$TARGET_TASK" = "conversation" ]; then
     export STAGE_NAME="${STAGE_NAME:-wiki_to_conversation}"
     export STAGE_DIR_NAME="${STAGE_DIR_NAME:-a100/wiki-to-conversation-moe-bf16}"
     export STAGE_LABEL="${STAGE_LABEL:-wiki_to_conversation}"
+elif [ "$SOURCE_TASK" = "code" ] && [ "$TARGET_TASK" = "conversation" ]; then
+    export STAGE_NAME="${STAGE_NAME:-code_to_conversation}"
+    export STAGE_DIR_NAME="${STAGE_DIR_NAME:-a100/code-to-conversation-moe-bf16}"
+    export STAGE_LABEL="${STAGE_LABEL:-code_to_conversation}"
 else
     echo "ERROR: unsupported continual direction ${SOURCE_TASK} -> ${TARGET_TASK}" >&2
     exit 1
