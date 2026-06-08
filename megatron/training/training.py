@@ -1812,6 +1812,7 @@ def setup_model_and_optimizer(model_provider_func,
                     args.moe_expand_from_num_experts,
                     freeze_existing_experts=True,
                     freeze_existing_router=True,
+                    train_dense_attention_lora=not args.moe_freeze_dense_attention_lora_with_new_experts,
                 )
                 if args.moe_train_attention_with_new_experts:
                     attention_stats = enable_self_attention_params(target_shard)
@@ -2098,6 +2099,7 @@ def setup_model_and_optimizer(model_provider_func,
                         args.moe_resume_from_num_experts,
                         freeze_existing_experts=True,
                         freeze_existing_router=True,
+                        train_dense_attention_lora=not args.moe_freeze_dense_attention_lora_with_new_experts,
                     )
                     if args.moe_train_attention_with_new_experts:
                         attention_stats = enable_self_attention_params(target_shard)

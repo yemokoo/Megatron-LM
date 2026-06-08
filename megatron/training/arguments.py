@@ -2482,6 +2482,10 @@ def _add_moe_args(parser):
                        help='When expanding or resuming an expanded MoE checkpoint, freeze every parameter except the MoE router weights. Intended for router-only retuning with fixed experts.')
     group.add_argument('--moe-train-attention-with-new-experts', action='store_true',
                        help='With --moe-train-new-experts-and-router-only, also keep self-attention parameters trainable while the rest of the shared trunk remains frozen.')
+    group.add_argument('--moe-freeze-dense-attention-lora-with-new-experts', action='store_true',
+                       help='With --moe-train-new-experts-and-router-only, keep dense/full-rank '
+                            'attention LoRA adapters frozen. This is useful for FFN-only expert '
+                            'expansion where only new FFN experts and router rows should train.')
     group.add_argument('--moe-resume-from-num-experts', type=int, default=None,
                        help='When resuming from an already-expanded MoE checkpoint, re-apply continual-learning freezing using this many original experts.')
     group.add_argument('--moe-old-model-kl-load', type=str, default=None,
