@@ -3449,7 +3449,13 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
             getattr(args, 'secondary_probe_eval_interval', 0)
             and iteration % args.secondary_probe_eval_interval == 0
         )
-        if probe_eval_func is not None and (should_run_primary_probe or should_run_secondary_probe):
+        should_run_tertiary_probe = (
+            getattr(args, 'tertiary_probe_eval_interval', 0)
+            and iteration % args.tertiary_probe_eval_interval == 0
+        )
+        if probe_eval_func is not None and (
+            should_run_primary_probe or should_run_secondary_probe or should_run_tertiary_probe
+        ):
             probe_eval_func(model, iteration)
 
         # Evaluation.

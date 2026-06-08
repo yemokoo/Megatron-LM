@@ -997,6 +997,20 @@ def run_probe_evaluation(model, iteration):
             "secondary_probe",
         )
 
+    if (
+        getattr(args, "tertiary_probe_eval_interval", 0)
+        and iteration % args.tertiary_probe_eval_interval == 0
+    ):
+        _run_single_probe_evaluation(
+            model,
+            iteration,
+            args.tertiary_probe_data_path,
+            args.tertiary_probe_eval_iters,
+            args.tertiary_probe_name,
+            args.tertiary_probe_step_offset,
+            "tertiary_probe",
+        )
+
 
 if __name__ == "__main__":
 
