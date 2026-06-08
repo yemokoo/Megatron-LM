@@ -415,6 +415,14 @@ if [ -n "$WANDB_PROJECT" ]; then
     fi
 fi
 
+DEBUG_TRAINABLE_ARGS=()
+if [ "${DEBUG_TRAINABLE_PARAMS_AND_EXIT:-0}" = "1" ]; then
+    DEBUG_TRAINABLE_ARGS+=(--debug-trainable-params-and-exit)
+    if [ -n "${DEBUG_TRAINABLE_PARAMS_PATH:-}" ]; then
+        DEBUG_TRAINABLE_ARGS+=(--debug-trainable-params-path "$DEBUG_TRAINABLE_PARAMS_PATH")
+    fi
+fi
+
 LOG_STYLE_ARGS=()
 if [ "$TRAIN_LOG_STEP_TIME_ONLY" = "1" ]; then
     LOG_STYLE_ARGS+=(--train-log-step-time-only)
@@ -567,7 +575,8 @@ torchrun \
     --secondary-probe-data-path $(build_data_path "$SECONDARY_PROBE_DATASET") \
     "${TERTIARY_PROBE_ARGS[@]}" \
     "${ROUTER_MEMORY_ARGS[@]}" \
-    "${WANDB_ARGS[@]}"
+    "${WANDB_ARGS[@]}" \
+    "${DEBUG_TRAINABLE_ARGS[@]}"
 
 if [ "$SSD_TARGET_WEIGHTS" != "$TRAIN_WEIGHTS" ]; then
     rsync -rlptD "$SSD_TARGET_WEIGHTS/" "$TRAIN_WEIGHTS/"

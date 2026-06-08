@@ -64,7 +64,8 @@ Training mode:
 
 - Existing FFN experts and existing router rows are frozen.
 - Newly added conversation FFN experts and new router rows are trained.
-- Attention remains frozen.
+- There are no attention experts in this baseline.
+- Main attention matrices, dense FFN, embeddings, and output weights are frozen.
 - No old-model KD.
 
 ## Run 2: Experiment 1 Freeze-Wiki
@@ -95,9 +96,12 @@ Training mode:
 
 - Shared-router hybrid FFN expert + attention expert model.
 - Existing experts are frozen.
-- Newly added conversation experts are trained.
-- All router rows are trainable.
-- This preserves the freeze-wiki style used during the code-learning stage while allowing router adaptation.
+- Newly added conversation FFN experts are trained.
+- Newly added conversation attention experts are trained.
+- Existing router rows are frozen.
+- Newly added conversation router rows are trained.
+- Shared dense trunk, main attention matrices, dense FFN, embeddings, and output weights are frozen.
+- This preserves the freeze-wiki style used during the code-learning stage while allowing only new task capacity to adapt.
 
 ## Run 3: Experiment 2 Unfreeze-Wiki
 
@@ -126,11 +130,45 @@ Phase4 output checkpoint:
 Training mode:
 
 - Shared-router hybrid FFN expert + attention expert model.
-- Existing wiki/code experts and newly added conversation experts are trainable.
+- Existing wiki/code FFN experts and newly added conversation FFN experts are trainable.
+- Existing wiki/code attention experts and newly added conversation attention experts are trainable.
 - All router rows are trainable.
+- Shared dense trunk, main attention matrices, dense FFN, embeddings, and output weights are frozen.
 - This preserves the higher-plasticity unfreeze-wiki style used during the code-learning stage.
 
 ## KT Launch Command
+
+Before the real offline chain, run the actual-model trainability check. This loads the real source checkpoints, expands `16 -> 24`, applies the same freeze setting as training, runs a synthetic expert/router backward pass, writes row-level gradient-mask diagnostics, then exits before any training step.
+
+```bash
+cd /home/work/Agent_HJ/30_flame_agent/LLM-continual-learning
+source scripts/miscellaneous/activate_kt_env.sh
+source ~/.config/wandb/env 2>/dev/null || true
+
+OUTLOG="g2_phase4_conversation_trainability_debug_$(date +%Y%m%d_%H%M%S).log"
+
+WANDB_MODE=disabled \
+DEBUG_TRAINABLE_PARAMS_AND_EXIT=1 \
+PAUSE_SECONDS=0 \
+FFN_RUN_ID="debug-g2-ffn-only-phase4-conversation-trainability" \
+EXP1_RUN_ID="debug-g2-exp1-freeze-wiki-phase4-conversation-trainability" \
+EXP2_RUN_ID="debug-g2-exp2-unfreeze-wiki-phase4-conversation-trainability" \
+bash scripts/experiment/a100/run_g2_phase4_conversation_after_router_finetune_offline_chain_mha.sh \
+  > "$OUTLOG" 2>&1
+
+echo "[OUTLOG] $OUTLOG"
+grep -nE "debug-trainable|status=|ERROR|Traceback|RuntimeError" "$OUTLOG" | tail -120
+```
+
+Expected diagnostic JSONs:
+
+```text
+.local/weights/a100/mha/g2-checkpoints/conversation/phase4/debug-g2-ffn-only-phase4-conversation-trainability/logs/trainable_params_debug.json
+.local/weights/a100/mha/g2-checkpoints/conversation/phase4/debug-g2-exp1-freeze-wiki-phase4-conversation-trainability/logs/trainable_params_debug.json
+.local/weights/a100/mha/g2-checkpoints/conversation/phase4/debug-g2-exp2-unfreeze-wiki-phase4-conversation-trainability/logs/trainable_params_debug.json
+```
+
+If all three diagnostics show `status=pass`, start the real offline chain:
 
 ```bash
 cd /home/work/Agent_HJ/30_flame_agent/LLM-continual-learning

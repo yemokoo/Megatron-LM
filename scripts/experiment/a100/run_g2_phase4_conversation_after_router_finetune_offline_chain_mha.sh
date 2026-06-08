@@ -21,6 +21,7 @@ export SEQ_LENGTH="${SEQ_LENGTH:-512}"
 export SOURCE_LOGICAL_STEP="${SOURCE_LOGICAL_STEP:-5400}"
 export TARGET_LOGICAL_STEP="$((SOURCE_LOGICAL_STEP + TRAIN_ITERS))"
 export PAUSE_SECONDS="${PAUSE_SECONDS:-180}"
+export DEBUG_TRAINABLE_PARAMS_AND_EXIT="${DEBUG_TRAINABLE_PARAMS_AND_EXIT:-0}"
 
 export SOURCE_NUM_EXPERTS="${SOURCE_NUM_EXPERTS:-16}"
 export NUM_EXPERTS="${NUM_EXPERTS:-24}"
@@ -166,6 +167,7 @@ run_ffn_only() {
     local run_id="${FFN_RUN_ID:-g2-ffn-only-phase4-conversation-from-router-retuned-e16to24-mb96-1800}"
     local train_weights="${FFN_TRAIN_WEIGHTS:-$PHASE4_ROOT/$run_id}"
     local label="ffn_only"
+    local debug_path="$train_weights/logs/trainable_params_debug.json"
 
     ensure_target_is_safe "$label" "$train_weights" || return 0
 
@@ -189,6 +191,8 @@ run_ffn_only() {
         WANDB_RUN_ID="$run_id" \
         WANDB_EXP_NAME="${FFN_WANDB_EXP_NAME:-G2 FFN-only - phase4 conversation offline}" \
         WANDB_SAVE_DIR="$train_weights/wandb" \
+        DEBUG_TRAINABLE_PARAMS_AND_EXIT="$DEBUG_TRAINABLE_PARAMS_AND_EXIT" \
+        DEBUG_TRAINABLE_PARAMS_PATH="${FFN_DEBUG_TRAINABLE_PARAMS_PATH:-$debug_path}" \
         MASTER_PORT="${FFN_MASTER_PORT:-29811}" \
         "$SCRIPT_DIR/run_guarded_training.sh" \
         bash "$SCRIPT_DIR/run_continual_moe_a100_bf16.sh"
@@ -199,10 +203,12 @@ run_shared_router() {
     local label="$1"
     local source_dir="$2"
     local train_all_experts_and_router="$3"
-    local run_id="$4"
-    local wandb_name="$5"
-    local port="$6"
+    local train_all_router_rows="$4"
+    local run_id="$5"
+    local wandb_name="$6"
+    local port="$7"
     local train_weights="$PHASE4_ROOT/$run_id"
+    local debug_path="$train_weights/logs/trainable_params_debug.json"
 
     ensure_target_is_safe "$label" "$train_weights" || return 0
 
@@ -221,12 +227,14 @@ run_shared_router() {
         ATTN_FULL_RANK_LORA_ACTIVE_TARGETS="$ATTN_FULL_RANK_LORA_ACTIVE_TARGETS" \
         ATTN_LORA_GROUPED_GEMM="$ATTN_LORA_GROUPED_GEMM" \
         SHARED_ROUTER_HYBRID_TRAIN_ALL_EXPERTS_AND_ROUTER="$train_all_experts_and_router" \
-        SHARED_ROUTER_HYBRID_TRAIN_ALL_ROUTER_ROWS=1 \
+        SHARED_ROUTER_HYBRID_TRAIN_ALL_ROUTER_ROWS="$train_all_router_rows" \
         ROUTER_MEMORY_KL_COEFF=0.0 \
         ROUTER_MEMORY_INTERVAL=0 \
         WANDB_RUN_ID="$run_id" \
         WANDB_EXP_NAME="$wandb_name" \
         WANDB_SAVE_DIR="$train_weights/wandb" \
+        DEBUG_TRAINABLE_PARAMS_AND_EXIT="$DEBUG_TRAINABLE_PARAMS_AND_EXIT" \
+        DEBUG_TRAINABLE_PARAMS_PATH="${DEBUG_TRAINABLE_PARAMS_PATH:-$debug_path}" \
         MASTER_PORT="$port" \
         "$SCRIPT_DIR/run_guarded_training.sh" \
         bash "$PROJECT_ROOT/scripts/experiment/continual_code_from_wiki_shared_router_hybrid_expand_local_bf16.sh"
@@ -237,6 +245,7 @@ echo "[CONFIG] G2 phase4 conversation after router finetune offline chain"
 echo "[CONFIG] conversation=$CONVERSATION_TRAIN"
 echo "[CONFIG] tokens=${CONVERSATION_TOKEN_COUNT}, required_tokens=${REQUIRED_TOKEN_COUNT}, approx_epochs=${APPROX_EPOCHS}"
 echo "[CONFIG] train_iters=$TRAIN_ITERS, logical_steps=${SOURCE_LOGICAL_STEP}->${TARGET_LOGICAL_STEP}"
+echo "[CONFIG] debug_trainable_params_and_exit=$DEBUG_TRAINABLE_PARAMS_AND_EXIT"
 echo "[CONFIG] probes=code_probe + wiki_probe + conversation_probe"
 echo "[CONFIG] experts=${SOURCE_NUM_EXPERTS}->${NUM_EXPERTS}, topk=${MOE_ROUTER_TOPK}"
 echo "[CONFIG] ffn_source=$FFN_SOURCE"
@@ -259,6 +268,7 @@ run_shared_router \
     "exp1_freeze_wiki" \
     "$EXP1_FREEZE_WIKI_SOURCE" \
     0 \
+    0 \
     "${EXP1_RUN_ID:-g2-exp1-freeze-wiki-phase4-conversation-from-router-retuned-e16to24-mb72-1800}" \
     "${EXP1_WANDB_EXP_NAME:-G2 - exp1 freeze-wiki - phase4 conversation offline}" \
     "${EXP1_MASTER_PORT:-29812}"
@@ -267,6 +277,7 @@ pause_after_stage
 run_shared_router \
     "exp2_unfreeze_wiki" \
     "$EXP2_UNFREEZE_WIKI_SOURCE" \
+    1 \
     1 \
     "${EXP2_RUN_ID:-g2-exp2-unfreeze-wiki-phase4-conversation-from-router-retuned-e16to24-mb72-1800}" \
     "${EXP2_WANDB_EXP_NAME:-G2 - exp2 unfreeze-wiki - phase4 conversation offline}" \

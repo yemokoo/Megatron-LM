@@ -414,6 +414,14 @@ if [ -n "$WANDB_PROJECT" ]; then
     )
 fi
 
+DEBUG_TRAINABLE_ARGS=()
+if [ "${DEBUG_TRAINABLE_PARAMS_AND_EXIT:-0}" = "1" ]; then
+    DEBUG_TRAINABLE_ARGS+=(--debug-trainable-params-and-exit)
+    if [ -n "${DEBUG_TRAINABLE_PARAMS_PATH:-}" ]; then
+        DEBUG_TRAINABLE_ARGS+=(--debug-trainable-params-path "$DEBUG_TRAINABLE_PARAMS_PATH")
+    fi
+fi
+
 if [ "$LOG_SOURCE_PROBE_BASELINE_BEFORE_EXPAND" = "1" ] && [ -n "$WANDB_PROJECT" ]; then
     echo "logging source-model probe baseline at step $PROBE_STEP_OFFSET before expert expansion"
     "$PYTHON_BIN" analysis/log_source_probe_baseline_to_wandb.py \
@@ -447,7 +455,8 @@ GPU_LOG_PID=$!
     --master_port "$MASTER_PORT" \
     pretrain_gpt.py \
     "${MODEL_ARGS[@]}" "${INFRA_ARGS[@]}" "${TRAIN_ARGS[@]}" \
-    "${DATA_ARGS[@]}" "${SAVE_ARGS[@]}" "${PROBE_ARGS[@]}" "${WANDB_ARGS[@]}"
+    "${DATA_ARGS[@]}" "${SAVE_ARGS[@]}" "${PROBE_ARGS[@]}" "${WANDB_ARGS[@]}" \
+    "${DEBUG_TRAINABLE_ARGS[@]}"
 
 kill "$GPU_LOG_PID" 2>/dev/null || true
 if [ "$SSD_TARGET_WEIGHTS" != "$TRAIN_WEIGHTS" ]; then
