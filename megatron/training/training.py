@@ -10,6 +10,7 @@ import json
 import logging
 import math
 import os
+import re
 import sys
 from contextlib import nullcontext
 from typing import List
@@ -1501,20 +1502,39 @@ def _debug_param_kind(name):
         return 'router_weight'
     if name.endswith('expert_bias') and 'router' in name:
         return 'router_bias'
-    if 'ffn_experts.weight1' in name:
+    if _debug_local_expert_index(name) is not None:
+        return 'ffn_local_expert'
+    if 'ffn_experts.weight1' in name or 'mlp.experts.weight1' in name:
         return 'ffn_expert_weight1'
-    if 'ffn_experts.weight2' in name:
+    if 'ffn_experts.weight2' in name or 'mlp.experts.weight2' in name:
         return 'ffn_expert_weight2'
     if 'attn_lora_experts' in name:
         return 'attention_expert'
     return 'other'
 
 
+def _debug_local_expert_index(name):
+    match = re.search(r'(?:^|\.)local_experts\.(\d+)\.', name)
+    return None if match is None else int(match.group(1))
+
+
 def _debug_expert_row_grad_sums(name, param, num_experts):
-    if param.grad is None or num_experts is None or num_experts <= 0:
+    if num_experts is None or num_experts <= 0:
         return None
 
     kind = _debug_param_kind(name)
+    if kind == 'ffn_local_expert':
+        expert_idx = _debug_local_expert_index(name)
+        if expert_idx is None or expert_idx >= num_experts:
+            return None
+        row_sums = [0.0 for _ in range(num_experts)]
+        if param.grad is not None:
+            row_sums[expert_idx] = float(param.grad.detach().float().abs().sum().item())
+        return row_sums
+
+    if param.grad is None:
+        return None
+
     grad = param.grad.detach().float()
 
     if kind in ('router_weight', 'router_bias', 'attention_expert'):
@@ -1553,24 +1573,37 @@ def _debug_expected_rows_for_param(args, name, num_experts, num_existing_experts
 
     if getattr(args, 'shared_router_hybrid_model', False):
         if getattr(args, 'shared_router_hybrid_train_all_experts_and_router_only', False):
-            return all_rows
+            expected = all_rows
+            return _debug_filter_local_expert_expected_rows(name, expected)
         if getattr(args, 'shared_router_hybrid_train_new_experts_and_router_only', False):
             if kind in ('router_weight', 'router_bias') and getattr(
                 args, 'shared_router_hybrid_train_all_router_rows', False
             ):
-                return all_rows
-            return new_rows
+                expected = all_rows
+            else:
+                expected = new_rows
+            return _debug_filter_local_expert_expected_rows(name, expected)
         if getattr(args, 'shared_router_hybrid_train_router_only', False):
-            return all_rows if kind in ('router_weight', 'router_bias') else []
+            expected = all_rows if kind in ('router_weight', 'router_bias') else []
+            return _debug_filter_local_expert_expected_rows(name, expected)
         if getattr(args, 'shared_router_hybrid_train_new_router_only', False):
-            return new_rows if kind in ('router_weight', 'router_bias') else []
-        return new_rows
+            expected = new_rows if kind in ('router_weight', 'router_bias') else []
+            return _debug_filter_local_expert_expected_rows(name, expected)
+        return _debug_filter_local_expert_expected_rows(name, new_rows)
 
     if getattr(args, 'moe_train_new_experts_and_router_only', False):
-        return new_rows
+        return _debug_filter_local_expert_expected_rows(name, new_rows)
     if getattr(args, 'moe_train_router_only', False):
-        return all_rows if kind in ('router_weight', 'router_bias') else []
-    return new_rows
+        expected = all_rows if kind in ('router_weight', 'router_bias') else []
+        return _debug_filter_local_expert_expected_rows(name, expected)
+    return _debug_filter_local_expert_expected_rows(name, new_rows)
+
+
+def _debug_filter_local_expert_expected_rows(name, expected_rows):
+    expert_idx = _debug_local_expert_index(name)
+    if expert_idx is None:
+        return expected_rows
+    return [expert_idx] if expert_idx in set(expected_rows) else []
 
 
 def _debug_trainable_params_and_maybe_exit(model, unwrapped_model):
