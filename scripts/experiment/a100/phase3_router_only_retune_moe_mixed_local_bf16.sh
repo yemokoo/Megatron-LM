@@ -27,6 +27,7 @@ export TRAIN_ROUTER_USAGE_LOG_PATH="${TRAIN_ROUTER_USAGE_LOG_PATH:-$LOG_DIR/trai
 export SSD_MOUNT="${LOCAL_SSD_ROOT}/${RUN_ID}"
 export SSD_WIKI_TRAIN="${SSD_MOUNT}/dataset/wiki_train"
 export SSD_CODE_TRAIN="${SSD_MOUNT}/dataset/code_train"
+export SSD_CONVERSATION_TRAIN="${SSD_MOUNT}/dataset/conversation_train"
 export SSD_TARGET_WEIGHTS="${SSD_MOUNT}/target_weights"
 
 export NUM_LAYERS="${NUM_LAYERS:-9}"
@@ -36,6 +37,7 @@ export NUM_QUERY_GROUPS="${NUM_QUERY_GROUPS:-16}"
 export MOE_FFN_HIDDEN_SIZE="${MOE_FFN_HIDDEN_SIZE:-352}"
 export SOURCE_NUM_EXPERTS="${SOURCE_NUM_EXPERTS:-8}"
 export NUM_EXPERTS="${NUM_EXPERTS:-16}"
+export RESUME_FROM_NUM_EXPERTS="${RESUME_FROM_NUM_EXPERTS:-$SOURCE_NUM_EXPERTS}"
 export MOE_ROUTER_TOPK="${MOE_ROUTER_TOPK:-4}"
 export MOE_LAYER_FREQ="${MOE_LAYER_FREQ:-[0,1,1,1,1,1,1,1,1]}"
 export MOE_AUX_LOSS_COEFF="${MOE_AUX_LOSS_COEFF:-0.0}"
@@ -88,8 +90,10 @@ export DATASET_SPLIT="${DATASET_SPLIT:-100,0,0}"
 
 export TRAIN_DATASET_WIKI="${TRAIN_DATASET_WIKI:-$(dataset_dir_for_task wiki)}"
 export TRAIN_DATASET_CODE="${TRAIN_DATASET_CODE:-$(dataset_dir_for_task code)}"
+export TRAIN_DATASET_CONVERSATION="${TRAIN_DATASET_CONVERSATION:-}"
 export DATASET_NAME="${DATASET_NAME:-wiki_code_mixed_exact}"
 export DATASET_SOURCE="${DATASET_SOURCE:-Wikipedia exact train + Python code exact train}"
+export MIXED_DATA_WEIGHT_MODE="${MIXED_DATA_WEIGHT_MODE:-equal}"
 export PROBE_DATASET="${PROBE_DATASET:-$(probe_dir_for_task code)}"
 export PROBE_NAME="${PROBE_NAME:-code_probe}"
 export PROBE_EVAL_ITERS="${PROBE_EVAL_ITERS:-25}"
@@ -98,8 +102,13 @@ export SECONDARY_PROBE_DATASET="${SECONDARY_PROBE_DATASET:-$(probe_dir_for_task 
 export SECONDARY_PROBE_NAME="${SECONDARY_PROBE_NAME:-wiki_probe}"
 export SECONDARY_PROBE_EVAL_ITERS="${SECONDARY_PROBE_EVAL_ITERS:-25}"
 export SECONDARY_PROBE_EVAL_INTERVAL="${SECONDARY_PROBE_EVAL_INTERVAL:-50}"
+export TERTIARY_PROBE_DATASET="${TERTIARY_PROBE_DATASET:-}"
+export TERTIARY_PROBE_NAME="${TERTIARY_PROBE_NAME:-}"
+export TERTIARY_PROBE_EVAL_ITERS="${TERTIARY_PROBE_EVAL_ITERS:-25}"
+export TERTIARY_PROBE_EVAL_INTERVAL="${TERTIARY_PROBE_EVAL_INTERVAL:-0}"
 export PROBE_STEP_OFFSET="${PROBE_STEP_OFFSET:-0}"
 export SECONDARY_PROBE_STEP_OFFSET="${SECONDARY_PROBE_STEP_OFFSET:-0}"
+export TERTIARY_PROBE_STEP_OFFSET="${TERTIARY_PROBE_STEP_OFFSET:-$PROBE_STEP_OFFSET}"
 export RUN_INITIAL_PROBE_EVAL="${RUN_INITIAL_PROBE_EVAL:-1}"
 export RUN_INITIAL_VALID_EVAL="${RUN_INITIAL_VALID_EVAL:-1}"
 
@@ -110,6 +119,8 @@ export WANDB_RUN_ID="${WANDB_RUN_ID:-$RUN_ID}"
 export WANDB_RESUME="${WANDB_RESUME:-allow}"
 export WANDB_STEP_OFFSET="${WANDB_STEP_OFFSET:-0}"
 export WANDB_LOG_CHECKPOINTS="${WANDB_LOG_CHECKPOINTS:-0}"
+export DEBUG_TRAINABLE_PARAMS_AND_EXIT="${DEBUG_TRAINABLE_PARAMS_AND_EXIT:-0}"
+export DEBUG_TRAINABLE_PARAMS_PATH="${DEBUG_TRAINABLE_PARAMS_PATH:-}"
 
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
 export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=true
@@ -118,9 +129,10 @@ if [ "$DIRECT_LOCAL_SAVE" = "1" ]; then
     export SSD_TARGET_WEIGHTS="$TRAIN_WEIGHTS"
 fi
 
-mkdir -p "$SSD_WIKI_TRAIN" "$SSD_CODE_TRAIN" "$SSD_TARGET_WEIGHTS" "$TRAIN_WEIGHTS" "$LOG_DIR"
+mkdir -p "$SSD_WIKI_TRAIN" "$SSD_CODE_TRAIN" "$SSD_CONVERSATION_TRAIN" "$SSD_TARGET_WEIGHTS" "$TRAIN_WEIGHTS" "$LOG_DIR"
 exec > >(
     tee -a "$RUN_LOG" | "$PYTHON_BIN" -u -c '
+import datetime as dt
 import re, sys
 iter_re = re.compile(r"(\[[^]]+\]) iteration\s+(\d+)/\s*(\d+)")
 ms_re = re.compile(r"elapsed time per iteration \(ms\):\s*([0-9.]+)")
@@ -129,14 +141,24 @@ loss_re = re.compile(r"\blm loss:\s*([0-9.E+-]+)")
 val_re = re.compile(r"validation loss at iteration\s+(\d+).*lm loss value:\s*([^|]+)")
 save_re = re.compile(r"saving checkpoint at iteration\s+(\d+)")
 keep_re = re.compile(r"phase3|MoE router-only|router-only|ERROR:|Traceback|failed \(exitcode|checkpoint at|probe ")
+recent_ms = []
 for line in sys.stdin:
     line = line.rstrip("\n")
     m = iter_re.search(line)
     if m:
-        parts = [f"{m.group(1)} step {m.group(2)}/{m.group(3)}"]
+        step = int(m.group(2))
+        total = int(m.group(3))
+        parts = [f"{m.group(1)} step {step}/{total}"]
         ms = ms_re.search(line)
         if ms:
-            parts.append(f"{float(ms.group(1)):.1f} ms/iter")
+            ms_value = float(ms.group(1))
+            recent_ms.append(ms_value)
+            recent_ms[:] = recent_ms[-5:]
+            avg_ms = sum(recent_ms) / len(recent_ms)
+            eta = dt.datetime.now() + dt.timedelta(seconds=max(0, total - step) * avg_ms / 1000.0)
+            parts.append(f"{ms_value:.1f} ms/iter")
+            parts.append(f"avg5 {avg_ms:.1f} ms/iter")
+            parts.append(f"eta {eta:%Y-%m-%d %H:%M:%S}")
         loss = loss_re.search(line)
         if loss:
             parts.append(f"lm loss {loss.group(1)}")
@@ -161,8 +183,26 @@ for line in sys.stdin:
 echo "phase3 MoE router-only mixed run log: $RUN_LOG"
 echo "phase3 MoE router-only mixed gpu log: $GPU_LOG"
 echo "phase3 MoE router-only mixed metadata: $RUN_METADATA"
+for dataset_dir in "$TRAIN_DATASET_WIKI" "$TRAIN_DATASET_CODE"; do
+    if ! compgen -G "$dataset_dir/*.bin" >/dev/null; then
+        echo "ERROR: no .bin files found in train dataset: $dataset_dir" >&2
+        exit 1
+    fi
+done
+if [ -n "$TRAIN_DATASET_CONVERSATION" ] && ! compgen -G "$TRAIN_DATASET_CONVERSATION/*.bin" >/dev/null; then
+    echo "ERROR: no .bin files found in train dataset: $TRAIN_DATASET_CONVERSATION" >&2
+    exit 1
+fi
+echo "phase3 MoE router-only mixed wiki train dataset: $TRAIN_DATASET_WIKI"
+echo "phase3 MoE router-only mixed code train dataset: $TRAIN_DATASET_CODE"
+if [ -n "$TRAIN_DATASET_CONVERSATION" ]; then
+    echo "phase3 MoE router-only mixed conversation train dataset: $TRAIN_DATASET_CONVERSATION"
+fi
 rsync -rlptD --info=progress2 "$TRAIN_DATASET_WIKI/" "$SSD_WIKI_TRAIN/"
 rsync -rlptD --info=progress2 "$TRAIN_DATASET_CODE/" "$SSD_CODE_TRAIN/"
+if [ -n "$TRAIN_DATASET_CONVERSATION" ]; then
+    rsync -rlptD --info=progress2 "$TRAIN_DATASET_CONVERSATION/" "$SSD_CONVERSATION_TRAIN/"
+fi
 
 "$PYTHON_BIN" - <<'PY'
 import json
@@ -186,6 +226,10 @@ def summarize(dataset_dir: Path):
 
 wiki = summarize(Path(os.environ['SSD_WIKI_TRAIN']))
 code = summarize(Path(os.environ['SSD_CODE_TRAIN']))
+conversation = None
+if os.environ.get('TRAIN_DATASET_CONVERSATION'):
+    conversation = summarize(Path(os.environ['SSD_CONVERSATION_TRAIN']))
+combined_tokens = wiki['tokens'] + code['tokens'] + (conversation['tokens'] if conversation else 0)
 metadata = {
     'stage': 'phase3_router_only_retune_moe_mixed',
     'run_id': os.environ['RUN_ID'],
@@ -195,9 +239,14 @@ metadata = {
     'target_iteration': int(os.environ['TRAIN_ITERS']),
     'dataset_name': os.environ['DATASET_NAME'],
     'dataset_source': os.environ['DATASET_SOURCE'],
+    'mixed_data_weight_mode': os.environ['MIXED_DATA_WEIGHT_MODE'],
+    'train_dataset_wiki_source': os.environ['TRAIN_DATASET_WIKI'],
+    'train_dataset_code_source': os.environ['TRAIN_DATASET_CODE'],
+    'train_dataset_conversation_source': os.environ.get('TRAIN_DATASET_CONVERSATION') or None,
     'wiki_train': wiki,
     'code_train': code,
-    'combined_tokens': wiki['tokens'] + code['tokens'],
+    'conversation_train': conversation,
+    'combined_tokens': combined_tokens,
     'trainable': 'MoE router weights only',
     'frozen': 'all FFN experts, attention LoRA adapters if present, dense trunk, embeddings, and output weights',
     'loss': 'standard final language-modeling loss',
@@ -212,6 +261,7 @@ metadata = {
     'ffn_hidden_size': int(os.environ['FFN_HIDDEN_SIZE']),
     'moe_ffn_hidden_size': int(os.environ['MOE_FFN_HIDDEN_SIZE']),
     'source_num_experts': int(os.environ['SOURCE_NUM_EXPERTS']),
+    'resume_from_num_experts': int(os.environ['RESUME_FROM_NUM_EXPERTS']),
     'target_num_experts': int(os.environ['NUM_EXPERTS']),
     'moe_router_topk': int(os.environ['MOE_ROUTER_TOPK']),
     'attn_full_rank_lora_rank': int(os.environ['ATTN_FULL_RANK_LORA_RANK']),
@@ -245,6 +295,14 @@ if [ "$TRAIN_LOG_STEP_TIME_ONLY" = "1" ]; then
     LOG_STYLE_ARGS+=(--train-log-step-time-only)
 fi
 
+DEBUG_TRAINABLE_ARGS=()
+if [ "$DEBUG_TRAINABLE_PARAMS_AND_EXIT" = "1" ]; then
+    DEBUG_TRAINABLE_ARGS+=(--debug-trainable-params-and-exit)
+    if [ -n "$DEBUG_TRAINABLE_PARAMS_PATH" ]; then
+        DEBUG_TRAINABLE_ARGS+=(--debug-trainable-params-path "$DEBUG_TRAINABLE_PARAMS_PATH")
+    fi
+fi
+
 SAVE_ARGS=(
     --save "$SSD_TARGET_WEIGHTS"
     --save-interval "$SAVE_INTERVAL"
@@ -261,6 +319,27 @@ fi
 INITIAL_PROBE_ARGS=()
 if [ "$RUN_INITIAL_PROBE_EVAL" = "1" ]; then
     INITIAL_PROBE_ARGS+=(--run-initial-probe-eval)
+fi
+
+TRAIN_DATA_PATH_DIRS=("$SSD_WIKI_TRAIN" "$SSD_CODE_TRAIN")
+if [ -n "$TRAIN_DATASET_CONVERSATION" ]; then
+    TRAIN_DATA_PATH_DIRS+=("$SSD_CONVERSATION_TRAIN")
+fi
+if [ "$MIXED_DATA_WEIGHT_MODE" = "token_proportional" ]; then
+    TRAIN_DATA_PATH="$(build_token_weighted_data_path "${TRAIN_DATA_PATH_DIRS[@]}")"
+else
+    TRAIN_DATA_PATH="$(build_data_path "${TRAIN_DATA_PATH_DIRS[@]}")"
+fi
+
+TERTIARY_PROBE_ARGS=()
+if [ -n "$TERTIARY_PROBE_DATASET" ]; then
+    TERTIARY_PROBE_ARGS+=(
+        --tertiary-probe-name "$TERTIARY_PROBE_NAME"
+        --tertiary-probe-eval-iters "$TERTIARY_PROBE_EVAL_ITERS"
+        --tertiary-probe-eval-interval "$TERTIARY_PROBE_EVAL_INTERVAL"
+        --tertiary-probe-step-offset "$TERTIARY_PROBE_STEP_OFFSET"
+        --tertiary-probe-data-path $(build_data_path "$TERTIARY_PROBE_DATASET")
+    )
 fi
 
 torchrun \
@@ -284,13 +363,13 @@ torchrun \
     --lr-warmup-fraction "$LR_WARMUP_FRACTION" \
     --lr-wsd-decay-iters "$LR_WSD_DECAY_ITERS" \
     --train-iters "$TRAIN_ITERS" \
-    --moe-resume-from-num-experts "$SOURCE_NUM_EXPERTS" \
+    --moe-resume-from-num-experts "$RESUME_FROM_NUM_EXPERTS" \
     --moe-train-router-only \
     --train-router-usage-log-interval "$TRAIN_ROUTER_USAGE_LOG_INTERVAL" \
     --train-router-usage-log-path "$TRAIN_ROUTER_USAGE_LOG_PATH" \
     --train-router-usage-num-existing-experts "$SOURCE_NUM_EXPERTS" \
     --seq-length "${SEQ_LENGTH:-512}" \
-    --data-path $(build_data_path "$SSD_WIKI_TRAIN" "$SSD_CODE_TRAIN") \
+    --data-path $TRAIN_DATA_PATH \
     --split "$DATASET_SPLIT" \
     --log-interval "$LOG_INTERVAL" \
     --log-throughput \
@@ -314,6 +393,8 @@ torchrun \
     --secondary-probe-eval-interval "$SECONDARY_PROBE_EVAL_INTERVAL" \
     --secondary-probe-step-offset "$SECONDARY_PROBE_STEP_OFFSET" \
     --secondary-probe-data-path $(build_data_path "$SECONDARY_PROBE_DATASET") \
+    "${TERTIARY_PROBE_ARGS[@]}" \
+    "${DEBUG_TRAINABLE_ARGS[@]}" \
     "${WANDB_ARGS[@]}"
 
 if [ "$SSD_TARGET_WEIGHTS" != "$TRAIN_WEIGHTS" ]; then

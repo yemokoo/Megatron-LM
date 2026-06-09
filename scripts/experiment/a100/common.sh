@@ -83,6 +83,31 @@ print(' '.join(parts))
 PY
 }
 
+build_token_weighted_data_path() {
+    "$PYTHON_BIN" - "$@" <<'PY'
+import sys
+from pathlib import Path
+from megatron.core.datasets import indexed_dataset
+
+parts = []
+for dataset_dir in sys.argv[1:]:
+    dataset = Path(dataset_dir)
+    token_count = 0
+    prefixes = []
+    for bin_path in sorted(dataset.glob("*.bin")):
+        prefix = bin_path.with_suffix("")
+        ds = indexed_dataset.IndexedDataset(str(prefix), multimodal=False, mmap=True)
+        token_count += int(ds.sequence_lengths.sum())
+        prefixes.append(prefix)
+    if not prefixes:
+        raise SystemExit(f"ERROR: no .bin files found in {dataset}")
+    weight = str(max(1, token_count))
+    for prefix in prefixes:
+        parts.extend([weight, str(prefix)])
+print(" ".join(parts))
+PY
+}
+
 dataset_dir_for_task() {
     default_train_dir_for_task "$1"
 }
