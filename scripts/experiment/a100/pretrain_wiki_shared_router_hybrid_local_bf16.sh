@@ -175,6 +175,8 @@ metadata = {
     'moe_ffn_hidden_size': int(os.environ['MOE_FFN_HIDDEN_SIZE']),
     'num_experts': int(os.environ['NUM_EXPERTS']),
     'moe_router_topk': int(os.environ['MOE_ROUTER_TOPK']),
+    'moe_aux_loss_coeff': float(os.environ.get('MOE_AUX_LOSS_COEFF', '0.01')),
+    'moe_z_loss_coeff': float(os.environ.get('MOE_Z_LOSS_COEFF', '0.001')),
     'attn_lora_rank': int(os.environ['ATTN_LORA_RANK']),
     'attn_lora_alpha': float(os.environ['ATTN_LORA_ALPHA']),
     'attn_full_rank_lora_rank': int(os.environ.get('ATTN_FULL_RANK_LORA_RANK', '0')),

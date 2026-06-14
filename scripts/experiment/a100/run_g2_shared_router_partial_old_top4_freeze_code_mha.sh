@@ -44,6 +44,8 @@ export OLD_MODEL_KL_COEFF=0.0
 export OLD_MODEL_KL_TEMPERATURE=1.0
 export ROUTER_MEMORY_KL_COEFF="${ROUTER_MEMORY_KL_COEFF:-0.0}"
 export ROUTER_MEMORY_INTERVAL="${ROUTER_MEMORY_INTERVAL:-0}"
+export MOE_AUX_LOSS_COEFF="${MOE_AUX_LOSS_COEFF:-0.01}"
+export MOE_Z_LOSS_COEFF="${MOE_Z_LOSS_COEFF:-0.001}"
 export MOE_GROUPED_GEMM="${MOE_GROUPED_GEMM:-1}"
 export ATTN_LORA_GROUPED_GEMM="${ATTN_LORA_GROUPED_GEMM:-1}"
 export MOE_PERMUTE_FUSION="${MOE_PERMUTE_FUSION:-0}"
@@ -78,6 +80,7 @@ echo "[CONFIG] code steps=${TRAIN_ITERS}, mb=${MICRO_BATCH_SIZE}, gbs=${GLOBAL_B
 echo "[CONFIG] selection=layer-wise top4 old/wiki experts from pre-TopK router softmax"
 echo "[CONFIG] frozen: selected old router rows + selected old FFN experts + selected old attention experts + dense trunk"
 echo "[CONFIG] trainable: unselected old router/expert rows + all new code router/expert rows"
+echo "[CONFIG] aux/z loss=${MOE_AUX_LOSS_COEFF}/${MOE_Z_LOSS_COEFF}"
 echo "[CONFIG] wiki=${STAGE1_WEIGHTS_DIR}"
 echo "[CONFIG] mask=${SHARED_ROUTER_HYBRID_PARTIAL_FREEZE_MASK}"
 echo "[CONFIG] code=${TRAIN_WEIGHTS}"
@@ -121,6 +124,8 @@ env \
     SHARED_ROUTER_HYBRID_TRAIN_ALL_ROUTER_ROWS="$SHARED_ROUTER_HYBRID_TRAIN_ALL_ROUTER_ROWS" \
     ROUTER_MEMORY_KL_COEFF="$ROUTER_MEMORY_KL_COEFF" \
     ROUTER_MEMORY_INTERVAL="$ROUTER_MEMORY_INTERVAL" \
+    MOE_AUX_LOSS_COEFF="$MOE_AUX_LOSS_COEFF" \
+    MOE_Z_LOSS_COEFF="$MOE_Z_LOSS_COEFF" \
     MOE_GROUPED_GEMM="$MOE_GROUPED_GEMM" \
     ATTN_LORA_GROUPED_GEMM="$ATTN_LORA_GROUPED_GEMM" \
     MOE_PERMUTE_FUSION="$MOE_PERMUTE_FUSION" \

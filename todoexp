@@ -1,0 +1,208 @@
+# TODO Experiments
+
+Last updated: 2026-06-12
+
+## Overall Direction
+
+- Goal: continue MoE-based continual learning experiments where new knowledge is added while minimizing changes to existing useful parameters.
+- Exp4 conversation extension is already trained, so implementation focus is Exp2 and Exp3.
+- Miniset generation for Exp1 can wait until KT is connected again; do not prioritize implementation now.
+
+## Experiment 1: Small Router-Finetune Data Reuse
+
+- Purpose: verify whether very small fixed router-finetune datasets can recover performance if reused for more epochs.
+- Motivation: previous data-budget run showed wiki/code router finetune performance nearly saturates by around 20 percent of data.
+- Planned variants:
+  - 1 percent miniset x 20 epochs
+  - 5 percent miniset x 4 epochs
+  - 10 percent miniset x 2 epochs
+- Dataset should be fixed after random sampling; do not resample every run.
+- Implementation priority: later, after KT miniset materialization.
+
+## Experiment 2: Interleaved Code Training and Router Finetune
+
+- Purpose: prevent wiki/code latent or routing manifolds from drifting too far during code learning.
+- Hypothesis: if code training runs fully before router retune, the intersection between task manifolds may already be too far away; small periodic router retunes may keep the intersection aligned.
+- Desired exact behavior:
+  - Train code for `n` steps.
+  - Run router-only finetune for `k` steps using wiki+code data.
+  - Repeat across the 1800-step code-learning horizon.
+
+### Implemented Wrapper Path
+
+- New launcher:
+  - `scripts/experiment/a100/run_g2_exp2_interleaved_code_router_finetune_mha.sh`
+- This intentionally avoids changing the existing code-training and router-finetune behavior.
+- It alternates existing scripts on the same checkpoint directory:
+  - code chunk -> checkpoint -> router-only mixed finetune chunk -> checkpoint -> repeat.
+- Configurable knobs:
+  - `CODE_TOTAL_STEPS`, default `1800`
+  - `INTERLEAVE_CODE_STEPS`, default `100`
+  - `INTERLEAVE_ROUTER_STEPS`, default `100`
+  - `RUN_ROUTER_AFTER_FINAL`, default `1`
+- Default execution:
+  - `code 100 -> router 100` repeated 18 times.
+  - Code-training steps are exactly 1800.
+  - Final checkpoint step is optimizer-step based: `1800 + 18 * 100 = 3600`.
+- If `INTERLEAVE_ROUTER_STEPS=50`, final checkpoint step becomes:
+  - `1800 + 18 * 50 = 2700`.
+
+### Phase Semantics
+
+- Code phase:
+  - Starts from the wiki-only checkpoint on the first chunk.
+  - Later chunks resume from the current interleaved checkpoint.
+  - Trainable parameters are the same as existing exp2 code learning:
+    - newly added FFN experts
+    - newly added attention experts
+    - newly added router rows
+  - Existing old experts, old router rows, dense trunk, embeddings, and output weights remain frozen.
+  - Aux/z loss is not overridden:
+    - default code aux `0.01`
+    - default z `0.001`
+- Router-finetune phase:
+  - Starts from the checkpoint produced by the immediately preceding code chunk.
+  - Trainable parameters:
+    - all router rows only
+  - Frozen parameters:
+    - all FFN experts
+    - all attention experts
+    - dense trunk
+    - embeddings
+    - output weights
+  - Uses mixed wiki+code train data.
+  - Aux/z loss is off by default:
+    - router aux `0.0`
+    - router z `0.0`
+
+### Important Implementation Detail
+
+- This is not a single long Python process with an internal mode switch.
+- Each chunk launches a fresh `torchrun`.
+- Continuity is provided by checkpoint handoff:
+  - after code chunk, `latest_checkpointed_iteration.txt` is read;
+  - router chunk loads that checkpoint;
+  - after router chunk, `latest_checkpointed_iteration.txt` is read again;
+  - next code chunk loads that checkpoint.
+- Therefore, if `INTERLEAVE_CODE_STEPS=100`, router finetune truly starts from the state after those 100 code steps.
+- `SAVE_CHECKPOINTS=1` must remain enabled. If train-end checkpoint saving is disabled, the next phase cannot reliably continue.
+- Code chunks after the first use:
+  - `RESUME_FROM_WEIGHTS="$TRAIN_WEIGHTS"`
+  - `RESUME_LOAD_OPTIM=0`
+- This means parameter state continues, but optimizer/RNG state is intentionally reinitialized between phases. This avoids carrying router-only optimizer state into the next code-learning phase.
+
+### Run Example
+
+```bash
+WANDB_MODE=offline \
+INTERLEAVE_CODE_STEPS=100 \
+INTERLEAVE_ROUTER_STEPS=100 \
+CODE_TOTAL_STEPS=1800 \
+MICRO_BATCH_SIZE=72 \
+GLOBAL_BATCH_SIZE=2304 \
+bash scripts/experiment/a100/run_g2_exp2_interleaved_code_router_finetune_mha.sh
+```
+
+## Experiment 3: Aux-Loss-Off Partial Freeze
+
+### Concept
+
+- This is not KD exp3.
+- Use normal exp1-style LM training flow.
+- Difference: remove only MoE aux/load-balancing loss from the beginning, including wiki training.
+- Keep z loss enabled as a control variable.
+- Purpose: test whether CL benefits from less-even expert usage. If aux loss forces experts to be used too uniformly, important-expert selection may become less meaningful. Turning aux off may make router/expert specialization stronger, making partial freeze more useful.
+
+### Current Code State
+
+- Added wiki aux0 launcher:
+  - `scripts/experiment/a100/run_g2_aux0_wiki_shared_router_mha.sh`
+- It defaults to:
+  - `MOE_AUX_LOSS_COEFF=0.0`
+  - `MOE_Z_LOSS_COEFF=0.001`
+  - G2 shared-router qkvo architecture: top4, 8 wiki experts, ffn352, attn rank256.
+- Updated partial-freeze code launcher:
+  - `scripts/experiment/a100/run_g2_shared_router_partial_old_top4_freeze_code_mha.sh`
+- That launcher now forwards:
+  - `MOE_AUX_LOSS_COEFF`
+  - `MOE_Z_LOSS_COEFF`
+- Metadata now records aux/z values in:
+  - `scripts/experiment/a100/pretrain_wiki_shared_router_hybrid_local_bf16.sh`
+  - `scripts/experiment/continual_code_from_wiki_shared_router_hybrid_expand_local_bf16.sh`
+
+### Intended Run Order
+
+1. Train wiki model with aux off and z on.
+
+```bash
+WANDB_MODE=offline \
+bash scripts/experiment/a100/run_g2_aux0_wiki_shared_router_mha.sh
+```
+
+2. Measure router softmax importance on the aux0 wiki checkpoint.
+
+```bash
+G2_ROOT="$PWD/.local/weights/a100/mha/g2-checkpoints"
+WIKI_AUX0="$G2_ROOT/wiki_aux0/g2-aux0-top4-e8-ffn352-r256-wiki-shared-router-qkvo-mha-a100-bf16-mb72-1800"
+
+WIKI_WEIGHTS="$WIKI_AUX0" \
+OUT_DIR="$PWD/analysis_outputs/g2_aux0_wiki_router_softmax_importance_1m" \
+ROUTER_SOFTMAX_MAX_TOKENS=1048576 \
+ROUTER_SOFTMAX_MASK_TOPK=4 \
+bash scripts/experiment/a100/run_g2_wiki_router_softmax_importance_1m_mha.sh
+```
+
+3. Run code learning with partial freeze from aux0 wiki checkpoint.
+
+```bash
+G2_ROOT="$PWD/.local/weights/a100/mha/g2-checkpoints"
+WIKI_AUX0="$G2_ROOT/wiki_aux0/g2-aux0-top4-e8-ffn352-r256-wiki-shared-router-qkvo-mha-a100-bf16-mb72-1800"
+MASK="$PWD/analysis_outputs/g2_aux0_wiki_router_softmax_importance_1m/router_softmax_top4_freeze_mask.json"
+
+WANDB_MODE=offline \
+RUN_ID="g2-exp3-aux0-top4oldfreeze-e8to16-ffn352-r256-wiki-to-code-layerwise-top4-old-freeze-qkvo-mha-a100-bf16-mb72-1800" \
+STAGE1_WEIGHTS_DIR="$WIKI_AUX0" \
+SHARED_ROUTER_HYBRID_PARTIAL_FREEZE_MASK="$MASK" \
+MOE_AUX_LOSS_COEFF=0.0 \
+MOE_Z_LOSS_COEFF=0.001 \
+WANDB_EXP_NAME="G2 - exp3 aux0 layerwise top4 old expert freeze - wiki to code" \
+bash scripts/experiment/a100/run_g2_shared_router_partial_old_top4_freeze_code_mha.sh
+```
+
+4. Optional: router-only finetune after code learning.
+
+- Use the existing router-finetune path, but point `SOURCE_WEIGHTS` or `SOURCE_RUN_ID` to the aux0 partial-freeze code checkpoint.
+- Keep aux off only if the comparison requires it; router finetune scripts already default to aux/z off.
+
+### Sanity Checks Before Running
+
+- Confirm wiki log arguments include:
+  - `moe_aux_loss_coeff 0.0`
+  - `moe_z_loss_coeff 0.001`
+- Confirm code log arguments include:
+  - `shared_router_hybrid_partial_freeze_mask` set to aux0 importance mask
+  - `moe_aux_loss_coeff 0.0`
+  - `moe_z_loss_coeff 0.001`
+  - `shared_router_hybrid_train_router_only False`
+- Confirm partial-freeze audit exists after expansion:
+  - `partial_freeze_audit/shared_router_hybrid_partial_freeze.json`
+- Confirm selected old router rows and selected old FFN/attention experts are frozen per layer.
+
+## Experiment 4: Conversation Extension
+
+- Already trained.
+- Purpose: test whether the existing plasticity/stability tradeoff changes when a third task is added after wiki+code+router-finetune.
+- Use results to decide whether future focus should emphasize forgetting prevention or new-task acquisition.
+
+## Local Structure Check Performed
+
+- `bash -n` passed for:
+  - `scripts/experiment/a100/run_g2_aux0_wiki_shared_router_mha.sh`
+  - `scripts/experiment/a100/run_g2_shared_router_partial_old_top4_freeze_code_mha.sh`
+  - `scripts/experiment/a100/pretrain_wiki_shared_router_hybrid_local_bf16.sh`
+  - `scripts/experiment/continual_code_from_wiki_shared_router_hybrid_expand_local_bf16.sh`
+- `run_g2_aux0_wiki_shared_router_mha.sh` is executable.
+- Env path is connected:
+  - aux/z env -> model config -> Megatron CLI args.
+  - partial-freeze mask env -> continual code script -> Megatron CLI args.
+  - aux/z values are now written to run metadata.
