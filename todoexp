@@ -89,7 +89,8 @@ Last updated: 2026-06-12
 - Code chunks after the first use:
   - `RESUME_FROM_WEIGHTS="$TRAIN_WEIGHTS"`
   - `RESUME_LOAD_OPTIM=0`
-- This means parameter state continues, but optimizer/RNG state is intentionally reinitialized between phases. This avoids carrying router-only optimizer state into the next code-learning phase.
+  - `RESUME_RESET_ITERATION=0`
+- This means parameter state and checkpoint iteration continue, but optimizer/RNG state is intentionally reinitialized between phases. This avoids carrying router-only optimizer state into the next code-learning phase while preserving the intended 100-step chunk length.
 
 ### Run Example
 

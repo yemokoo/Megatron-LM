@@ -144,6 +144,7 @@ export STAGE1_SUBDIR="${STAGE1_SUBDIR:-a100/wiki-shared-router-hybrid-pretrain-l
 export SOURCE_REQUIRED_ITERS="${SOURCE_REQUIRED_ITERS:-1}"
 export RESUME_FROM_WEIGHTS="${RESUME_FROM_WEIGHTS:-}"
 export RESUME_LOAD_OPTIM="${RESUME_LOAD_OPTIM:-1}"
+export RESUME_RESET_ITERATION="${RESUME_RESET_ITERATION:-1}"
 export TRAIN_WEIGHTS="${TRAIN_WEIGHTS:-$LOCAL_WEIGHTS/a100/code-from-wiki-shared-router-hybrid-expand-local/$RUN_ID}"
 export LOG_DIR="${LOG_DIR:-$TRAIN_WEIGHTS/logs}"
 export RUN_METADATA="${RUN_METADATA:-$LOG_DIR/run_metadata.json}"
@@ -337,6 +338,7 @@ metadata = {
     'stage1_weights_dir': os.environ['STAGE1_WEIGHTS_DIR'],
     'resume_from_weights': os.environ.get('RESUME_FROM_WEIGHTS', ''),
     'resume_load_optim': os.environ.get('RESUME_LOAD_OPTIM', '1') == '1',
+    'resume_reset_iteration': os.environ.get('RESUME_RESET_ITERATION', '1') == '1',
     'dataset_name': os.environ['DATASET_NAME'],
     'dataset_source': os.environ['DATASET_SOURCE'],
     'train_dataset': {'path': str(dataset_dir), 'tokens': total_tokens, 'documents': total_documents, 'shards': shards},
@@ -457,11 +459,16 @@ if [ -n "$RESUME_FROM_WEIGHTS" ]; then
     )
     if [ "$RESUME_LOAD_OPTIM" = "1" ]; then
         CHECKPOINT_LOAD_ARGS=()
-    else
+    elif [ "$RESUME_RESET_ITERATION" = "1" ]; then
         CHECKPOINT_LOAD_ARGS=(
             --no-load-optim
             --no-load-rng
             --finetune
+        )
+    else
+        CHECKPOINT_LOAD_ARGS=(
+            --no-load-optim
+            --no-load-rng
         )
     fi
 fi

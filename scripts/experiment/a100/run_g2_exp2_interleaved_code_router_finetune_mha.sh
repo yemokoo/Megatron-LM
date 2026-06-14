@@ -185,7 +185,7 @@ while [ "$CODE_STEPS_DONE" -lt "$CODE_TOTAL_STEPS" ]; do
 
     resume_args=()
     if [ "$current_step" -gt 0 ]; then
-        resume_args+=(RESUME_FROM_WEIGHTS="$TRAIN_WEIGHTS" RESUME_LOAD_OPTIM=0)
+        resume_args+=(RESUME_FROM_WEIGHTS="$TRAIN_WEIGHTS" RESUME_LOAD_OPTIM=0 RESUME_RESET_ITERATION=0)
     fi
 
     env \
