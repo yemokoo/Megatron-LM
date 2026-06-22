@@ -289,6 +289,7 @@ def build_topk_freeze_mask(layer_means: dict[int, torch.Tensor], topk: int) -> d
 def build_cumulative_cutoff_selection(layer_means: dict[int, torch.Tensor], cutoff: float) -> tuple[dict, list[dict]]:
     cutoff = max(0.0, min(float(cutoff), 1.0))
     layers = {}
+    layer_metadata = {}
     rows = []
     for layer, values in sorted(layer_means.items()):
         order = torch.argsort(values, descending=True).tolist()
@@ -301,7 +302,8 @@ def build_cumulative_cutoff_selection(layer_means: dict[int, torch.Tensor], cuto
                 break
 
         selected_experts = [expert_idx + 1 for expert_idx in selected]
-        layers[str(layer)] = {
+        layers[str(layer)] = selected_experts
+        layer_metadata[str(layer)] = {
             "experts": selected_experts,
             "count": len(selected_experts),
             "mass": cumulative,
@@ -328,6 +330,7 @@ def build_cumulative_cutoff_selection(layer_means: dict[int, torch.Tensor], cuto
             "selection": "minimum_prefix_by_mean_router_softmax_cumulative_mass_pre_topk_per_layer",
             "cumulative_cutoff": cutoff,
             "layers": layers,
+            "layer_metadata": layer_metadata,
         },
         rows,
     )

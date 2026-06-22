@@ -25,6 +25,7 @@ export STAGE1_WEIGHTS_DIR="${STAGE1_WEIGHTS_DIR:-$G2_ROOT/wiki/g2-top4-e8-ffn352
 export TRAIN_WEIGHTS="${TRAIN_WEIGHTS:-$G2_ROOT/code/phase1/$RUN_ID}"
 
 export SHARED_ROUTER_HYBRID_PARTIAL_FREEZE_MASK="${SHARED_ROUTER_HYBRID_PARTIAL_FREEZE_MASK:-$PROJECT_ROOT/analysis_outputs/g2_wiki_router_softmax_importance_1m/router_softmax_top4_freeze_mask.json}"
+export PARTIAL_FREEZE_SELECTION_LABEL="${PARTIAL_FREEZE_SELECTION_LABEL:-layer-wise top4 old/wiki experts from pre-TopK router softmax}"
 
 export SOURCE_NUM_EXPERTS="${SOURCE_NUM_EXPERTS:-8}"
 export NUM_EXPERTS="${NUM_EXPERTS:-16}"
@@ -77,7 +78,7 @@ fi
 
 echo "[CONFIG] G2 shared-router partial old-expert freeze code training"
 echo "[CONFIG] code steps=${TRAIN_ITERS}, mb=${MICRO_BATCH_SIZE}, gbs=${GLOBAL_BATCH_SIZE}"
-echo "[CONFIG] selection=layer-wise top4 old/wiki experts from pre-TopK router softmax"
+echo "[CONFIG] selection=${PARTIAL_FREEZE_SELECTION_LABEL}"
 echo "[CONFIG] frozen: selected old router rows + selected old FFN experts + selected old attention experts + dense trunk"
 echo "[CONFIG] trainable: unselected old router/expert rows + all new code router/expert rows"
 echo "[CONFIG] aux/z loss=${MOE_AUX_LOSS_COEFF}/${MOE_Z_LOSS_COEFF}"
