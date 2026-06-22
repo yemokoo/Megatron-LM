@@ -326,21 +326,6 @@ def main() -> None:
     points[args.phase5_base_step]["phase5/source_marker"] = 1.0
     phase4_baseline_counts = {}
     phase5_baseline_counts = {}
-    if args.connect_baselines:
-        phase4_baseline_counts = inject_probe_baseline(
-            points,
-            phase4_source_log,
-            args.phase4_source_step,
-            args.phase4_base_step,
-            "phase4/connected_source_probe_marker",
-        )
-        phase5_baseline_counts = inject_probe_baseline(
-            points,
-            phase5_source_log,
-            args.phase5_source_step,
-            args.phase5_base_step,
-            "phase5/connected_source_probe_marker",
-        )
 
     phase4_probe_counts = parse_probe_log(points, phase4_log, args.phase4_base_step, phase4_max_step, "phase4")
     phase5_probe_counts = parse_probe_log(points, phase5_log, args.phase5_base_step, phase5_max_step, "phase5")
@@ -371,6 +356,24 @@ def main() -> None:
             phase5_step_offset,
             "phase5",
             args.skip_events_on_error,
+        )
+
+    # Inject connected baselines last so same-step phase4/phase5 initial probes cannot
+    # overwrite the intended source endpoint at 5400/7200.
+    if args.connect_baselines:
+        phase4_baseline_counts = inject_probe_baseline(
+            points,
+            phase4_source_log,
+            args.phase4_source_step,
+            args.phase4_base_step,
+            "phase4/connected_source_probe_marker",
+        )
+        phase5_baseline_counts = inject_probe_baseline(
+            points,
+            phase5_source_log,
+            args.phase5_source_step,
+            args.phase5_base_step,
+            "phase5/connected_source_probe_marker",
         )
 
     steps = sorted(points)
