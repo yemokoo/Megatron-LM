@@ -81,6 +81,15 @@ def add_router_softmax_args(parser):
         help="Number of top experts per layer to save in the freeze-mask JSON.",
     )
     group.add_argument(
+        "--router-softmax-cumulative-cutoff",
+        type=float,
+        default=0.0,
+        help=(
+            "If >0, highlight/save the smallest expert set whose sorted mean "
+            "router softmax mass reaches this cutoff, e.g. 0.8 for 80%% mass."
+        ),
+    )
+    group.add_argument(
         "--router-softmax-max-tokens",
         type=int,
         default=0,
@@ -277,6 +286,53 @@ def build_topk_freeze_mask(layer_means: dict[int, torch.Tensor], topk: int) -> d
     }
 
 
+def build_cumulative_cutoff_selection(layer_means: dict[int, torch.Tensor], cutoff: float) -> tuple[dict, list[dict]]:
+    cutoff = max(0.0, min(float(cutoff), 1.0))
+    layers = {}
+    rows = []
+    for layer, values in sorted(layer_means.items()):
+        order = torch.argsort(values, descending=True).tolist()
+        cumulative = 0.0
+        selected = []
+        for expert_idx in order:
+            cumulative += float(values[expert_idx])
+            selected.append(expert_idx)
+            if cumulative >= cutoff:
+                break
+
+        selected_experts = [expert_idx + 1 for expert_idx in selected]
+        layers[str(layer)] = {
+            "experts": selected_experts,
+            "count": len(selected_experts),
+            "mass": cumulative,
+            "cutoff": cutoff,
+        }
+        for rank, expert_idx in enumerate(order, start=1):
+            value = float(values[expert_idx])
+            rows.append(
+                {
+                    "layer": layer,
+                    "expert": expert_idx + 1,
+                    "mean_softmax": value,
+                    "rank_in_layer": rank,
+                    "selected_for_cutoff": int(expert_idx in selected),
+                    "selected_count": len(selected_experts),
+                    "selected_mass": cumulative,
+                    "cutoff": cutoff,
+                }
+            )
+
+    return (
+        {
+            "expert_index_base": 1,
+            "selection": "minimum_prefix_by_mean_router_softmax_cumulative_mass_pre_topk_per_layer",
+            "cumulative_cutoff": cutoff,
+            "layers": layers,
+        },
+        rows,
+    )
+
+
 def plot_results(out_dir: Path, layer_means: dict[int, torch.Tensor], avg_rows: list[dict]) -> None:
     import matplotlib
 
@@ -289,6 +345,7 @@ def plot_results(out_dir: Path, layer_means: dict[int, torch.Tensor], avg_rows: 
     num_experts = len(next(iter(layer_means.values())))
     experts = list(range(1, num_experts + 1))
     highlight_n = max(1, min(int(args.router_softmax_topn_highlight), num_experts))
+    cumulative_cutoff = max(0.0, min(float(args.router_softmax_cumulative_cutoff), 1.0))
     uniform = 1.0 / float(num_experts)
 
     fig, axes = plt.subplots(2, math.ceil(len(layers) / 2), figsize=(22, 9), sharey=True)
@@ -296,15 +353,29 @@ def plot_results(out_dir: Path, layer_means: dict[int, torch.Tensor], avg_rows: 
     for ax, layer in zip(axes, layers):
         values = layer_means[layer].numpy()
         order = values.argsort()[::-1]
-        highlight = set(order[:highlight_n].tolist())
+        if cumulative_cutoff > 0:
+            cumulative = 0.0
+            selected = []
+            for expert_idx in order.tolist():
+                cumulative += float(values[expert_idx])
+                selected.append(expert_idx)
+                if cumulative >= cumulative_cutoff:
+                    break
+            highlight = set(selected)
+            title_suffix = f" | {len(selected)} exp, mass={cumulative:.3f}"
+        else:
+            highlight = set(order[:highlight_n].tolist())
+            title_suffix = ""
         colors = ["#2563eb" if idx in highlight else "#cbd5e1" for idx in range(num_experts)]
         ax.bar(experts, values, color=colors, edgecolor="#0f172a", linewidth=0.6)
         ax.axhline(uniform, color="#ef4444", linestyle="--", linewidth=1.2, alpha=0.8)
-        ax.set_title(f"Layer {layer}", fontsize=14, fontweight="bold")
+        ax.set_title(f"Layer {layer}{title_suffix}", fontsize=14, fontweight="bold")
         ax.set_xticks(experts)
         ax.set_ylim(0, max(values.max() * 1.18, uniform * 1.35))
         ax.grid(axis="y", alpha=0.22)
-        for expert_idx in order[:highlight_n]:
+        for expert_idx in order:
+            if expert_idx not in highlight:
+                continue
             ax.text(
                 expert_idx + 1,
                 values[expert_idx],
@@ -328,7 +399,15 @@ def plot_results(out_dir: Path, layer_means: dict[int, torch.Tensor], avg_rows: 
     )
     fig.legend(
         handles=[
-            Patch(facecolor="#2563eb", edgecolor="#0f172a", label=f"Top-{highlight_n} experts in layer"),
+            Patch(
+                facecolor="#2563eb",
+                edgecolor="#0f172a",
+                label=(
+                    f"Cumulative {cumulative_cutoff:.0%} mass experts"
+                    if cumulative_cutoff > 0
+                    else f"Top-{highlight_n} experts in layer"
+                ),
+            ),
             Patch(facecolor="#cbd5e1", edgecolor="#0f172a", label="Other experts"),
             Patch(facecolor="#ffffff", edgecolor="#ef4444", label=f"Uniform baseline = {uniform:.3f}"),
         ],
@@ -345,7 +424,18 @@ def plot_results(out_dir: Path, layer_means: dict[int, torch.Tensor], avg_rows: 
 
     avg_values = [row["mean_softmax"] for row in sorted(avg_rows, key=lambda row: row["expert"])]
     avg_order = sorted(avg_rows, key=lambda row: row["rank"])
-    top_experts = {row["expert"] for row in avg_order[:highlight_n]}
+    if cumulative_cutoff > 0:
+        cumulative = 0.0
+        top_experts = set()
+        for row in avg_order:
+            cumulative += float(row["mean_softmax"])
+            top_experts.add(row["expert"])
+            if cumulative >= cumulative_cutoff:
+                break
+        avg_label = f"Cumulative {cumulative_cutoff:.0%} layer-average experts ({len(top_experts)} exp)"
+    else:
+        top_experts = {row["expert"] for row in avg_order[:highlight_n]}
+        avg_label = f"Top-{highlight_n} layer-average experts"
     colors = ["#16a34a" if expert in top_experts else "#d1d5db" for expert in experts]
 
     fig, ax = plt.subplots(figsize=(12, 7))
@@ -371,7 +461,7 @@ def plot_results(out_dir: Path, layer_means: dict[int, torch.Tensor], avg_rows: 
         )
     ax.legend(
         handles=[
-            Patch(facecolor="#16a34a", edgecolor="#111827", label=f"Top-{highlight_n} layer-average experts"),
+            Patch(facecolor="#16a34a", edgecolor="#111827", label=avg_label),
             Patch(facecolor="#d1d5db", edgecolor="#111827", label="Other experts"),
             Patch(facecolor="#ffffff", edgecolor="#ef4444", label=f"Uniform baseline = {uniform:.3f}"),
         ],
@@ -420,6 +510,7 @@ def main() -> None:
             "global_batch_size": int(args.global_batch_size),
             "sequence_length": int(args.seq_length),
             "layers": sorted(layer_means),
+            "cumulative_cutoff": float(args.router_softmax_cumulative_cutoff),
             "measurement": "mean per-token router softmax probability before Top-K selection",
         }
         (out_dir / "router_softmax_metadata.json").write_text(
@@ -435,6 +526,34 @@ def main() -> None:
             json.dumps(mask, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
+        if args.router_softmax_cumulative_cutoff and args.router_softmax_cumulative_cutoff > 0:
+            cutoff_mask, cutoff_rows = build_cumulative_cutoff_selection(
+                layer_means,
+                args.router_softmax_cumulative_cutoff,
+            )
+            cutoff_mask["load"] = args.load
+            cutoff_mask["checkpoint_iteration"] = int(iteration)
+            cutoff_mask["max_tokens"] = int(args.router_softmax_max_tokens)
+            cutoff_mask["data_path"] = args.router_softmax_data_path or args.data_path
+            cutoff_label = int(round(float(cutoff_mask["cumulative_cutoff"]) * 100))
+            (out_dir / f"router_softmax_cumulative{cutoff_label}_selection.json").write_text(
+                json.dumps(cutoff_mask, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            write_csv(
+                out_dir / f"router_softmax_cumulative{cutoff_label}_by_layer.csv",
+                cutoff_rows,
+                [
+                    "layer",
+                    "expert",
+                    "mean_softmax",
+                    "rank_in_layer",
+                    "selected_for_cutoff",
+                    "selected_count",
+                    "selected_mass",
+                    "cutoff",
+                ],
+            )
         plot_results(out_dir, layer_means, avg_rows)
         print_rank_0(f"[router-softmax] wrote outputs to {out_dir}")
 
