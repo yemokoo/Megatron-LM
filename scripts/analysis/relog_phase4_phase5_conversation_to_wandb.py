@@ -46,6 +46,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--phase5-dir", required=True)
     parser.add_argument("--phase4-log")
     parser.add_argument("--phase5-log")
+    parser.add_argument("--phase4-source-log", help="Log containing the previous router-retuned final probe values.")
+    parser.add_argument("--phase4-source-step", type=int, default=5400)
+    parser.add_argument(
+        "--phase5-source-log",
+        help="Log containing the phase4 final probe values. Defaults to --phase4-log when --connect-baselines is set.",
+    )
+    parser.add_argument("--phase5-source-step", type=int, default=7200)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--run-name", required=True)
     parser.add_argument("--project", default=os.environ.get("WANDB_PROJECT", "flame-continual-top2-qv-lora"))
@@ -55,6 +62,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--phase5-base-step", type=int, default=7200)
     parser.add_argument("--phase5-local-start", type=int, default=1800)
     parser.add_argument("--phase5-local-end", type=int)
+    parser.add_argument(
+        "--connect-baselines",
+        action="store_true",
+        help="Inject source final probe values at phase4/phase5 base display steps so W&B curves connect continuously.",
+    )
     parser.add_argument("--probe-only", action="store_true")
     parser.add_argument("--skip-events-on-error", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
@@ -129,6 +141,43 @@ def parse_probe_log(points, log_path: Path, min_step: int, max_step: int, phase_
         add_metric(points, step_i, f"{phase_name}/active", 1.0)
         counts[name] += 1
     return dict(counts)
+
+
+def parse_last_probe_payload(log_path: Path, max_step: int) -> dict[str, float]:
+    last_by_name: dict[str, tuple[int, float, float]] = {}
+    for line in read_lines(log_path):
+        match = PROBE_RE.search(line)
+        if not match:
+            continue
+        name, step, _local_iteration, acc, ppl = match.groups()
+        step_i = int(step)
+        if step_i > max_step:
+            continue
+        previous = last_by_name.get(name)
+        if previous is None or step_i >= previous[0]:
+            last_by_name[name] = (step_i, float(acc), float(ppl))
+
+    payload = {}
+    for name, (_step, acc, ppl) in last_by_name.items():
+        payload[f"{name}/next_token_accuracy"] = acc
+        payload[f"{name}/ppl"] = ppl
+    return payload
+
+
+def inject_probe_baseline(
+    points: dict[int, dict[str, float]],
+    log_path: Path | None,
+    source_step: int,
+    display_step: int,
+    marker_name: str,
+) -> dict[str, int | str]:
+    if log_path is None:
+        return {"count": 0, "source_log": ""}
+    payload = parse_last_probe_payload(log_path, source_step)
+    for key, value in payload.items():
+        add_metric(points, display_step, key, value)
+    add_metric(points, display_step, marker_name, 1.0)
+    return {"count": len(payload), "source_log": str(log_path)}
 
 
 def parse_summary_log(points, log_path: Path, local_min: int, local_max: int, step_offset: int, phase_name: str) -> dict[str, int]:
@@ -256,6 +305,13 @@ def main() -> None:
         raise SystemExit(f"Could not find phase4 log under {phase4_dir}")
     if phase5_log is None or not phase5_log.exists():
         raise SystemExit(f"Could not find phase5 log under {phase5_dir}")
+    phase4_source_log = Path(args.phase4_source_log) if args.phase4_source_log else None
+    phase5_source_log = Path(args.phase5_source_log) if args.phase5_source_log else phase4_log
+    if args.connect_baselines:
+        if phase4_source_log is None or not phase4_source_log.exists():
+            raise SystemExit(f"--connect-baselines requires an existing --phase4-source-log: {phase4_source_log}")
+        if phase5_source_log is None or not phase5_source_log.exists():
+            raise SystemExit(f"--connect-baselines requires an existing --phase5-source-log or phase4 log: {phase5_source_log}")
 
     phase4_local_end = args.phase4_iters
     phase4_max_step = args.phase4_base_step + args.phase4_iters
@@ -268,6 +324,23 @@ def main() -> None:
     points = defaultdict(dict)
     points[args.phase4_base_step]["phase4/source_marker"] = 1.0
     points[args.phase5_base_step]["phase5/source_marker"] = 1.0
+    phase4_baseline_counts = {}
+    phase5_baseline_counts = {}
+    if args.connect_baselines:
+        phase4_baseline_counts = inject_probe_baseline(
+            points,
+            phase4_source_log,
+            args.phase4_source_step,
+            args.phase4_base_step,
+            "phase4/connected_source_probe_marker",
+        )
+        phase5_baseline_counts = inject_probe_baseline(
+            points,
+            phase5_source_log,
+            args.phase5_source_step,
+            args.phase5_base_step,
+            "phase5/connected_source_probe_marker",
+        )
 
     phase4_probe_counts = parse_probe_log(points, phase4_log, args.phase4_base_step, phase4_max_step, "phase4")
     phase5_probe_counts = parse_probe_log(points, phase5_log, args.phase5_base_step, phase5_max_step, "phase5")
@@ -312,6 +385,8 @@ def main() -> None:
     print(f"phase5 display: {args.phase5_base_step}->{phase5_max_step} (local {args.phase5_local_start}->{phase5_local_end})")
     print(f"phase4 probe counts: {phase4_probe_counts}")
     print(f"phase5 probe counts: {phase5_probe_counts}")
+    print(f"phase4 connected baseline: {phase4_baseline_counts}")
+    print(f"phase5 connected baseline: {phase5_baseline_counts}")
     print(f"phase4 summary counts: {phase4_summary_counts}")
     print(f"phase5 summary counts: {phase5_summary_counts}")
     print(f"phase4 event tag count: {len(phase4_event_counts)}")
@@ -335,6 +410,11 @@ def main() -> None:
             "phase5_dir": str(phase5_dir),
             "phase4_log": str(phase4_log),
             "phase5_log": str(phase5_log),
+            "phase4_source_log": str(phase4_source_log) if phase4_source_log else None,
+            "phase4_source_step": args.phase4_source_step,
+            "phase5_source_log": str(phase5_source_log) if phase5_source_log else None,
+            "phase5_source_step": args.phase5_source_step,
+            "connect_baselines": args.connect_baselines,
             "phase4_base_step": args.phase4_base_step,
             "phase4_iters": args.phase4_iters,
             "phase5_base_step": args.phase5_base_step,
