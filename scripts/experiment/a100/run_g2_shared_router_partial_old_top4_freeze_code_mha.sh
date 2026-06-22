@@ -60,14 +60,21 @@ is_completed() {
     [ -f "$latest_file" ] && [ "$(tr -d '\n\r[:space:]' < "$latest_file")" = "$TRAIN_ITERS" ]
 }
 
+is_completed_for_iters() {
+    local run_dir="$1"
+    local expected_iters="$2"
+    local latest_file="${run_dir}/latest_checkpointed_iteration.txt"
+    [ -f "$latest_file" ] && [ "$(tr -d '\n\r[:space:]' < "$latest_file")" = "$expected_iters" ]
+}
+
 if [ ! -f "$SHARED_ROUTER_HYBRID_PARTIAL_FREEZE_MASK" ]; then
     echo "[ERROR] missing partial-freeze mask: $SHARED_ROUTER_HYBRID_PARTIAL_FREEZE_MASK" >&2
     echo "[HINT] build it first with plot_wiki_router_softmax_importance.py using --router-softmax-max-tokens 1048576." >&2
     exit 1
 fi
 
-if ! is_completed "$STAGE1_WEIGHTS_DIR"; then
-    echo "[ERROR] missing completed G2 wiki checkpoint: $STAGE1_WEIGHTS_DIR" >&2
+if ! is_completed_for_iters "$STAGE1_WEIGHTS_DIR" "$STAGE1_REQUIRED_ITERS"; then
+    echo "[ERROR] missing completed G2 wiki checkpoint at iteration $STAGE1_REQUIRED_ITERS: $STAGE1_WEIGHTS_DIR" >&2
     exit 1
 fi
 
