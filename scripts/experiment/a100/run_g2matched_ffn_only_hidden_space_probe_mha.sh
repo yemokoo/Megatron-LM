@@ -14,7 +14,8 @@ export MASTER_PORT="${MASTER_PORT:-29831}"
 export LOCAL_SSD_ROOT="${LOCAL_SSD_ROOT:-/tmp/flame-moe}"
 export G2_ROOT="${G2_ROOT:-$PROJECT_ROOT/.local/weights/a100/mha/g2-checkpoints}"
 export BASE_WEIGHTS_DIR="${BASE_WEIGHTS_DIR:-$PROJECT_ROOT/.local/weights/a100/mha}"
-export OUT_DIR="${OUT_DIR:-$PROJECT_ROOT/.local/analysis/g2matched-ffn-only-hidden-space-wiki-probe}"
+export PROBE_TASK="${PROBE_TASK:-wiki}"
+export OUT_DIR="${OUT_DIR:-$PROJECT_ROOT/.local/analysis/g2matched-ffn-only-hidden-space-${PROBE_TASK}-probe}"
 
 export NUM_LAYERS="${NUM_LAYERS:-9}"
 export HIDDEN_SIZE="${HIDDEN_SIZE:-1024}"
@@ -42,7 +43,23 @@ WIKI_ORIGINAL="$BASE_WEIGHTS_DIR/wiki-a-moe-g2matched-bf16/g2matched-top4-e8-ffn
 CODE_REGISTRY="$G2_ROOT/code/g2matched/g2matched-top4-e8to16-ffn352-wiki-to-code-ffn-moe-attn-freeze-mha-a100-bf16-mb96-1800"
 CODE_ORIGINAL="$BASE_WEIGHTS_DIR/g2matched-ffn-moe-attn-freeze-bf16/g2matched-top4-e8to16-ffn352-wiki-to-code-ffn-moe-attn-freeze-mha-a100-bf16-mb96-1800"
 RETUNE_DEFAULT="$G2_ROOT/code/phase3/g2matched-attn-freeze-phase3-router-only-retune-wikicode-no-reinit-mb96-1800"
-WIKI_PROBE_PREFIX="$PROJECT_ROOT/data/wiki/test/test_text_document"
+
+case "$PROBE_TASK" in
+    wiki)
+        PROBE_NAME="${PROBE_NAME:-wiki_probe}"
+        PROBE_PREFIX="${PROBE_PREFIX:-${WIKI_PROBE_PREFIX:-$PROJECT_ROOT/data/wiki/test/test_text_document}}"
+        ;;
+    code)
+        PROBE_NAME="${PROBE_NAME:-code_probe}"
+        PROBE_PREFIX="${PROBE_PREFIX:-${CODE_PROBE_PREFIX:-$PROJECT_ROOT/data/code/test/test_text_document}}"
+        ;;
+    *)
+        echo "[ERROR] unsupported PROBE_TASK=$PROBE_TASK (expected wiki or code)" >&2
+        exit 1
+        ;;
+esac
+export PROBE_NAME
+export PROBE_PREFIX
 
 pick_existing_dir() {
     local first="$1"
@@ -82,7 +99,9 @@ echo "[CONFIG] FFN-only hidden-space probe"
 echo "[CONFIG] wiki_only=$WIKI_DIR"
 echo "[CONFIG] code_trained=$CODE_DIR"
 echo "[CONFIG] router_retuned=$RETUNE_DIR"
-echo "[CONFIG] wiki_probe=$WIKI_PROBE_PREFIX"
+echo "[CONFIG] probe_task=$PROBE_TASK"
+echo "[CONFIG] probe_name=$PROBE_NAME"
+echo "[CONFIG] probe_prefix=$PROBE_PREFIX"
 echo "[CONFIG] out_dir=$OUT_DIR"
 echo "[CONFIG] mb=$MICRO_BATCH_SIZE, gbs=$GLOBAL_BATCH_SIZE, max_tokens=$HIDDEN_SPACE_MAX_TOKENS"
 
@@ -124,7 +143,7 @@ run_dump() {
         --lr-warmup-fraction "$LR_WARMUP_FRACTION" \
         --lr-wsd-decay-iters "$LR_WSD_DECAY_ITERS" \
         --seq-length 512 \
-        --data-path 1.0 "$WIKI_PROBE_PREFIX" \
+        --data-path 1.0 "$PROBE_PREFIX" \
         --split 100,0,0 \
         --train-iters 1 \
         --skip-train \
@@ -135,10 +154,10 @@ run_dump() {
         --diagnostic-override-consumed-train-samples 0 \
         "${extra_resume_arg[@]}" \
         --eval-interval 1 \
-        --probe-name wiki_probe \
+        --probe-name "$PROBE_NAME" \
         --probe-eval-iters "$PROBE_EVAL_ITERS" \
         --probe-eval-interval 1 \
-        --probe-data-path 1.0 "$WIKI_PROBE_PREFIX" \
+        --probe-data-path 1.0 "$PROBE_PREFIX" \
         --run-initial-probe-eval \
         --hidden-space-dump-path "$out_npz" \
         --hidden-space-dump-label "$label" \
@@ -159,7 +178,8 @@ python scripts/analysis/plot_hidden_space_ffn_only.py \
     --router-retuned "$OUT_DIR/hidden/router_retuned.npz" \
     --out-dir "$OUT_DIR/plots" \
     --method "${HIDDEN_SPACE_PLOT_METHOD:-pca}" \
-    --max-points-per-stage "${HIDDEN_SPACE_PLOT_MAX_POINTS_PER_STAGE:-1200}"
+    --max-points-per-stage "${HIDDEN_SPACE_PLOT_MAX_POINTS_PER_STAGE:-1200}" \
+    --probe-task "$PROBE_TASK"
 
 echo "[DONE] hidden-space analysis"
 echo "[PLOTS] $OUT_DIR/plots"

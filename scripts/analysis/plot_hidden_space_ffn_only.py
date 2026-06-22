@@ -21,6 +21,12 @@ STAGE_COLORS = {
     "router_retuned": "#16a34a",
 }
 
+STAGE_DISPLAY_NAMES = {
+    "wiki_only": "Wiki-only",
+    "code_trained": "Code-trained",
+    "router_retuned": "Router-retuned",
+}
+
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -34,6 +40,11 @@ def parse_args():
     parser.add_argument("--trim-percentile", type=float, default=99.0)
     parser.add_argument("--density-bins", type=int, default=100)
     parser.add_argument("--seed", type=int, default=1234)
+    parser.add_argument(
+        "--probe-task",
+        default="wiki",
+        help="Probe task used for the hidden dumps. Controls pairwise reference stage: wiki -> wiki_only, code -> code_trained.",
+    )
     return parser.parse_args()
 
 
@@ -251,6 +262,113 @@ def draw_origin_marker(ax, zero_xy: np.ndarray):
     )
     ax.scatter([origin[0]], [origin[1]], s=34, c="#2563eb", zorder=9)
     return origin
+
+
+def display_stage_name(label: str):
+    return STAGE_DISPLAY_NAMES.get(label, label.replace("_", " "))
+
+
+def normalize_probe_task(probe_task: str):
+    normalized = probe_task.strip().lower().replace("-", "_")
+    if normalized in {"wiki", "wiki_probe"}:
+        return "wiki"
+    if normalized in {"code", "code_probe"}:
+        return "code"
+    return normalized
+
+
+def probe_display_name(probe_task: str):
+    normalized = normalize_probe_task(probe_task)
+    if normalized == "wiki":
+        return "Wiki Probe"
+    if normalized == "code":
+        return "Code Probe"
+    return normalized.replace("_", " ").title()
+
+
+def pairwise_base_label_for_probe(probe_task: str):
+    return "code_trained" if normalize_probe_task(probe_task) == "code" else "wiki_only"
+
+
+def pairwise_compare_labels(base_label: str):
+    if base_label == "wiki_only":
+        return ["code_trained", "router_retuned"]
+    if base_label == "code_trained":
+        return ["wiki_only", "router_retuned"]
+    return [label for label in ["wiki_only", "code_trained", "router_retuned"] if label != base_label]
+
+
+def stage_index_by_label(dumps):
+    return {dump["label"]: idx for idx, dump in enumerate(dumps)}
+
+
+def draw_pairwise_density_panel(
+    ax,
+    base_xy: np.ndarray,
+    other_xy: np.ndarray,
+    base_label: str,
+    other_label: str,
+    density_bins: int,
+    trim_percentile: float,
+    limits=None,
+    show_legend: bool = True,
+):
+    base_color = STAGE_COLORS.get(base_label, "#2563eb")
+    other_color = STAGE_COLORS.get(other_label, "#111827")
+    draw_density_cloud(
+        ax,
+        base_xy,
+        base_color,
+        display_stage_name(base_label),
+        density_bins,
+        trim_percentile,
+        alpha=0.24,
+    )
+    draw_density_cloud(
+        ax,
+        other_xy,
+        other_color,
+        display_stage_name(other_label),
+        density_bins,
+        trim_percentile,
+        alpha=0.34,
+    )
+
+    base_centroid = base_xy.mean(axis=0)
+    other_centroid = other_xy.mean(axis=0)
+    ax.annotate(
+        "",
+        xy=other_centroid,
+        xytext=base_centroid,
+        arrowprops=dict(arrowstyle="->", color="#111827", lw=1.8, alpha=0.80),
+    )
+    ax.scatter(
+        [base_centroid[0]],
+        [base_centroid[1]],
+        s=42,
+        c=base_color,
+        edgecolors="#111827",
+        linewidths=0.75,
+        zorder=8,
+    )
+    ax.scatter(
+        [other_centroid[0]],
+        [other_centroid[1]],
+        s=42,
+        c=other_color,
+        edgecolors="#111827",
+        linewidths=0.75,
+        zorder=8,
+    )
+    if limits is not None:
+        xmin, xmax, ymin, ymax = limits
+        ax.set_xlim(xmin, xmax)
+        ax.set_ylim(ymin, ymax)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.grid(alpha=0.16)
+    if show_legend:
+        ax.legend(frameon=False, loc="upper left", fontsize=8)
 
 
 def plot_delta_density_layer_grid(
@@ -506,6 +624,132 @@ def plot_hidden_pairwise_density_layer_average(
     fig.suptitle(f"FFN-only Wiki Probe Hidden Density, Pairwise Layer-Average ({method.upper()})", weight="bold")
     fig.tight_layout()
     fig.savefig(out_path, dpi=250)
+    plt.close(fig)
+
+
+def plot_hidden_pairwise_density_layer_average_by_base(
+    dumps,
+    out_path: Path,
+    method: str,
+    max_points: int,
+    seed: int,
+    trim_percentile: float,
+    density_bins: int,
+    probe_task: str,
+    base_label: str,
+):
+    label_to_idx = stage_index_by_label(dumps)
+    compare_labels = pairwise_compare_labels(base_label)
+    missing = [label for label in [base_label, *compare_labels] if label not in label_to_idx]
+    if missing:
+        raise SystemExit(f"Missing hidden dump label(s) for pairwise plot: {missing}")
+
+    rng = np.random.default_rng(seed)
+    idx = common_subsample_indices(dumps, max_points, rng)
+    sampled = [dump["hidden"].mean(axis=0)[idx] for dump in dumps]
+    coords = reduce2(np.concatenate(sampled, axis=0), method, seed + 9199)
+    coords_by_stage = split_stage_coords(coords, len(idx))
+
+    base_xy = coords_by_stage[label_to_idx[base_label]]
+    all_points = np.concatenate(
+        [coords_by_stage[label_to_idx[label]] for label in [base_label, *compare_labels]],
+        axis=0,
+    )
+    limits = percentile_bounds(all_points, trim_percentile, pad_fraction=0.10)
+
+    fig, axes = plt.subplots(1, len(compare_labels), figsize=(6.6 * len(compare_labels), 5.8), sharex=True, sharey=True)
+    axes = np.atleast_1d(axes)
+    for ax, other_label in zip(axes, compare_labels):
+        other_xy = coords_by_stage[label_to_idx[other_label]]
+        draw_pairwise_density_panel(
+            ax,
+            base_xy,
+            other_xy,
+            base_label,
+            other_label,
+            density_bins,
+            trim_percentile,
+            limits=limits,
+            show_legend=True,
+        )
+        ax.set_title(
+            f"{display_stage_name(base_label)} vs {display_stage_name(other_label)}",
+            weight="bold",
+        )
+
+    fig.suptitle(
+        f"FFN-only {probe_display_name(probe_task)} Hidden Density, Pairwise Layer-Average ({method.upper()})",
+        weight="bold",
+    )
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=250)
+    plt.close(fig)
+
+
+def plot_hidden_pairwise_density_layers_by_base(
+    dumps,
+    out_path: Path,
+    method: str,
+    max_points: int,
+    seed: int,
+    trim_percentile: float,
+    density_bins: int,
+    probe_task: str,
+    base_label: str,
+):
+    label_to_idx = stage_index_by_label(dumps)
+    compare_labels = pairwise_compare_labels(base_label)
+    missing = [label for label in [base_label, *compare_labels] if label not in label_to_idx]
+    if missing:
+        raise SystemExit(f"Missing hidden dump label(s) for pairwise plot: {missing}")
+
+    rng = np.random.default_rng(seed)
+    layers = dumps[0]["layers"]
+    n_layers = len(layers)
+    ncols = len(compare_labels)
+    fig, axes = plt.subplots(n_layers, ncols, figsize=(6.5 * ncols, 3.55 * n_layers), squeeze=False)
+
+    for layer_idx, layer_number in enumerate(layers):
+        idx = common_subsample_indices(dumps, max_points, rng)
+        sampled = [dump["hidden"][layer_idx][idx] for dump in dumps]
+        coords = reduce2(np.concatenate(sampled, axis=0), method, seed + 9300 + int(layer_number))
+        coords_by_stage = split_stage_coords(coords, len(idx))
+
+        base_xy = coords_by_stage[label_to_idx[base_label]]
+        all_points = np.concatenate(
+            [coords_by_stage[label_to_idx[label]] for label in [base_label, *compare_labels]],
+            axis=0,
+        )
+        limits = percentile_bounds(all_points, trim_percentile, pad_fraction=0.12)
+
+        for col_idx, other_label in enumerate(compare_labels):
+            ax = axes[layer_idx][col_idx]
+            other_xy = coords_by_stage[label_to_idx[other_label]]
+            draw_pairwise_density_panel(
+                ax,
+                base_xy,
+                other_xy,
+                base_label,
+                other_label,
+                density_bins,
+                trim_percentile,
+                limits=limits,
+                show_legend=(layer_idx == 0),
+            )
+            ax.set_title(
+                f"Layer {int(layer_number)} | {display_stage_name(base_label)} vs {display_stage_name(other_label)}",
+                fontsize=10,
+                weight="bold",
+            )
+
+    fig.suptitle(
+        f"FFN-only {probe_display_name(probe_task)} Hidden Density by Layer, Pairwise ({method.upper()})",
+        y=0.998,
+        fontsize=16,
+        weight="bold",
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.985))
+    fig.savefig(out_path, dpi=220)
     plt.close(fig)
 
 
@@ -803,6 +1047,8 @@ def main():
     args = parse_args()
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    probe_task = normalize_probe_task(args.probe_task)
+    pairwise_base_label = pairwise_base_label_for_probe(probe_task)
 
     dumps = [
         load_dump(args.wiki_only, "wiki_only"),
@@ -893,6 +1139,28 @@ def main():
         args.seed,
         args.trim_percentile,
         args.density_bins,
+    )
+    plot_hidden_pairwise_density_layer_average_by_base(
+        dumps,
+        out_dir / f"ffn_only_hidden_pairwise_density_{probe_task}_probe_layer_average_{args.method}.png",
+        args.method,
+        args.max_points_per_stage,
+        args.seed,
+        args.trim_percentile,
+        args.density_bins,
+        probe_task,
+        pairwise_base_label,
+    )
+    plot_hidden_pairwise_density_layers_by_base(
+        dumps,
+        out_dir / f"ffn_only_hidden_pairwise_density_{probe_task}_probe_layers_{args.method}.png",
+        args.method,
+        args.max_points_per_stage,
+        args.seed,
+        args.trim_percentile,
+        args.density_bins,
+        probe_task,
+        pairwise_base_label,
     )
     plot_hidden_small_multiples_layer_average(
         dumps,
