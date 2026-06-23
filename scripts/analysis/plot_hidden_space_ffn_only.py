@@ -45,6 +45,11 @@ def parse_args():
         default="wiki",
         help="Probe task used for the hidden dumps. Controls pairwise reference stage: wiki -> wiki_only, code -> code_trained.",
     )
+    parser.add_argument(
+        "--only-pairwise-density",
+        action="store_true",
+        help="Only redraw pairwise density plots for the selected probe task/base stage.",
+    )
     return parser.parse_args()
 
 
@@ -65,6 +70,14 @@ def load_dump(path: str, fallback_label: str):
 def pca2(x: np.ndarray):
     x = x.astype(np.float32)
     x = x - x.mean(axis=0, keepdims=True)
+    n_samples, n_features = x.shape
+    if n_samples >= n_features:
+        # Hidden dumps usually have many more sampled tokens than hidden dims.
+        # Eigendecomposing the feature covariance is much faster than full SVD.
+        cov = (x.T @ x) / max(n_samples - 1, 1)
+        eigvals, eigvecs = np.linalg.eigh(cov)
+        components = eigvecs[:, np.argsort(eigvals)[-2:][::-1]]
+        return x @ components
     _, _, vt = np.linalg.svd(x, full_matrices=False)
     return x @ vt[:2].T
 
@@ -1059,6 +1072,31 @@ def main():
     for dump in dumps[1:]:
         if dump["layers"].tolist() != layer_ref:
             raise SystemExit("Layer numbers do not match across hidden dumps.")
+
+    if args.only_pairwise_density:
+        plot_hidden_pairwise_density_layer_average_by_base(
+            dumps,
+            out_dir / f"ffn_only_hidden_pairwise_density_{probe_task}_probe_layer_average_{args.method}.png",
+            args.method,
+            args.max_points_per_stage,
+            args.seed,
+            args.trim_percentile,
+            args.density_bins,
+            probe_task,
+            pairwise_base_label,
+        )
+        plot_hidden_pairwise_density_layers_by_base(
+            dumps,
+            out_dir / f"ffn_only_hidden_pairwise_density_{probe_task}_probe_layers_{args.method}.png",
+            args.method,
+            args.max_points_per_stage,
+            args.seed,
+            args.trim_percentile,
+            args.density_bins,
+            probe_task,
+            pairwise_base_label,
+        )
+        return
 
     plot_layer_grid(
         dumps,
