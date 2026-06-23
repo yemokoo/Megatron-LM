@@ -112,6 +112,7 @@ export LR_DECAY_ITERS="${LR_DECAY_ITERS:-$TRAIN_ITERS}"
 export LR_WSD_DECAY_ITERS="${LR_WSD_DECAY_ITERS:-$((TRAIN_ITERS / 10))}"
 export MODEL_CONFIG_SCRIPT="${MODEL_CONFIG_SCRIPT:-configs/model/flame-shared-router-hybrid-experts.sh}"
 export DATASET_SPLIT="${DATASET_SPLIT:-100,0,0}"
+export SEED="${SEED:-1234}"
 
 export TRAIN_DATASET="${TRAIN_DATASET:-$(dataset_dir_for_task code)}"
 export ROUTER_MEMORY_KL_COEFF="${ROUTER_MEMORY_KL_COEFF:-0.0}"
@@ -566,6 +567,7 @@ torchrun \
     --lr-warmup-fraction "$LR_WARMUP_FRACTION" \
     --lr-wsd-decay-iters "$LR_WSD_DECAY_ITERS" \
     --train-iters "$TRAIN_ITERS" \
+    --seed "$SEED" \
     "${SHARED_ROUTER_MODE_ARGS[@]}" \
     "${SHARED_ROUTER_ARGS[@]}" \
     --seq-length "${SEQ_LENGTH:-512}" \

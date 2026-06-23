@@ -55,6 +55,7 @@ export LR_DECAY_ITERS="${LR_DECAY_ITERS:-}"
 export LR_WSD_DECAY_ITERS="${LR_WSD_DECAY_ITERS:-}"
 export MODEL_CONFIG_SCRIPT="${MODEL_CONFIG_SCRIPT:-configs/model/flame-shared-router-hybrid-experts.sh}"
 export DATASET_SPLIT="${DATASET_SPLIT:-100,0,0}"
+export SEED="${SEED:-1234}"
 
 export TRAIN_DATASET="${TRAIN_DATASET:-$(dataset_dir_for_task wiki)}"
 export TRAIN_WEIGHTS="${TRAIN_WEIGHTS:-$LOCAL_WEIGHTS/a100/wiki-shared-router-hybrid-pretrain-local/$RUN_ID}"
@@ -232,6 +233,7 @@ torchrun \
     --lr-warmup-fraction "$LR_WARMUP_FRACTION" \
     --lr-wsd-decay-iters "$LR_WSD_DECAY_ITERS" \
     --train-iters "$TRAIN_ITERS" \
+    --seed "$SEED" \
     --seq-length "${SEQ_LENGTH:-512}" \
     --data-path $(build_data_path "$SSD_TRAIN_DATASET") \
     --split "$DATASET_SPLIT" \

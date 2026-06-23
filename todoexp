@@ -1,6 +1,12 @@
 # TODO Experiments
 
-Last updated: 2026-06-12
+Last updated: 2026-06-23
+
+## Global Seed Policy
+
+- From now on, all new training and fixed-sampling experiments should use seed `1234`.
+- Megatron training launchers pass `--seed 1234` by default through `SEED="${SEED:-1234}"`.
+- Fixed router-finetune datasets now default to `FIXED_DATA_SEED=1234`.
 
 ## Overall Direction
 
@@ -15,9 +21,73 @@ Last updated: 2026-06-12
 - Planned variants:
   - 1 percent miniset x 20 epochs
   - 5 percent miniset x 4 epochs
-  - 10 percent miniset x 2 epochs
+  - 10 percent miniset x 2 epochs later if needed
 - Dataset should be fixed after random sampling; do not resample every run.
-- Implementation priority: later, after KT miniset materialization.
+- Current implementation focuses on 1 percent x20 and 5 percent x4 because both match the previously useful 20 percent total router-finetune budget.
+- Both conditions restart from the same code-trained checkpoint. The 5 percent run does not continue from the 1 percent run.
+- Target model variants:
+  - FFN expert only baseline.
+  - FFN expert + attention expert shared-router variant.
+
+### Implemented Wrapper Paths
+
+- Fixed miniset materialization:
+  - `scripts/experiment/a100/prepare_g2_router_finetune_miniset_repeats_mha.sh`
+- Router-only retune runner:
+  - `scripts/experiment/a100/run_g2_router_finetune_miniset_repeats_mha.sh`
+
+### Default Semantics
+
+- Full 100 percent router-finetune budget:
+  - `3600` retune steps.
+- Target repeated-miniset budget:
+  - `720` retune steps, equal to 20 percent of full budget.
+- Fixed dataset seed:
+  - `1234`, matching the global seed policy for all future experiments.
+- 1 percent x20:
+  - samples per task: `4147200 * 0.01 = 41472`
+  - retune steps: `720`
+  - expected repeats: `20` epochs over the fixed miniset.
+- 5 percent x4:
+  - samples per task: `4147200 * 0.05 = 207360`
+  - retune steps: `720`
+  - expected repeats: `4` epochs over the fixed miniset.
+- Save/probe interval:
+  - `36` steps, equal to 1 percent of the full 3600-step budget.
+- Trainable parameters:
+  - router only.
+- Frozen parameters:
+  - all FFN experts, attention experts, dense trunk, embeddings, and output weights.
+- Router finetune loss:
+  - LM loss only by default.
+  - aux loss `0.0`
+  - z loss `0.0`
+
+### Run Order
+
+1. Materialize fixed 1 percent and 5 percent datasets once.
+
+```bash
+WANDB_MODE=disabled \
+bash scripts/experiment/a100/prepare_g2_router_finetune_miniset_repeats_mha.sh
+```
+
+2. Run all four comparisons.
+
+```bash
+WANDB_MODE=offline \
+bash scripts/experiment/a100/run_g2_router_finetune_miniset_repeats_mha.sh all all
+```
+
+3. Or run one condition at a time.
+
+```bash
+WANDB_MODE=offline \
+bash scripts/experiment/a100/run_g2_router_finetune_miniset_repeats_mha.sh ffn-only 1pctx20
+
+WANDB_MODE=offline \
+bash scripts/experiment/a100/run_g2_router_finetune_miniset_repeats_mha.sh ffn-attn 5pctx4
+```
 
 ## Experiment 2: Interleaved Code Training and Router Finetune
 

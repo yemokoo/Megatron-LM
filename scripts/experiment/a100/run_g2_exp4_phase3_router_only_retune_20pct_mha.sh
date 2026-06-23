@@ -24,7 +24,7 @@ export WANDB_PROJECT="${WANDB_PROJECT:-flame-continual-top2-qv-lora}"
 export WANDB_MODE="${WANDB_MODE:-offline}"
 export MASTER_PORT="${MASTER_PORT:-29792}"
 
-export FIXED_DATA_SEED="${FIXED_DATA_SEED:-20260607}"
+export FIXED_DATA_SEED="${FIXED_DATA_SEED:-1234}"
 export ROUTER_FINETUNE_DATASET_ROOT="${ROUTER_FINETUNE_DATASET_ROOT:-$LOCAL_BASE/datasets/router_finetune_20pct/seed${FIXED_DATA_SEED}}"
 
 export SOURCE_RUN_ID="${SOURCE_RUN_ID:-g2-exp4-top4oldfreeze-e8to16-ffn352-r256-wiki-to-code-layerwise-top4-old-freeze-qkvo-mha-a100-bf16-mb72-1800}"

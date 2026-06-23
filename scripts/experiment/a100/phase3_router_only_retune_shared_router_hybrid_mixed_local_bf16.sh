@@ -89,6 +89,7 @@ export LR_DECAY_ITERS="${LR_DECAY_ITERS:-$TRAIN_ITERS}"
 export LR_WSD_DECAY_ITERS="${LR_WSD_DECAY_ITERS:-$RETUNE_ITERS}"
 export MODEL_CONFIG_SCRIPT="${MODEL_CONFIG_SCRIPT:-configs/model/flame-shared-router-hybrid-experts.sh}"
 export DATASET_SPLIT="${DATASET_SPLIT:-100,0,0}"
+export SEED="${SEED:-1234}"
 
 export ROUTER_FINETUNE_DATASET_ROOT="${ROUTER_FINETUNE_DATASET_ROOT:-}"
 if [ -n "$ROUTER_FINETUNE_DATASET_ROOT" ]; then
@@ -384,6 +385,7 @@ torchrun \
     --lr-warmup-fraction "$LR_WARMUP_FRACTION" \
     --lr-wsd-decay-iters "$LR_WSD_DECAY_ITERS" \
     --train-iters "$TRAIN_ITERS" \
+    --seed "$SEED" \
     --shared-router-hybrid-resume-from-num-experts "$RESUME_FROM_NUM_EXPERTS" \
     --shared-router-hybrid-train-router-only \
     "${REINIT_ROUTER_ARGS[@]}" \

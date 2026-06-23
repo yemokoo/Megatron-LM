@@ -87,6 +87,7 @@ export LR_DECAY_ITERS="${LR_DECAY_ITERS:-$TRAIN_ITERS}"
 export LR_WSD_DECAY_ITERS="${LR_WSD_DECAY_ITERS:-$RETUNE_ITERS}"
 export MODEL_CONFIG_SCRIPT="${MODEL_CONFIG_SCRIPT:-scripts/experiment/a100/flame-moe-bf16-no-shared.sh}"
 export DATASET_SPLIT="${DATASET_SPLIT:-100,0,0}"
+export SEED="${SEED:-1234}"
 
 export TRAIN_DATASET_WIKI="${TRAIN_DATASET_WIKI:-$(dataset_dir_for_task wiki)}"
 export TRAIN_DATASET_CODE="${TRAIN_DATASET_CODE:-$(dataset_dir_for_task code)}"
@@ -363,6 +364,7 @@ torchrun \
     --lr-warmup-fraction "$LR_WARMUP_FRACTION" \
     --lr-wsd-decay-iters "$LR_WSD_DECAY_ITERS" \
     --train-iters "$TRAIN_ITERS" \
+    --seed "$SEED" \
     --moe-resume-from-num-experts "$RESUME_FROM_NUM_EXPERTS" \
     --moe-train-router-only \
     --train-router-usage-log-interval "$TRAIN_ROUTER_USAGE_LOG_INTERVAL" \
