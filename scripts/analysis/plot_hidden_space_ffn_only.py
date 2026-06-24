@@ -774,7 +774,7 @@ def plot_hidden_pairwise_density_layers_by_base(
                         rotation=90,
                         va="center",
                         ha="center",
-                        fontsize=10,
+                        fontsize=14,
                         weight="bold",
                     )
 
