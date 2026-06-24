@@ -18,7 +18,7 @@ import numpy as np
 STAGE_COLORS = {
     "wiki_only": "#2563eb",
     "code_trained": "#f97316",
-    "router_retuned": "#db2777",
+    "router_retuned": "#16a34a",
 }
 
 STAGE_DISPLAY_NAMES = {
@@ -136,7 +136,7 @@ def draw_vectors(ax, coords_by_stage, vector_indices, alpha=0.24, linewidth=0.55
             xytext=code[idx],
             arrowprops=dict(
                 arrowstyle="->",
-                color="#db2777",
+                color="#16a34a",
                 alpha=alpha,
                 lw=linewidth,
                 shrinkA=0,
@@ -411,15 +411,15 @@ def plot_delta_density_layer_grid(
         zero_xy, code_xy, retune_xy = split_stage_coords(coords, len(idx))
 
         draw_density_cloud(ax, code_xy, "#f97316", "code_delta", density_bins, trim_percentile, alpha=0.30)
-        draw_density_cloud(ax, retune_xy, "#db2777", "retune_delta", density_bins, trim_percentile, alpha=0.38)
+        draw_density_cloud(ax, retune_xy, "#16a34a", "retune_delta", density_bins, trim_percentile, alpha=0.38)
         origin = draw_origin_marker(ax, zero_xy)
 
         code_centroid = code_xy.mean(axis=0)
         retune_centroid = retune_xy.mean(axis=0)
         ax.annotate("", xy=code_centroid, xytext=origin, arrowprops=dict(arrowstyle="->", color="#f97316", lw=1.5, alpha=0.85))
-        ax.annotate("", xy=retune_centroid, xytext=origin, arrowprops=dict(arrowstyle="->", color="#db2777", lw=1.5, alpha=0.85))
+        ax.annotate("", xy=retune_centroid, xytext=origin, arrowprops=dict(arrowstyle="->", color="#16a34a", lw=1.5, alpha=0.85))
         ax.scatter([code_centroid[0]], [code_centroid[1]], s=30, c="#f97316", edgecolors="#7c2d12", linewidths=0.7)
-        ax.scatter([retune_centroid[0]], [retune_centroid[1]], s=30, c="#db2777", edgecolors="#831843", linewidths=0.7)
+        ax.scatter([retune_centroid[0]], [retune_centroid[1]], s=30, c="#16a34a", edgecolors="#14532d", linewidths=0.7)
 
         limit_points = np.concatenate([code_xy, retune_xy, origin[None, :]], axis=0)
         expand_limits(ax, limit_points, trim_percentile=trim_percentile)
@@ -461,14 +461,14 @@ def plot_delta_density_layer_average(
     def render(path: Path, zoom_retune: bool):
         fig, ax = plt.subplots(figsize=(8.4, 6.8))
         draw_density_cloud(ax, code_xy, "#f97316", "code_delta", density_bins, trim_percentile, alpha=0.30)
-        draw_density_cloud(ax, retune_xy, "#db2777", "retune_delta", density_bins, trim_percentile, alpha=0.42)
+        draw_density_cloud(ax, retune_xy, "#16a34a", "retune_delta", density_bins, trim_percentile, alpha=0.42)
         origin = draw_origin_marker(ax, zero_xy)
         code_centroid = code_xy.mean(axis=0)
         retune_centroid = retune_xy.mean(axis=0)
         ax.annotate("", xy=code_centroid, xytext=origin, arrowprops=dict(arrowstyle="->", color="#f97316", lw=1.8, alpha=0.88))
-        ax.annotate("", xy=retune_centroid, xytext=origin, arrowprops=dict(arrowstyle="->", color="#db2777", lw=1.8, alpha=0.88))
+        ax.annotate("", xy=retune_centroid, xytext=origin, arrowprops=dict(arrowstyle="->", color="#16a34a", lw=1.8, alpha=0.88))
         ax.scatter([code_centroid[0]], [code_centroid[1]], s=42, c="#f97316", edgecolors="#7c2d12", linewidths=0.8)
-        ax.scatter([retune_centroid[0]], [retune_centroid[1]], s=42, c="#db2777", edgecolors="#831843", linewidths=0.8)
+        ax.scatter([retune_centroid[0]], [retune_centroid[1]], s=42, c="#16a34a", edgecolors="#14532d", linewidths=0.8)
 
         if zoom_retune:
             zoom_points = np.concatenate([retune_xy, origin[None, :]], axis=0)
@@ -607,7 +607,7 @@ def plot_hidden_pairwise_density_layer_average(
 
     pairs = [
         ("Wiki-only vs Code-trained", dumps[1]["label"], code_xy, "#f97316"),
-        ("Wiki-only vs Router-retuned", dumps[2]["label"], retune_xy, "#db2777"),
+        ("Wiki-only vs Router-retuned", dumps[2]["label"], retune_xy, "#16a34a"),
     ]
     fig, axes = plt.subplots(1, 2, figsize=(13.2, 5.8), sharex=True, sharey=True)
     all_points = np.concatenate([wiki_xy, code_xy, retune_xy], axis=0)
@@ -853,14 +853,14 @@ def plot_delta_layer_grid(
             ax.plot(
                 [zero_xy[i, 0], retune_xy[i, 0]],
                 [zero_xy[i, 1], retune_xy[i, 1]],
-                color="#db2777",
+                color="#16a34a",
                 alpha=0.16,
                 lw=0.45,
             )
 
         ax.scatter(zero_xy[:, 0], zero_xy[:, 1], s=5, alpha=0.22, c="#2563eb", label="wiki_origin")
         ax.scatter(code_xy[:, 0], code_xy[:, 1], s=9, alpha=0.46, c="#f97316", label="code_delta")
-        ax.scatter(retune_xy[:, 0], retune_xy[:, 1], s=9, alpha=0.46, c="#db2777", label="retune_delta")
+        ax.scatter(retune_xy[:, 0], retune_xy[:, 1], s=9, alpha=0.46, c="#16a34a", label="retune_delta")
         centroids = np.stack([zero_xy.mean(axis=0), code_xy.mean(axis=0), retune_xy.mean(axis=0)])
         ax.plot(centroids[:, 0], centroids[:, 1], color="#111827", lw=1.2, alpha=0.78)
         ax.scatter(centroids[:, 0], centroids[:, 1], color="#111827", s=18, alpha=0.9)
@@ -912,13 +912,13 @@ def plot_delta_layer_average(
         ax.plot(
             [zero_xy[i, 0], retune_xy[i, 0]],
             [zero_xy[i, 1], retune_xy[i, 1]],
-            color="#db2777",
+            color="#16a34a",
             alpha=0.17,
             lw=0.55,
         )
     ax.scatter(zero_xy[:, 0], zero_xy[:, 1], s=6, alpha=0.24, c="#2563eb", label="wiki_origin")
     ax.scatter(code_xy[:, 0], code_xy[:, 1], s=12, alpha=0.50, c="#f97316", label="code_delta")
-    ax.scatter(retune_xy[:, 0], retune_xy[:, 1], s=12, alpha=0.50, c="#db2777", label="retune_delta")
+    ax.scatter(retune_xy[:, 0], retune_xy[:, 1], s=12, alpha=0.50, c="#16a34a", label="retune_delta")
     centroids = np.stack([zero_xy.mean(axis=0), code_xy.mean(axis=0), retune_xy.mean(axis=0)])
     ax.plot(centroids[:, 0], centroids[:, 1], color="#111827", lw=1.5, alpha=0.80)
     ax.scatter(centroids[:, 0], centroids[:, 1], color="#111827", s=28, alpha=0.94)
