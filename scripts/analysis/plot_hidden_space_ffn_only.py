@@ -718,50 +718,81 @@ def plot_hidden_pairwise_density_layers_by_base(
 
     rng = np.random.default_rng(seed)
     layers = dumps[0]["layers"]
-    n_layers = len(layers)
-    ncols = len(compare_labels)
-    fig, axes = plt.subplots(n_layers, ncols, figsize=(6.5 * ncols, 3.55 * n_layers), squeeze=False)
+    visible_layers = [(idx, int(layer)) for idx, layer in enumerate(layers) if int(layer) != 1]
+    midpoint = math.ceil(len(visible_layers) / 2)
+    layer_groups = [visible_layers[:midpoint], visible_layers[midpoint:]]
+    nrows = max(len(group) for group in layer_groups)
+    ncols = len(compare_labels) * len(layer_groups)
+    fig, axes = plt.subplots(
+        nrows,
+        ncols,
+        figsize=(4.55 * ncols, 3.10 * nrows),
+        squeeze=False,
+    )
 
-    for layer_idx, layer_number in enumerate(layers):
-        idx = common_subsample_indices(dumps, max_points, rng)
-        sampled = [dump["hidden"][layer_idx][idx] for dump in dumps]
-        coords = reduce2(np.concatenate(sampled, axis=0), method, seed + 9300 + int(layer_number))
-        coords_by_stage = split_stage_coords(coords, len(idx))
+    for row_idx in range(nrows):
+        for group_idx, group in enumerate(layer_groups):
+            if row_idx >= len(group):
+                for col_idx in range(len(compare_labels)):
+                    axes[row_idx][group_idx * len(compare_labels) + col_idx].axis("off")
+                continue
 
-        base_xy = coords_by_stage[label_to_idx[base_label]]
-        all_points = np.concatenate(
-            [coords_by_stage[label_to_idx[label]] for label in [base_label, *compare_labels]],
-            axis=0,
-        )
-        limits = percentile_bounds(all_points, trim_percentile, pad_fraction=0.12)
+            layer_idx, layer_number = group[row_idx]
+            idx = common_subsample_indices(dumps, max_points, rng)
+            sampled = [dump["hidden"][layer_idx][idx] for dump in dumps]
+            coords = reduce2(np.concatenate(sampled, axis=0), method, seed + 9300 + int(layer_number))
+            coords_by_stage = split_stage_coords(coords, len(idx))
 
-        for col_idx, other_label in enumerate(compare_labels):
-            ax = axes[layer_idx][col_idx]
-            other_xy = coords_by_stage[label_to_idx[other_label]]
-            draw_pairwise_density_panel(
-                ax,
-                base_xy,
-                other_xy,
-                base_label,
-                other_label,
-                density_bins,
-                trim_percentile,
-                limits=limits,
-                show_legend=(layer_idx == 0),
+            base_xy = coords_by_stage[label_to_idx[base_label]]
+            all_points = np.concatenate(
+                [coords_by_stage[label_to_idx[label]] for label in [base_label, *compare_labels]],
+                axis=0,
             )
-            ax.set_title(
-                f"Layer {int(layer_number)} | {display_stage_name(base_label)} vs {display_stage_name(other_label)}",
-                fontsize=10,
-                weight="bold",
-            )
+            limits = percentile_bounds(all_points, trim_percentile, pad_fraction=0.12)
+
+            for col_idx, other_label in enumerate(compare_labels):
+                ax = axes[row_idx][group_idx * len(compare_labels) + col_idx]
+                other_xy = coords_by_stage[label_to_idx[other_label]]
+                draw_pairwise_density_panel(
+                    ax,
+                    base_xy,
+                    other_xy,
+                    base_label,
+                    other_label,
+                    density_bins,
+                    trim_percentile,
+                    limits=limits,
+                    show_legend=False,
+                )
+                ax.set_title("")
+                if col_idx == 0:
+                    ax.text(
+                        -0.075,
+                        0.5,
+                        f"Layer {layer_number}",
+                        transform=ax.transAxes,
+                        rotation=90,
+                        va="center",
+                        ha="center",
+                        fontsize=10,
+                        weight="bold",
+                    )
+
+    bottom_labels = [
+        f"{display_stage_name(base_label)} vs {display_stage_name(other_label)}"
+        for _group in layer_groups
+        for other_label in compare_labels
+    ]
+    for ax, label in zip(axes[-1], bottom_labels):
+        ax.set_xlabel(label, fontsize=10, weight="bold", labelpad=8)
 
     fig.suptitle(
         f"FFN-only {probe_display_name(probe_task)} Hidden Density by Layer, Pairwise ({method.upper()})",
-        y=0.998,
+        y=0.995,
         fontsize=16,
         weight="bold",
     )
-    fig.tight_layout(rect=(0, 0, 1, 0.985))
+    fig.tight_layout(rect=(0, 0.018, 1, 0.975))
     fig.savefig(out_path, dpi=220)
     plt.close(fig)
 
