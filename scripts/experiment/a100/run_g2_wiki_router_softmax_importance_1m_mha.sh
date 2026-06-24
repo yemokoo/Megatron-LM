@@ -47,6 +47,7 @@ export ROUTER_SOFTMAX_EVAL_ITERS="${ROUTER_SOFTMAX_EVAL_ITERS:-50}"
 export ROUTER_SOFTMAX_MAX_TOKENS="${ROUTER_SOFTMAX_MAX_TOKENS:-1048576}"
 export ROUTER_SOFTMAX_MASK_TOPK="${ROUTER_SOFTMAX_MASK_TOPK:-4}"
 export ROUTER_SOFTMAX_CUMULATIVE_CUTOFF="${ROUTER_SOFTMAX_CUMULATIVE_CUTOFF:-0}"
+export ROUTER_SOFTMAX_MEASUREMENT="${ROUTER_SOFTMAX_MEASUREMENT:-pre_topk_softmax}"
 export LOG_INTERVAL="${LOG_INTERVAL:-5}"
 
 if [ ! -f "$WIKI_WEIGHTS/latest_checkpointed_iteration.txt" ]; then
@@ -60,6 +61,7 @@ echo "[CONFIG] data=$TRAIN_DATASET"
 echo "[CONFIG] out_dir=$OUT_DIR"
 echo "[CONFIG] layers=$ROUTER_SOFTMAX_LAYERS, topk=$ROUTER_SOFTMAX_MASK_TOPK, max_tokens=$ROUTER_SOFTMAX_MAX_TOKENS"
 echo "[CONFIG] cumulative_cutoff=$ROUTER_SOFTMAX_CUMULATIVE_CUTOFF"
+echo "[CONFIG] measurement=$ROUTER_SOFTMAX_MEASUREMENT"
 
 mkdir -p "$OUT_DIR"
 source "$MODEL_CONFIG_SCRIPT"
@@ -92,6 +94,7 @@ torchrun \
     --router-softmax-max-tokens "$ROUTER_SOFTMAX_MAX_TOKENS" \
     --router-softmax-mask-topk "$ROUTER_SOFTMAX_MASK_TOPK" \
     --router-softmax-cumulative-cutoff "$ROUTER_SOFTMAX_CUMULATIVE_CUTOFF" \
+    --router-softmax-measurement "$ROUTER_SOFTMAX_MEASUREMENT" \
     --router-softmax-layers "$ROUTER_SOFTMAX_LAYERS"
 
 echo "[DONE] wrote router softmax importance outputs to $OUT_DIR"

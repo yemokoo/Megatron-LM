@@ -98,6 +98,16 @@ def add_router_softmax_args(parser):
             "Use 1048576 for a 1M-token miniset. 0 means no cap."
         ),
     )
+    group.add_argument(
+        "--router-softmax-measurement",
+        choices=["pre_topk_softmax", "selected_topk_softmax_mass"],
+        default="pre_topk_softmax",
+        help=(
+            "pre_topk_softmax: average dense softmax probability before Top-K. "
+            "selected_topk_softmax_mass: average softmax probability after zeroing "
+            "experts not selected by Top-K."
+        ),
+    )
     return parser
 
 
@@ -208,6 +218,12 @@ def collect_softmax_means(model):
                 flat_hidden = flat_hidden.index_select(0, candidate_indices)
                 logits = _router_logits(router, flat_hidden)
                 probs = torch.softmax(logits.float(), dim=-1)
+                if args.router_softmax_measurement == "selected_topk_softmax_mass":
+                    topk = max(1, min(int(args.moe_router_topk), probs.shape[-1]))
+                    topk_idx = torch.topk(probs, k=topk, dim=-1).indices
+                    selected_mask = torch.zeros_like(probs, dtype=torch.bool)
+                    selected_mask.scatter_(dim=-1, index=topk_idx, value=True)
+                    probs = probs.masked_fill(~selected_mask, 0.0)
                 sums[layer] += probs.double().sum(dim=0)
                 counts[layer] += probs.shape[0]
 
@@ -271,7 +287,7 @@ def write_csv(path: Path, rows: list[dict], fieldnames: list[str]) -> None:
         writer.writerows(rows)
 
 
-def build_topk_freeze_mask(layer_means: dict[int, torch.Tensor], topk: int) -> dict:
+def build_topk_freeze_mask(layer_means: dict[int, torch.Tensor], topk: int, selection_label: str) -> dict:
     num_experts = len(next(iter(layer_means.values())))
     topk = max(1, min(int(topk), num_experts))
     layers = {}
@@ -280,13 +296,17 @@ def build_topk_freeze_mask(layer_means: dict[int, torch.Tensor], topk: int) -> d
         layers[str(layer)] = [expert_idx + 1 for expert_idx in order[:topk]]
     return {
         "expert_index_base": 1,
-        "selection": "topk_by_mean_router_softmax_pre_topk_per_layer",
+        "selection": selection_label,
         "topk": topk,
         "layers": layers,
     }
 
 
-def build_cumulative_cutoff_selection(layer_means: dict[int, torch.Tensor], cutoff: float) -> tuple[dict, list[dict]]:
+def build_cumulative_cutoff_selection(
+    layer_means: dict[int, torch.Tensor],
+    cutoff: float,
+    selection_label: str,
+) -> tuple[dict, list[dict]]:
     cutoff = max(0.0, min(float(cutoff), 1.0))
     layers = {}
     layer_metadata = {}
@@ -295,10 +315,12 @@ def build_cumulative_cutoff_selection(layer_means: dict[int, torch.Tensor], cuto
         order = torch.argsort(values, descending=True).tolist()
         cumulative = 0.0
         selected = []
+        total_mass = float(values.sum())
+        cutoff_target = cutoff * total_mass
         for expert_idx in order:
             cumulative += float(values[expert_idx])
             selected.append(expert_idx)
-            if cumulative >= cutoff:
+            if cumulative >= cutoff_target:
                 break
 
         selected_experts = [expert_idx + 1 for expert_idx in selected]
@@ -307,6 +329,8 @@ def build_cumulative_cutoff_selection(layer_means: dict[int, torch.Tensor], cuto
             "experts": selected_experts,
             "count": len(selected_experts),
             "mass": cumulative,
+            "total_mass": total_mass,
+            "relative_mass": cumulative / total_mass if total_mass > 0 else 0.0,
             "cutoff": cutoff,
         }
         for rank, expert_idx in enumerate(order, start=1):
@@ -320,6 +344,8 @@ def build_cumulative_cutoff_selection(layer_means: dict[int, torch.Tensor], cuto
                     "selected_for_cutoff": int(expert_idx in selected),
                     "selected_count": len(selected_experts),
                     "selected_mass": cumulative,
+                    "total_mass": total_mass,
+                    "relative_selected_mass": cumulative / total_mass if total_mass > 0 else 0.0,
                     "cutoff": cutoff,
                 }
             )
@@ -327,7 +353,7 @@ def build_cumulative_cutoff_selection(layer_means: dict[int, torch.Tensor], cuto
     return (
         {
             "expert_index_base": 1,
-            "selection": "minimum_prefix_by_mean_router_softmax_cumulative_mass_pre_topk_per_layer",
+            "selection": selection_label,
             "cumulative_cutoff": cutoff,
             "layers": layers,
             "layer_metadata": layer_metadata,
@@ -350,6 +376,18 @@ def plot_results(out_dir: Path, layer_means: dict[int, torch.Tensor], avg_rows: 
     highlight_n = max(1, min(int(args.router_softmax_topn_highlight), num_experts))
     cumulative_cutoff = max(0.0, min(float(args.router_softmax_cumulative_cutoff), 1.0))
     uniform = 1.0 / float(num_experts)
+    measurement = str(args.router_softmax_measurement)
+    is_selected_mass = measurement == "selected_topk_softmax_mass"
+    title_measurement = (
+        "selected Top-K softmax mass"
+        if is_selected_mass
+        else "pre-TopK softmax"
+    )
+    y_label = (
+        "Mean selected Top-K router softmax mass"
+        if is_selected_mass
+        else "Mean router softmax probability"
+    )
 
     fig, axes = plt.subplots(2, math.ceil(len(layers) / 2), figsize=(22, 9), sharey=True)
     axes = list(axes.reshape(-1))
@@ -359,19 +397,22 @@ def plot_results(out_dir: Path, layer_means: dict[int, torch.Tensor], avg_rows: 
         if cumulative_cutoff > 0:
             cumulative = 0.0
             selected = []
+            cutoff_target = cumulative_cutoff * float(values.sum())
             for expert_idx in order.tolist():
                 cumulative += float(values[expert_idx])
                 selected.append(expert_idx)
-                if cumulative >= cumulative_cutoff:
+                if cumulative >= cutoff_target:
                     break
             highlight = set(selected)
-            title_suffix = f" | {len(selected)} exp, mass={cumulative:.3f}"
+            relative_mass = cumulative / float(values.sum()) if float(values.sum()) > 0 else 0.0
+            title_suffix = f" | {len(selected)} exp, mass={relative_mass:.3f}"
         else:
             highlight = set(order[:highlight_n].tolist())
             title_suffix = ""
         colors = ["#2563eb" if idx in highlight else "#cbd5e1" for idx in range(num_experts)]
         ax.bar(experts, values, color=colors, edgecolor="#0f172a", linewidth=0.6)
-        ax.axhline(uniform, color="#ef4444", linestyle="--", linewidth=1.2, alpha=0.8)
+        if not is_selected_mass:
+            ax.axhline(uniform, color="#ef4444", linestyle="--", linewidth=1.2, alpha=0.8)
         ax.set_title(f"Layer {layer}{title_suffix}", fontsize=14, fontweight="bold")
         ax.set_xticks(experts)
         ax.set_ylim(0, max(values.max() * 1.18, uniform * 1.35))
@@ -393,9 +434,9 @@ def plot_results(out_dir: Path, layer_means: dict[int, torch.Tensor], avg_rows: 
     for ax in axes[len(layers):]:
         ax.axis("off")
 
-    axes[0].set_ylabel("Mean router softmax probability", fontsize=12)
+    axes[0].set_ylabel(y_label, fontsize=12)
     fig.suptitle(
-        "Wiki Train Miniset Router Softmax Importance by Layer (pre-TopK)",
+        f"Wiki Train Miniset Router Importance by Layer ({title_measurement})",
         fontsize=22,
         fontweight="bold",
         y=0.99,
@@ -412,7 +453,11 @@ def plot_results(out_dir: Path, layer_means: dict[int, torch.Tensor], avg_rows: 
                 ),
             ),
             Patch(facecolor="#cbd5e1", edgecolor="#0f172a", label="Other experts"),
-            Patch(facecolor="#ffffff", edgecolor="#ef4444", label=f"Uniform baseline = {uniform:.3f}"),
+            *(
+                []
+                if is_selected_mass
+                else [Patch(facecolor="#ffffff", edgecolor="#ef4444", label=f"Uniform baseline = {uniform:.3f}")]
+            ),
         ],
         loc="upper center",
         bbox_to_anchor=(0.5, 0.94),
@@ -430,10 +475,11 @@ def plot_results(out_dir: Path, layer_means: dict[int, torch.Tensor], avg_rows: 
     if cumulative_cutoff > 0:
         cumulative = 0.0
         top_experts = set()
+        cutoff_target = cumulative_cutoff * sum(float(row["mean_softmax"]) for row in avg_order)
         for row in avg_order:
             cumulative += float(row["mean_softmax"])
             top_experts.add(row["expert"])
-            if cumulative >= cumulative_cutoff:
+            if cumulative >= cutoff_target:
                 break
         avg_label = f"Cumulative {cumulative_cutoff:.0%} layer-average experts ({len(top_experts)} exp)"
     else:
@@ -443,10 +489,11 @@ def plot_results(out_dir: Path, layer_means: dict[int, torch.Tensor], avg_rows: 
 
     fig, ax = plt.subplots(figsize=(12, 7))
     bars = ax.bar(experts, avg_values, color=colors, edgecolor="#111827", linewidth=0.8)
-    ax.axhline(uniform, color="#ef4444", linestyle="--", linewidth=1.4, label=f"Uniform baseline = {uniform:.3f}")
-    ax.set_title("Layer-Average Wiki Router Softmax Importance (pre-TopK)", fontsize=20, fontweight="bold")
+    if not is_selected_mass:
+        ax.axhline(uniform, color="#ef4444", linestyle="--", linewidth=1.4, label=f"Uniform baseline = {uniform:.3f}")
+    ax.set_title(f"Layer-Average Wiki Router Importance ({title_measurement})", fontsize=20, fontweight="bold")
     ax.set_xlabel("Expert", fontsize=13)
-    ax.set_ylabel("Mean router softmax probability", fontsize=13)
+    ax.set_ylabel(y_label, fontsize=13)
     ax.set_xticks(experts)
     ax.set_ylim(0, max(max(avg_values) * 1.22, uniform * 1.35))
     ax.grid(axis="y", alpha=0.25)
@@ -466,7 +513,11 @@ def plot_results(out_dir: Path, layer_means: dict[int, torch.Tensor], avg_rows: 
         handles=[
             Patch(facecolor="#16a34a", edgecolor="#111827", label=avg_label),
             Patch(facecolor="#d1d5db", edgecolor="#111827", label="Other experts"),
-            Patch(facecolor="#ffffff", edgecolor="#ef4444", label=f"Uniform baseline = {uniform:.3f}"),
+            *(
+                []
+                if is_selected_mass
+                else [Patch(facecolor="#ffffff", edgecolor="#ef4444", label=f"Uniform baseline = {uniform:.3f}")]
+            ),
         ],
         loc="upper right",
         frameon=False,
@@ -514,13 +565,23 @@ def main() -> None:
             "sequence_length": int(args.seq_length),
             "layers": sorted(layer_means),
             "cumulative_cutoff": float(args.router_softmax_cumulative_cutoff),
-            "measurement": "mean per-token router softmax probability before Top-K selection",
+            "measurement": str(args.router_softmax_measurement),
+            "measurement_description": (
+                "mean per-token router softmax probability after zeroing experts not selected by Top-K"
+                if args.router_softmax_measurement == "selected_topk_softmax_mass"
+                else "mean per-token router softmax probability before Top-K selection"
+            ),
         }
         (out_dir / "router_softmax_metadata.json").write_text(
             json.dumps(metadata, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
-        mask = build_topk_freeze_mask(layer_means, args.router_softmax_mask_topk)
+        topk_selection_label = (
+            "topk_by_mean_selected_router_softmax_mass_per_layer"
+            if args.router_softmax_measurement == "selected_topk_softmax_mass"
+            else "topk_by_mean_router_softmax_pre_topk_per_layer"
+        )
+        mask = build_topk_freeze_mask(layer_means, args.router_softmax_mask_topk, topk_selection_label)
         mask["load"] = args.load
         mask["checkpoint_iteration"] = int(iteration)
         mask["max_tokens"] = int(args.router_softmax_max_tokens)
@@ -533,6 +594,11 @@ def main() -> None:
             cutoff_mask, cutoff_rows = build_cumulative_cutoff_selection(
                 layer_means,
                 args.router_softmax_cumulative_cutoff,
+                (
+                    "minimum_prefix_by_mean_selected_router_softmax_mass_per_layer"
+                    if args.router_softmax_measurement == "selected_topk_softmax_mass"
+                    else "minimum_prefix_by_mean_router_softmax_cumulative_mass_pre_topk_per_layer"
+                ),
             )
             cutoff_mask["load"] = args.load
             cutoff_mask["checkpoint_iteration"] = int(iteration)
@@ -554,6 +620,8 @@ def main() -> None:
                     "selected_for_cutoff",
                     "selected_count",
                     "selected_mass",
+                    "total_mass",
+                    "relative_selected_mass",
                     "cutoff",
                 ],
             )
