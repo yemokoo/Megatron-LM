@@ -335,7 +335,7 @@ def draw_pairwise_density_panel(
         display_stage_name(base_label),
         density_bins,
         trim_percentile,
-        alpha=0.24,
+        alpha=0.32,
     )
     draw_density_cloud(
         ax,
@@ -344,7 +344,7 @@ def draw_pairwise_density_panel(
         display_stage_name(other_label),
         density_bins,
         trim_percentile,
-        alpha=0.34,
+        alpha=0.32,
     )
 
     base_centroid = base_xy.mean(axis=0)
