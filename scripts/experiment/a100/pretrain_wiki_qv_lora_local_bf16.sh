@@ -74,6 +74,7 @@ export LR_DECAY_ITERS="${LR_DECAY_ITERS:-}"
 export LR_WSD_DECAY_ITERS="${LR_WSD_DECAY_ITERS:-}"
 export MODEL_CONFIG_SCRIPT="${MODEL_CONFIG_SCRIPT:-configs/model/flame-qv-lora-experts.sh}"
 export DATASET_SPLIT="${DATASET_SPLIT:-100,0,0}"
+export SEED="${SEED:-1234}"
 
 export TRAIN_DATASET="${TRAIN_DATASET:-$LOCAL_DATASET/wikipedia-full/tokenized/EleutherAI/pythia-12b-step1800-train-exact}"
 export TRAIN_WEIGHTS="${TRAIN_WEIGHTS:-$LOCAL_WEIGHTS/wiki-qv-lora-pretrain-local/$RUN_ID}"
@@ -191,6 +192,7 @@ metadata = {
     'attn_lora_rank': int(os.environ['ATTN_LORA_RANK']),
     'attn_lora_topk': int(os.environ['ATTN_LORA_TOPK']),
     'attn_lora_alpha': float(os.environ['ATTN_LORA_ALPHA']),
+    'seed': int(os.environ['SEED']),
     'precision': os.environ['PRECISION'],
     'train_backbone_and_lora_together': True,
 }
@@ -219,6 +221,7 @@ TRAIN_ARGS=(
     --lr-warmup-fraction "$LR_WARMUP_FRACTION"
     --lr-wsd-decay-iters "$LR_WSD_DECAY_ITERS"
     --train-iters "$TRAIN_ITERS"
+    --seed "$SEED"
 )
 
 DATA_ARGS=(

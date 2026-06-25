@@ -7,7 +7,7 @@ cd "$PROJECT_ROOT"
 
 usage() {
     cat >&2 <<'EOF'
-usage: run_g2_router_finetune_miniset_repeats_mha.sh <ffn-only|ffn-attn|all> <0p01pctx2000|0p1pctx200|1pctx20|5pctx4|10pctx2|all>
+usage: run_g2_router_finetune_miniset_repeats_mha.sh <ffn-only|ffn-attn|attn-only|all> <0p01pctx2000|0p1pctx200|1pctx20|5pctx4|10pctx2|all>
 
 Runs router-only retuning from the code-trained checkpoint, using fixed small
 wiki+code router-finetune subsets:
@@ -30,7 +30,7 @@ fi
 TARGET="$1"
 SPEC_TARGET="$2"
 case "$TARGET" in
-    ffn-only|ffn-attn|all) ;;
+    ffn-only|ffn-attn|attn-only|all) ;;
     *) usage; exit 1 ;;
 esac
 case "$SPEC_TARGET" in
@@ -73,6 +73,7 @@ export MOE_ROUTER_DTYPE="${MOE_ROUTER_DTYPE:-fp32}"
 export FFN_ONLY_SOURCE_RUN_ID="${FFN_ONLY_SOURCE_RUN_ID:-g2matched-top4-e8to16-ffn352-wiki-to-code-ffn-moe-attn-freeze-mha-a100-bf16-mb96-1800}"
 export FFN_ONLY_SOURCE_STAGE_DIR="${FFN_ONLY_SOURCE_STAGE_DIR:-g2matched-ffn-moe-attn-freeze-bf16}"
 export FFN_ATTN_SOURCE_WEIGHTS="${FFN_ATTN_SOURCE_WEIGHTS:-$G2_ROOT/code/phase1/g2-exp2-top4-e8to16-ffn352-r256-wiki-to-code-new-experts-all-router-mha-a100-bf16-mb72-1800}"
+export ATTN_ONLY_SOURCE_WEIGHTS="${ATTN_ONLY_SOURCE_WEIGHTS:-$G2_ROOT/code/phase1/g2-attn-only-dense5632-top4-e8to16-r256-wiki-to-code-qkvo-mha-a100-bf16-mb72-1800}"
 
 mkdir -p "$PHASE3_REPEAT_ROOT"
 
@@ -221,6 +222,17 @@ run_one() {
             micro_batch_size="${FFN_ATTN_MICRO_BATCH_SIZE:-72}"
             port="${MASTER_PORT_FFN_ATTN:-29852}"
             ;;
+        attn-only)
+            variant_label="attn_only"
+            source_weights="$ATTN_ONLY_SOURCE_WEIGHTS"
+            run_id="g2-attn-only-dense5632-phase3-router-only-retune-wikicode-miniset-${spec_label}-from-code-mb72-720"
+            exp_name="G2 attention-only expert router finetune ${spec_label} repeated"
+            retune_script="$SCRIPT_DIR/phase3_router_only_retune_shared_router_hybrid_mixed_local_bf16.sh"
+            model_config="configs/model/flame-attn-only-shared-router-qkvo-experts.sh"
+            attn_rank=256
+            micro_batch_size="${ATTN_ONLY_MICRO_BATCH_SIZE:-72}"
+            port="${MASTER_PORT_ATTN_ONLY:-29853}"
+            ;;
         *)
             echo "[ERROR] bad variant: $variant" >&2
             exit 1
@@ -296,6 +308,17 @@ run_one() {
             ATTN_FULL_RANK_LORA_TARGETS=qkvo \
             ATTN_FULL_RANK_LORA_ACTIVE_TARGETS= \
             bash "$SCRIPT_DIR/run_guarded_training.sh" bash "$retune_script"
+    elif [ "$variant" = "attn-only" ]; then
+        env "${env_args[@]}" \
+            MODEL_CONFIG_SCRIPT="$model_config" \
+            FFN_HIDDEN_SIZE="${ATTN_ONLY_FFN_HIDDEN_SIZE:-5632}" \
+            ATTN_LORA_RANK="${ATTN_LORA_RANK:-256}" \
+            ATTN_LORA_ALPHA="${ATTN_LORA_ALPHA:-256}" \
+            ATTN_FULL_RANK_LORA_RANK="${ATTN_FULL_RANK_LORA_RANK:-256}" \
+            ATTN_FULL_RANK_LORA_ALPHA="${ATTN_FULL_RANK_LORA_ALPHA:-256}" \
+            ATTN_FULL_RANK_LORA_TARGETS="${ATTN_FULL_RANK_LORA_TARGETS:-qkvo}" \
+            RESUME_FROM_NUM_EXPERTS="$SOURCE_NUM_EXPERTS" \
+            bash "$SCRIPT_DIR/run_guarded_training.sh" bash "$retune_script"
     else
         env "${env_args[@]}" \
             ATTN_LORA_RANK="${ATTN_LORA_RANK:-256}" \
@@ -308,6 +331,8 @@ run_one() {
 variants=()
 specs=()
 if [ "$TARGET" = "all" ]; then
+    # Preserve historical behavior. Run `attn-only` explicitly after its
+    # code-trained checkpoint has been produced.
     variants=(ffn-only ffn-attn)
 else
     variants=("$TARGET")

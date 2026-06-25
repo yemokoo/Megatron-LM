@@ -124,6 +124,7 @@ export LR_DECAY_ITERS="${LR_DECAY_ITERS:-$TRAIN_ITERS}"
 export LR_WSD_DECAY_ITERS="${LR_WSD_DECAY_ITERS:-$((TRAIN_ITERS / 10))}"
 export MODEL_CONFIG_SCRIPT="${MODEL_CONFIG_SCRIPT:-configs/model/flame-qv-lora-experts.sh}"
 export DATASET_SPLIT="${DATASET_SPLIT:-100,0,0}"
+export SEED="${SEED:-1234}"
 
 export TRAIN_DATASET="${TRAIN_DATASET:-$LOCAL_DATASET/python-code-full/tokenized/EleutherAI/pythia-12b-step1800-train-exact}"
 export STAGE1_WEIGHTS_DIR="${STAGE1_WEIGHTS_DIR:-}"
@@ -250,6 +251,7 @@ metadata = {
     'attn_lora_topk': int(os.environ['ATTN_LORA_TOPK']),
     'attn_lora_alpha': float(os.environ['ATTN_LORA_ALPHA']),
     'attn_lora_train_new_experts_and_router_only': bool(int(os.environ['ATTN_LORA_TRAIN_NEW_EXPERTS_AND_ROUTER_ONLY'])),
+    'seed': int(os.environ['SEED']),
     'old_model_kl_coeff': float(os.environ['OLD_MODEL_KL_COEFF']),
     'old_model_kl_temperature': float(os.environ['OLD_MODEL_KL_TEMPERATURE']),
     'probe_step_offset': int(os.environ['PROBE_STEP_OFFSET']),
@@ -285,6 +287,7 @@ TRAIN_ARGS=(
     --lr-warmup-fraction "$LR_WARMUP_FRACTION"
     --lr-wsd-decay-iters "$LR_WSD_DECAY_ITERS"
     --train-iters "$TRAIN_ITERS"
+    --seed "$SEED"
 )
 
 DATA_ARGS=(

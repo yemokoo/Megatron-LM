@@ -258,6 +258,82 @@ bash scripts/experiment/a100/run_g2_shared_router_partial_old_top4_freeze_code_m
   - `moe_aux_loss_coeff 0.0`
   - `moe_z_loss_coeff 0.001`
   - `shared_router_hybrid_train_router_only False`
+
+## Additional Model Variant: Attention-Only Experts
+
+### Concept
+
+- Add a fourth model structure to compare against the existing model variants.
+- FFN is dense, not MoE/expertized.
+- Attention keeps routed LoRA experts.
+- The FFN dense hidden size should match the expanded 16-expert FFN capacity, not the 8-expert source capacity:
+  - previous expert hidden size: `352`
+  - expanded expert count: `16`
+  - dense FFN hidden size: `16 * 352 = 5632`
+- Current implementation uses the same shared-router QKVO full-rank attention-expert path as the FFN+attention experiments:
+  - router/expert layers: `2-9` via `MOE_LAYER_FREQ=[0,1,1,1,1,1,1,1,1]`
+  - wiki: QKVO attention experts `8`
+  - code: expand QKVO attention experts `8 -> 16`
+  - router top-k: `4`
+  - full-rank attention LoRA rank: `256`
+  - seed: `1234`
+- This is the intended ablation for isolating attention-expert impact:
+  - FFN remains dense in every layer.
+  - The shared router controls only attention Q/K/V/O full-rank LoRA experts.
+  - No FFN MoE experts are instantiated in the attention-only transformer layer.
+
+### Implemented Wrapper Paths
+
+- Main chain:
+  - `scripts/experiment/a100/run_g2_attention_only_expert_mha.sh`
+- Attention-only QKVO model config:
+  - `configs/model/flame-attn-only-shared-router-qkvo-experts.sh`
+- Attention-only Megatron layer/spec:
+  - `Megatron-LM/megatron/core/transformer/shared_router_hybrid.py`
+  - `Megatron-LM/megatron/core/models/gpt/shared_router_hybrid_layer_specs.py`
+- Router-only retune reuses the existing shared-router hybrid retune path:
+  - `scripts/experiment/a100/phase3_router_only_retune_shared_router_hybrid_mixed_local_bf16.sh`
+
+### Phase Semantics
+
+- Wiki phase:
+  - dense FFN hidden size: `5632`
+  - QKVO full-rank attention experts: `8`
+  - train dense trunk and QKVO attention experts together.
+- Code phase:
+  - expands QKVO attention experts from `8` to `16`.
+  - trainable:
+    - newly added QKVO attention experts
+    - newly added shared-router rows
+  - frozen:
+    - dense FFN
+    - dense attention trunk
+    - embeddings/output weights
+    - copied old QKVO attention experts/router rows
+- Phase3 router finetune:
+  - trainable:
+    - shared-router weights only
+  - frozen:
+    - QKVO attention experts
+    - dense FFN
+    - dense attention trunk
+    - embeddings/output weights
+
+### Run Example
+
+```bash
+WANDB_MODE=offline \
+bash scripts/experiment/a100/run_g2_attention_only_expert_mha.sh all
+```
+
+### Optional Miniset Router-Finetune Repeats
+
+- After the attention-only code checkpoint exists, miniset repeats can be run explicitly:
+
+```bash
+WANDB_MODE=offline \
+bash scripts/experiment/a100/run_g2_router_finetune_miniset_repeats_mha.sh attn-only all
+```
 - Confirm partial-freeze audit exists after expansion:
   - `partial_freeze_audit/shared_router_hybrid_partial_freeze.json`
 - Confirm selected old router rows and selected old FFN/attention experts are frozen per layer.
