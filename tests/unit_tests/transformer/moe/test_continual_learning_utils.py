@@ -18,6 +18,7 @@ from megatron.core.transformer.moe.experts import GroupedMLP
 from megatron.core.transformer.moe.router import TopKRouter
 from megatron.core.transformer.shared_router_hybrid import (
     SharedFullRankLoraExperts,
+    SharedRouterAttentionOnlyTransformerLayer,
     SharedRouterHybridTransformerLayer,
     TwoRouterHybridTransformerLayer,
     topk_with_all_new_experts_routing,
@@ -118,6 +119,16 @@ class RecordingMlp(torch.nn.Module):
 
     def forward(self, hidden_states, routing_context=None):
         self.routing_context = routing_context
+        return torch.zeros_like(hidden_states)
+
+
+class RecordingDenseMlp(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.input = None
+
+    def forward(self, hidden_states):
+        self.input = hidden_states
         return torch.zeros_like(hidden_states)
 
 
@@ -261,6 +272,37 @@ def _build_two_router_forward_harness():
 
     layer._compute_routing = MethodType(record_compute_routing, layer)
     return layer, attn_input, ffn_input, records
+
+
+def _build_attention_only_forward_harness():
+    config = _two_router_test_config()
+    layer = SharedRouterAttentionOnlyTransformerLayer.__new__(SharedRouterAttentionOnlyTransformerLayer)
+    torch.nn.Module.__init__(layer)
+    layer.config = config
+    layer.layer_number = 2
+    layer.hidden_dropout = 0.0
+    layer.is_moe_layer = True
+    layer.training = False
+    layer.bias_dropout_add_exec_handler = torch.enable_grad
+    layer.shared_expert_router = TopKRouter(config)
+    _force_cpu_router_forward(layer.shared_expert_router)
+
+    attn_input = torch.tensor([[9.0, 8.0, 7.0, 6.0, 0.0, 0.0, 0.0, 0.0]])
+    ffn_input = torch.tensor([[0.0, 0.0, 0.0, 0.0, 9.0, 8.0, 7.0, 6.0]])
+    layer.input_layernorm = ConstantOutput(attn_input)
+    layer.pre_cross_attn_layernorm = torch.nn.Identity()
+    layer.pre_mlp_layernorm = ConstantOutput(ffn_input)
+    layer.self_attention = RecordingAttention()
+    layer.cross_attention = ZeroCrossAttention()
+    layer.mlp = RecordingDenseMlp()
+    layer.self_attn_bda = _bda_no_dropout
+    layer.cross_attn_bda = _bda_no_dropout
+    layer.mlp_bda = _bda_no_dropout
+
+    with torch.no_grad():
+        layer.shared_expert_router.weight.copy_(torch.eye(8))
+
+    return layer, attn_input, ffn_input
 
 
 def _backward_router_weight_sum(model):
@@ -484,6 +526,21 @@ def test_partial_old_expert_freeze_applies_different_masks_per_layer():
 
     assert not model.embedding.weight.requires_grad
     assert model.embedding.weight.grad is None
+
+
+def test_attention_only_layer_routes_attention_but_uses_dense_ffn():
+    layer, attn_input, ffn_input = _build_attention_only_forward_harness()
+
+    SharedRouterAttentionOnlyTransformerLayer.forward(layer, torch.zeros_like(attn_input))
+
+    routing_context = layer.self_attention.routing_context
+    assert routing_context is not None
+    assert routing_context.routing_map.shape[-1] == 8
+    assert torch.equal(
+        routing_context.routing_map[0].nonzero(as_tuple=False).flatten(),
+        torch.tensor([0, 1, 2, 3]),
+    )
+    assert torch.equal(layer.mlp.input, ffn_input)
 
 
 def test_allow_existing_router_grads_temporarily_bypasses_existing_row_mask():

@@ -1209,6 +1209,99 @@ class SharedRouterHybridTransformerLayer(MegatronModule, BaseTransformerLayer):
         return super(MegatronModule, self).__call__(*args, **kwargs)
 
 
+class SharedRouterAttentionOnlyTransformerLayer(SharedRouterHybridTransformerLayer):
+    """Transformer layer with shared-router QKVO attention experts and dense FFN.
+
+    This keeps the shared-router attention path identical to
+    SharedRouterHybridTransformerLayer, but removes the FFN MoE branch so the
+    experiment isolates how much the attention experts contribute.
+    """
+
+    def __init__(
+        self,
+        config: TransformerConfig,
+        submodules: SharedRouterHybridLayerSubmodules,
+        layer_number: int = 1,
+        hidden_dropout: float = None,
+    ):
+        super().__init__(config, submodules, layer_number, hidden_dropout)
+        self.mlp = build_module(submodules.dense_mlp, config=self.config)
+        if hasattr(self.mlp, 'set_layer_number'):
+            self.mlp.set_layer_number(self.layer_number)
+
+    def forward(
+        self,
+        hidden_states,
+        attention_mask=None,
+        context=None,
+        context_mask=None,
+        rotary_pos_emb=None,
+        rotary_pos_cos=None,
+        rotary_pos_sin=None,
+        attention_bias=None,
+        inference_params=None,
+        packed_seq_params=None,
+        sequence_len_offset=None,
+    ):
+        residual = hidden_states
+        input_layernorm_output = self.input_layernorm(hidden_states)
+        routing_context = (
+            self._compute_shared_routing(input_layernorm_output) if self.is_moe_layer else None
+        )
+
+        attention_output_with_bias = self.self_attention(
+            input_layernorm_output,
+            attention_mask=attention_mask,
+            inference_params=inference_params,
+            rotary_pos_emb=rotary_pos_emb,
+            rotary_pos_cos=rotary_pos_cos,
+            rotary_pos_sin=rotary_pos_sin,
+            attention_bias=attention_bias,
+            packed_seq_params=packed_seq_params,
+            sequence_len_offset=sequence_len_offset,
+            routing_context=routing_context,
+        )
+
+        with self.bias_dropout_add_exec_handler():
+            hidden_states = self.self_attn_bda(self.training, self.config.bias_dropout_fusion)(
+                attention_output_with_bias, residual, self.hidden_dropout
+            )
+
+        residual = hidden_states
+        pre_cross_attn_layernorm_output = self.pre_cross_attn_layernorm(hidden_states)
+        attention_output_with_bias = self.cross_attention(
+            pre_cross_attn_layernorm_output,
+            attention_mask=context_mask,
+            key_value_states=context,
+            inference_params=inference_params,
+        )
+
+        if isinstance(attention_output_with_bias, dict) and "context" in attention_output_with_bias:
+            context = attention_output_with_bias["context"]
+
+        with self.bias_dropout_add_exec_handler():
+            hidden_states = self.cross_attn_bda(self.training, self.config.bias_dropout_fusion)(
+                attention_output_with_bias, residual, self.hidden_dropout
+            )
+
+        residual = hidden_states
+        pre_mlp_layernorm_output = self.pre_mlp_layernorm(hidden_states)
+        mlp_output_with_bias = self.mlp(pre_mlp_layernorm_output)
+
+        with self.bias_dropout_add_exec_handler():
+            hidden_states = self.mlp_bda(self.training, self.config.bias_dropout_fusion)(
+                mlp_output_with_bias, residual, self.hidden_dropout
+            )
+
+        output = make_viewless_tensor(
+            inp=hidden_states, requires_grad=hidden_states.requires_grad, keep_graph=True
+        )
+
+        if self.config.external_cuda_graph and self.training:
+            return output
+        return output, context
+
+
 class TwoRouterHybridTransformerLayer(SharedRouterHybridTransformerLayer):
     """Hybrid expert layer with independent attention and FFN routers.
 
