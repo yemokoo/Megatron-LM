@@ -7,15 +7,18 @@ cd "$PROJECT_ROOT"
 
 usage() {
     cat >&2 <<'EOF'
-usage: run_g2_router_finetune_miniset_repeats_mha.sh <ffn-only|ffn-attn|all> <1pctx20|5pctx4|all>
+usage: run_g2_router_finetune_miniset_repeats_mha.sh <ffn-only|ffn-attn|all> <0p01pctx2000|0p1pctx200|1pctx20|5pctx4|10pctx2|all>
 
 Runs router-only retuning from the code-trained checkpoint, using fixed small
 wiki+code router-finetune subsets:
   1pctx20: 1% fixed subset repeated for 20 epochs, 720 retune steps total
   5pctx4 : 5% fixed subset repeated for 4 epochs, 720 retune steps total
+  10pctx2: 10% fixed subset repeated for 2 epochs, 720 retune steps total
+  0p1pctx200: 0.1% fixed subset repeated for 200 epochs, 720 retune steps total
+  0p01pctx2000: 0.01% fixed subset repeated for 2000 epochs, 720 retune steps total
 
-The two subset conditions are independent: each copies the code-trained source
-checkpoint before retuning, so 5pctx4 does not continue from 1pctx20.
+The subset conditions are independent: each copies the code-trained source
+checkpoint before retuning, so one miniset condition never continues from another.
 EOF
 }
 
@@ -31,7 +34,7 @@ case "$TARGET" in
     *) usage; exit 1 ;;
 esac
 case "$SPEC_TARGET" in
-    1pctx20|5pctx4|all) ;;
+    0p01pctx2000|0p1pctx200|1pctx20|5pctx4|10pctx2|all) ;;
     *) usage; exit 1 ;;
 esac
 
@@ -149,16 +152,22 @@ ensure_source_copy() {
 
 spec_fraction() {
     case "$1" in
+        0p01pctx2000) echo "0.0001" ;;
+        0p1pctx200) echo "0.001" ;;
         1pctx20) echo "0.01" ;;
         5pctx4) echo "0.05" ;;
+        10pctx2) echo "0.10" ;;
         *) echo "[ERROR] bad spec: $1" >&2; exit 1 ;;
     esac
 }
 
 spec_epochs() {
     case "$1" in
+        0p01pctx2000) echo "2000" ;;
+        0p1pctx200) echo "200" ;;
         1pctx20) echo "20" ;;
         5pctx4) echo "4" ;;
+        10pctx2) echo "2" ;;
         *) echo "[ERROR] bad spec: $1" >&2; exit 1 ;;
     esac
 }
@@ -304,7 +313,7 @@ else
     variants=("$TARGET")
 fi
 if [ "$SPEC_TARGET" = "all" ]; then
-    specs=(1pctx20 5pctx4)
+    specs=(0p01pctx2000 0p1pctx200 1pctx20 5pctx4 10pctx2)
 else
     specs=("$SPEC_TARGET")
 fi

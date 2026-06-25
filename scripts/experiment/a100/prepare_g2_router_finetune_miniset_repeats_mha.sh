@@ -17,8 +17,8 @@ export CACHE_ROOT_BASE="${CACHE_ROOT_BASE:-$OUTPUT_ROOT_BASE/cache}"
 export OUTPUT_PREFIX="${OUTPUT_PREFIX:-train_text_document}"
 export FORCE_REBUILD="${FORCE_REBUILD:-0}"
 
-# label:fraction:repeat_epochs. 1pct x20 and 5pct x4 both equal 20pct total budget.
-export MINISET_SPECS="${MINISET_SPECS:-1pctx20:0.01:20 5pctx4:0.05:4}"
+# label:fraction:repeat_epochs. All defaults equal 20pct total budget.
+export MINISET_SPECS="${MINISET_SPECS:-0p01pctx2000:0.0001:2000 0p1pctx200:0.001:200 1pctx20:0.01:20 5pctx4:0.05:4 10pctx2:0.10:2}"
 export FULL_100PCT_RETUNE_ITERS="${FULL_100PCT_RETUNE_ITERS:-3600}"
 export TARGET_TOTAL_FRACTION="${TARGET_TOTAL_FRACTION:-0.20}"
 export TARGET_RETUNE_ITERS="${TARGET_RETUNE_ITERS:-720}"

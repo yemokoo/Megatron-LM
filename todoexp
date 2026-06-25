@@ -1,6 +1,6 @@
 # TODO Experiments
 
-Last updated: 2026-06-23
+Last updated: 2026-06-25
 
 ## Global Seed Policy
 
@@ -19,11 +19,14 @@ Last updated: 2026-06-23
 - Purpose: verify whether very small fixed router-finetune datasets can recover performance if reused for more epochs.
 - Motivation: previous data-budget run showed wiki/code router finetune performance nearly saturates by around 20 percent of data.
 - Planned variants:
+  - 0.01 percent miniset x 2000 epochs
+  - 0.1 percent miniset x 200 epochs
   - 1 percent miniset x 20 epochs
   - 5 percent miniset x 4 epochs
-  - 10 percent miniset x 2 epochs later if needed
+  - 10 percent miniset x 2 epochs
 - Dataset should be fixed after random sampling; do not resample every run.
-- Current implementation focuses on 1 percent x20 and 5 percent x4 because both match the previously useful 20 percent total router-finetune budget.
+- Current implementation supports 0.01 percent x2000, 0.1 percent x200, 1 percent x20, 5 percent x4, and 10 percent x2.
+- All conditions match the previously useful 20 percent total router-finetune budget.
 - Both conditions restart from the same code-trained checkpoint. The 5 percent run does not continue from the 1 percent run.
 - Target model variants:
   - FFN expert only baseline.
@@ -65,7 +68,7 @@ Last updated: 2026-06-23
 
 ### Run Order
 
-1. Materialize fixed 1 percent and 5 percent datasets once.
+1. Materialize fixed datasets once.
 
 ```bash
 WANDB_MODE=disabled \
