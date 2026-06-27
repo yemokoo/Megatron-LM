@@ -10,15 +10,17 @@ run_variant() {
     local label="$2"
     local ffn_hidden="$3"
     local port_base="$4"
+    local micro_batch_size="$5"
 
     echo "================================================================================"
-    echo "[VARIANT START] $label | ffn_hidden=$ffn_hidden | $(date)"
+    echo "[VARIANT START] $label | ffn_hidden=$ffn_hidden | mb=$micro_batch_size | $(date)"
     echo "================================================================================"
 
     env \
         DENSE_VARIANT_TAG="$tag" \
         DENSE_VARIANT_LABEL="$label" \
         FFN_HIDDEN_SIZE="$ffn_hidden" \
+        MICRO_BATCH_SIZE="$micro_batch_size" \
         WIKI_MASTER_PORT="$((port_base + 1))" \
         CODE_MASTER_PORT="$((port_base + 2))" \
         CONV_MASTER_PORT="$((port_base + 3))" \
@@ -42,16 +44,18 @@ export TERTIARY_PROBE_EVAL_INTERVAL="${TERTIARY_PROBE_EVAL_INTERVAL:-50}"
 export OLD_MODEL_KL_COEFF="${OLD_MODEL_KL_COEFF:-1.0}"
 export OLD_MODEL_KL_TEMPERATURE="${OLD_MODEL_KL_TEMPERATURE:-1.0}"
 export PAUSE_SECONDS="${PAUSE_SECONDS:-180}"
+export CAPACITY_MICRO_BATCH_SIZE="${CAPACITY_MICRO_BATCH_SIZE:-48}"
+export ACTIVE_MICRO_BATCH_SIZE="${ACTIVE_MICRO_BATCH_SIZE:-72}"
 
 echo "[CONFIG] G2 dense capacity/active continual baselines"
 echo "[CONFIG] stages per variant: wiki -> code -> conversation"
 echo "[CONFIG] variants:"
-echo "[CONFIG]   capacity-match: ffn_hidden=8448 = 24 experts * 352 total capacity"
-echo "[CONFIG]   active-match:   ffn_hidden=1408 = top4 active experts * 352"
-echo "[CONFIG] mb=$MICRO_BATCH_SIZE gbs=$GLOBAL_BATCH_SIZE seed=$SEED save_interval=$SAVE_INTERVAL"
+echo "[CONFIG]   capacity-match: ffn_hidden=8448 = 24 experts * 352 total capacity, mb=$CAPACITY_MICRO_BATCH_SIZE"
+echo "[CONFIG]   active-match:   ffn_hidden=1408 = top4 active experts * 352, mb=$ACTIVE_MICRO_BATCH_SIZE"
+echo "[CONFIG] gbs=$GLOBAL_BATCH_SIZE seed=$SEED save_interval=$SAVE_INTERVAL"
 echo "[CONFIG] wandb_mode=$WANDB_MODE; code/conversation KD coeff=$OLD_MODEL_KL_COEFF"
 
-run_variant "dense24_capacity" "dense24-capacity ffn8448" 8448 "${CAPACITY_MASTER_PORT_BASE:-29940}"
-run_variant "dense4_active" "dense4-active ffn1408" 1408 "${ACTIVE_MASTER_PORT_BASE:-29950}"
+run_variant "dense24_capacity" "dense24-capacity ffn8448" 8448 "${CAPACITY_MASTER_PORT_BASE:-29940}" "$CAPACITY_MICRO_BATCH_SIZE"
+run_variant "dense4_active" "dense4-active ffn1408" 1408 "${ACTIVE_MASTER_PORT_BASE:-29950}" "$ACTIVE_MICRO_BATCH_SIZE"
 
 echo "[ALL DONE] dense capacity/active wiki -> code -> conversation chain $(date)"
