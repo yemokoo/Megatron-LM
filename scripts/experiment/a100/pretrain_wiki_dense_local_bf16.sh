@@ -48,6 +48,7 @@ export SSD_WEIGHTS="${SSD_MOUNT}/weights"
 export NUM_LAYERS="${NUM_LAYERS:-9}"
 export HIDDEN_SIZE="${HIDDEN_SIZE:-1024}"
 export FFN_HIDDEN_SIZE="${FFN_HIDDEN_SIZE:-5472}"
+export SEED="${SEED:-1234}"
 export MICRO_BATCH_SIZE="${MICRO_BATCH_SIZE:-8}"
 export GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-1024}"
 export PIPELINE_MODEL_PARALLEL_SIZE=1
@@ -86,6 +87,11 @@ export SECONDARY_PROBE_NAME="${SECONDARY_PROBE_NAME:-secondary_probe}"
 export SECONDARY_PROBE_EVAL_ITERS="${SECONDARY_PROBE_EVAL_ITERS:-25}"
 export SECONDARY_PROBE_EVAL_INTERVAL="${SECONDARY_PROBE_EVAL_INTERVAL:-100}"
 export SECONDARY_PROBE_STEP_OFFSET="${SECONDARY_PROBE_STEP_OFFSET:-0}"
+export TERTIARY_PROBE_DATASET="${TERTIARY_PROBE_DATASET:-}"
+export TERTIARY_PROBE_NAME="${TERTIARY_PROBE_NAME:-tertiary_probe}"
+export TERTIARY_PROBE_EVAL_ITERS="${TERTIARY_PROBE_EVAL_ITERS:-25}"
+export TERTIARY_PROBE_EVAL_INTERVAL="${TERTIARY_PROBE_EVAL_INTERVAL:-100}"
+export TERTIARY_PROBE_STEP_OFFSET="${TERTIARY_PROBE_STEP_OFFSET:-0}"
 export WANDB_STEP_OFFSET="${WANDB_STEP_OFFSET:-0}"
 export WANDB_PROJECT="${WANDB_PROJECT:-}"
 export WANDB_EXP_NAME="${WANDB_EXP_NAME:-$RUN_ID}"
@@ -180,6 +186,7 @@ metadata = {
     'num_layers': int(os.environ['NUM_LAYERS']),
     'hidden_size': int(os.environ['HIDDEN_SIZE']),
     'ffn_hidden_size': int(os.environ['FFN_HIDDEN_SIZE']),
+    'seed': int(os.environ['SEED']),
     'precision': os.environ['PRECISION'],
 }
 with open(os.environ['RUN_METADATA'], 'w', encoding='utf-8') as f:
@@ -207,6 +214,7 @@ TRAIN_ARGS=(
     --lr-warmup-fraction "$LR_WARMUP_FRACTION"
     --lr-wsd-decay-iters "$LR_WSD_DECAY_ITERS"
     --train-iters "$TRAIN_ITERS"
+    --seed "$SEED"
 )
 
 DATA_ARGS=(
@@ -240,6 +248,16 @@ if [ -n "$SECONDARY_PROBE_DATASET" ]; then
         --secondary-probe-eval-interval "$SECONDARY_PROBE_EVAL_INTERVAL"
         --secondary-probe-step-offset "$SECONDARY_PROBE_STEP_OFFSET"
         --secondary-probe-data-path $(build_data_path "$SECONDARY_PROBE_DATASET")
+    )
+fi
+
+if [ -n "$TERTIARY_PROBE_DATASET" ]; then
+    PROBE_ARGS+=(
+        --tertiary-probe-name "$TERTIARY_PROBE_NAME"
+        --tertiary-probe-eval-iters "$TERTIARY_PROBE_EVAL_ITERS"
+        --tertiary-probe-eval-interval "$TERTIARY_PROBE_EVAL_INTERVAL"
+        --tertiary-probe-step-offset "$TERTIARY_PROBE_STEP_OFFSET"
+        --tertiary-probe-data-path $(build_data_path "$TERTIARY_PROBE_DATASET")
     )
 fi
 
