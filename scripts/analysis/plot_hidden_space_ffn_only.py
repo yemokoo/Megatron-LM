@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import math
 from pathlib import Path
@@ -268,6 +269,65 @@ def draw_density_cloud(
     ax.scatter([], [], c=color, alpha=0.75, label=label)
 
 
+def normalized_density_grid(points: np.ndarray, bins: int, limits):
+    xmin, xmax, ymin, ymax = limits
+    inside = (
+        (points[:, 0] >= xmin)
+        & (points[:, 0] <= xmax)
+        & (points[:, 1] >= ymin)
+        & (points[:, 1] <= ymax)
+    )
+    clipped = points[inside]
+    if len(clipped) < 2:
+        clipped = points
+
+    hist, _, _ = np.histogram2d(
+        clipped[:, 0],
+        clipped[:, 1],
+        bins=bins,
+        range=[[xmin, xmax], [ymin, ymax]],
+    )
+    hist = smooth_histogram(hist, passes=2)
+    total = float(hist.sum())
+    if total <= 0:
+        return None
+    return hist / total
+
+
+def pca_kde_overlap(base_xy: np.ndarray, other_xy: np.ndarray, bins: int, limits):
+    base_density = normalized_density_grid(base_xy, bins, limits)
+    other_density = normalized_density_grid(other_xy, bins, limits)
+    if base_density is None or other_density is None:
+        return float("nan")
+    return float(np.minimum(base_density, other_density).sum())
+
+
+def kde_overlap_metrics_path(out_path: Path):
+    return out_path.with_name(f"{out_path.stem}_kde_overlap.csv")
+
+
+def write_kde_overlap_metrics(out_path: Path, rows):
+    if not rows:
+        return
+    metrics_path = kde_overlap_metrics_path(out_path)
+    fieldnames = [
+        "plot",
+        "model_label",
+        "probe_task",
+        "scope",
+        "layer",
+        "base",
+        "other",
+        "method",
+        "kde_overlap",
+    ]
+    with metrics_path.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+
+
 def draw_origin_marker(ax, zero_xy: np.ndarray):
     origin = zero_xy.mean(axis=0)
     ax.scatter(
@@ -333,6 +393,13 @@ def draw_pairwise_density_panel(
     limits=None,
     show_legend: bool = True,
 ):
+    if limits is None:
+        limits = percentile_bounds(
+            np.concatenate([base_xy, other_xy], axis=0),
+            trim_percentile,
+            pad_fraction=0.12,
+        )
+    overlap = pca_kde_overlap(base_xy, other_xy, density_bins, limits)
     base_color = STAGE_COLORS.get(base_label, "#2563eb")
     other_color = STAGE_COLORS.get(other_label, "#111827")
     draw_density_cloud(
@@ -380,15 +447,28 @@ def draw_pairwise_density_panel(
         linewidths=0.75,
         zorder=8,
     )
-    if limits is not None:
-        xmin, xmax, ymin, ymax = limits
-        ax.set_xlim(xmin, xmax)
-        ax.set_ylim(ymin, ymax)
+    xmin, xmax, ymin, ymax = limits
+    ax.set_xlim(xmin, xmax)
+    ax.set_ylim(ymin, ymax)
+    if np.isfinite(overlap):
+        ax.text(
+            0.985,
+            0.965,
+            f"KDE overlap={overlap:.3f}",
+            transform=ax.transAxes,
+            ha="right",
+            va="top",
+            fontsize=8.5,
+            weight="bold",
+            color="#111827",
+            bbox=dict(boxstyle="round,pad=0.25", facecolor="white", edgecolor="#cbd5e1", alpha=0.82),
+        )
     ax.set_xticks([])
     ax.set_yticks([])
     ax.grid(alpha=0.16)
     if show_legend:
         ax.legend(frameon=False, loc="upper left", fontsize=8)
+    return overlap
 
 
 def plot_delta_density_layer_grid(
@@ -679,9 +759,10 @@ def plot_hidden_pairwise_density_layer_average_by_base(
 
     fig, axes = plt.subplots(1, len(compare_labels), figsize=(6.6 * len(compare_labels), 5.8), sharex=True, sharey=True)
     axes = np.atleast_1d(axes)
+    metric_rows = []
     for ax, other_label in zip(axes, compare_labels):
         other_xy = coords_by_stage[label_to_idx[other_label]]
-        draw_pairwise_density_panel(
+        overlap = draw_pairwise_density_panel(
             ax,
             base_xy,
             other_xy,
@@ -691,6 +772,19 @@ def plot_hidden_pairwise_density_layer_average_by_base(
             trim_percentile,
             limits=limits,
             show_legend=True,
+        )
+        metric_rows.append(
+            {
+                "plot": str(out_path),
+                "model_label": MODEL_LABEL,
+                "probe_task": normalize_probe_task(probe_task),
+                "scope": "layer_average",
+                "layer": "average",
+                "base": base_label,
+                "other": other_label,
+                "method": method,
+                "kde_overlap": f"{overlap:.6f}" if np.isfinite(overlap) else "nan",
+            }
         )
         ax.set_title(
             f"{display_stage_name(base_label)} vs {display_stage_name(other_label)}",
@@ -704,6 +798,7 @@ def plot_hidden_pairwise_density_layer_average_by_base(
     fig.tight_layout()
     fig.savefig(out_path, dpi=250)
     plt.close(fig)
+    write_kde_overlap_metrics(out_path, metric_rows)
 
 
 def plot_hidden_pairwise_density_layers_by_base(
@@ -736,6 +831,7 @@ def plot_hidden_pairwise_density_layers_by_base(
         figsize=(4.55 * ncols, 3.10 * nrows),
         squeeze=False,
     )
+    metric_rows = []
 
     for row_idx in range(nrows):
         for group_idx, group in enumerate(layer_groups):
@@ -760,7 +856,7 @@ def plot_hidden_pairwise_density_layers_by_base(
             for col_idx, other_label in enumerate(compare_labels):
                 ax = axes[row_idx][group_idx * len(compare_labels) + col_idx]
                 other_xy = coords_by_stage[label_to_idx[other_label]]
-                draw_pairwise_density_panel(
+                overlap = draw_pairwise_density_panel(
                     ax,
                     base_xy,
                     other_xy,
@@ -770,6 +866,19 @@ def plot_hidden_pairwise_density_layers_by_base(
                     trim_percentile,
                     limits=limits,
                     show_legend=False,
+                )
+                metric_rows.append(
+                    {
+                        "plot": str(out_path),
+                        "model_label": MODEL_LABEL,
+                        "probe_task": normalize_probe_task(probe_task),
+                        "scope": "layer",
+                        "layer": layer_number,
+                        "base": base_label,
+                        "other": other_label,
+                        "method": method,
+                        "kde_overlap": f"{overlap:.6f}" if np.isfinite(overlap) else "nan",
+                    }
                 )
                 ax.set_title("")
                 if col_idx == 0:
@@ -802,6 +911,7 @@ def plot_hidden_pairwise_density_layers_by_base(
     fig.tight_layout(rect=(0, 0.018, 1, 0.975))
     fig.savefig(out_path, dpi=220)
     plt.close(fig)
+    write_kde_overlap_metrics(out_path, metric_rows)
 
 
 def plot_hidden_small_multiples_layer_average(
