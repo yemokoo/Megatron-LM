@@ -16,6 +16,7 @@ export G2_ROOT="${G2_ROOT:-$PROJECT_ROOT/.local/weights/a100/mha/g2-checkpoints}
 export BASE_WEIGHTS_DIR="${BASE_WEIGHTS_DIR:-$PROJECT_ROOT/.local/weights/a100/mha}"
 export PROBE_TASK="${PROBE_TASK:-wiki}"
 export OUT_DIR="${OUT_DIR:-$PROJECT_ROOT/.local/analysis/g2matched-ffn-only-hidden-space-${PROBE_TASK}-probe}"
+export MODEL_LABEL="${MODEL_LABEL:-FFN-only}"
 
 export NUM_LAYERS="${NUM_LAYERS:-9}"
 export HIDDEN_SIZE="${HIDDEN_SIZE:-1024}"
@@ -96,6 +97,7 @@ require_checkpoint "$RETUNE_DIR" "router-retuned"
 mkdir -p "$OUT_DIR/logs" "$OUT_DIR/hidden"
 
 echo "[CONFIG] FFN-only hidden-space probe"
+echo "[CONFIG] model_label=$MODEL_LABEL"
 echo "[CONFIG] wiki_only=$WIKI_DIR"
 echo "[CONFIG] code_trained=$CODE_DIR"
 echo "[CONFIG] router_retuned=$RETUNE_DIR"
@@ -179,7 +181,8 @@ python scripts/analysis/plot_hidden_space_ffn_only.py \
     --out-dir "$OUT_DIR/plots" \
     --method "${HIDDEN_SPACE_PLOT_METHOD:-pca}" \
     --max-points-per-stage "${HIDDEN_SPACE_PLOT_MAX_POINTS_PER_STAGE:-1200}" \
-    --probe-task "$PROBE_TASK"
+    --probe-task "$PROBE_TASK" \
+    --model-label "$MODEL_LABEL"
 
 echo "[DONE] hidden-space analysis"
 echo "[PLOTS] $OUT_DIR/plots"

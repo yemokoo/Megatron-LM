@@ -27,6 +27,8 @@ STAGE_DISPLAY_NAMES = {
     "router_retuned": "Router-retuned",
 }
 
+MODEL_LABEL = "FFN-only"
+
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -34,6 +36,11 @@ def parse_args():
     parser.add_argument("--code-trained", required=True, help="NPZ hidden dump after code training.")
     parser.add_argument("--router-retuned", required=True, help="NPZ hidden dump after router retuning.")
     parser.add_argument("--out-dir", required=True)
+    parser.add_argument(
+        "--model-label",
+        default="FFN-only",
+        help="Model label used in plot titles. Defaults to the original FFN-only label.",
+    )
     parser.add_argument("--method", choices=["pca", "umap"], default="pca")
     parser.add_argument("--max-points-per-stage", type=int, default=1200)
     parser.add_argument("--max-vectors", type=int, default=350)
@@ -433,7 +440,7 @@ def plot_delta_density_layer_grid(
 
     handles, labels = axes[0][0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="upper center", ncol=3, frameon=False)
-    fig.suptitle(f"FFN-only Hidden Delta Density from Wiki-Only by Layer ({method.upper()})", y=0.995, fontsize=16)
+    fig.suptitle(f"{MODEL_LABEL} Hidden Delta Density from Wiki-Only by Layer ({method.upper()})", y=0.995, fontsize=16)
     fig.tight_layout(rect=(0, 0, 1, 0.96))
     fig.savefig(out_path, dpi=230)
     plt.close(fig)
@@ -482,7 +489,7 @@ def plot_delta_density_layer_average(
             subtitle = "Full Delta Field"
 
         ax.set_title(
-            f"FFN-only Hidden Delta Density from Wiki-Only, Layer-Average ({method.upper()})\n{subtitle}",
+            f"{MODEL_LABEL} Hidden Delta Density from Wiki-Only, Layer-Average ({method.upper()})\n{subtitle}",
             weight="bold",
         )
         ax.set_xticks([])
@@ -538,7 +545,7 @@ def plot_hidden_density_layer_grid(
 
     handles, labels = axes[0][0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="upper center", ncol=3, frameon=False)
-    fig.suptitle(f"FFN-only Wiki Probe Hidden Density by Layer ({method.upper()})", y=0.995, fontsize=16)
+    fig.suptitle(f"{MODEL_LABEL} Wiki Probe Hidden Density by Layer ({method.upper()})", y=0.995, fontsize=16)
     fig.tight_layout(rect=(0, 0, 1, 0.96))
     fig.savefig(out_path, dpi=230)
     plt.close(fig)
@@ -579,7 +586,7 @@ def plot_hidden_density_layer_average(
         )
 
     expand_limits(ax, coords, trim_percentile=trim_percentile)
-    ax.set_title(f"FFN-only Wiki Probe Hidden Density, Layer-Average ({method.upper()})", weight="bold")
+    ax.set_title(f"{MODEL_LABEL} Wiki Probe Hidden Density, Layer-Average ({method.upper()})", weight="bold")
     ax.set_xticks([])
     ax.set_yticks([])
     ax.grid(alpha=0.18)
@@ -634,7 +641,7 @@ def plot_hidden_pairwise_density_layer_average(
         ax.grid(alpha=0.16)
         ax.legend(frameon=False, loc="upper left")
 
-    fig.suptitle(f"FFN-only Wiki Probe Hidden Density, Pairwise Layer-Average ({method.upper()})", weight="bold")
+    fig.suptitle(f"{MODEL_LABEL} Wiki Probe Hidden Density, Pairwise Layer-Average ({method.upper()})", weight="bold")
     fig.tight_layout()
     fig.savefig(out_path, dpi=250)
     plt.close(fig)
@@ -691,7 +698,7 @@ def plot_hidden_pairwise_density_layer_average_by_base(
         )
 
     fig.suptitle(
-        f"FFN-only {probe_display_name(probe_task)} Hidden Density, Pairwise Layer-Average ({method.upper()})",
+        f"{MODEL_LABEL} {probe_display_name(probe_task)} Hidden Density, Pairwise Layer-Average ({method.upper()})",
         weight="bold",
     )
     fig.tight_layout()
@@ -787,7 +794,7 @@ def plot_hidden_pairwise_density_layers_by_base(
         ax.set_xlabel(label, fontsize=10, weight="bold", labelpad=8)
 
     fig.suptitle(
-        f"FFN-only {probe_display_name(probe_task)} Hidden Density by Layer, Pairwise ({method.upper()})",
+        f"{MODEL_LABEL} {probe_display_name(probe_task)} Hidden Density by Layer, Pairwise ({method.upper()})",
         y=0.995,
         fontsize=16,
         weight="bold",
@@ -840,7 +847,7 @@ def plot_hidden_small_multiples_layer_average(
         ax.grid(alpha=0.16)
         ax.legend(frameon=False, loc="upper left")
 
-    fig.suptitle(f"FFN-only Wiki Probe Hidden Density, Small Multiples Layer-Average ({method.upper()})", weight="bold")
+    fig.suptitle(f"{MODEL_LABEL} Wiki Probe Hidden Density, Small Multiples Layer-Average ({method.upper()})", weight="bold")
     fig.tight_layout()
     fig.savefig(out_path, dpi=250)
     plt.close(fig)
@@ -906,7 +913,7 @@ def plot_delta_layer_grid(
 
     handles, labels = axes[0][0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="upper center", ncol=3, frameon=False)
-    fig.suptitle(f"FFN-only Hidden Delta from Wiki-Only by Layer ({method.upper()})", y=0.995, fontsize=16)
+    fig.suptitle(f"{MODEL_LABEL} Hidden Delta from Wiki-Only by Layer ({method.upper()})", y=0.995, fontsize=16)
     fig.tight_layout(rect=(0, 0, 1, 0.96))
     fig.savefig(out_path, dpi=230)
     plt.close(fig)
@@ -954,7 +961,7 @@ def plot_delta_layer_average(
     ax.plot(centroids[:, 0], centroids[:, 1], color="#111827", lw=1.5, alpha=0.80)
     ax.scatter(centroids[:, 0], centroids[:, 1], color="#111827", s=28, alpha=0.94)
     expand_limits(ax, coords, trim_percentile=trim_percentile)
-    ax.set_title(f"FFN-only Hidden Delta from Wiki-Only, Layer-Average ({method.upper()})", weight="bold")
+    ax.set_title(f"{MODEL_LABEL} Hidden Delta from Wiki-Only, Layer-Average ({method.upper()})", weight="bold")
     ax.set_xticks([])
     ax.set_yticks([])
     ax.grid(alpha=0.18)
@@ -1046,7 +1053,7 @@ def plot_layer_grid(dumps, out_path: Path, method: str, max_points: int, max_vec
 
     handles, labels = axes[0][0].get_legend_handles_labels()
     fig.legend(handles, labels, loc="upper center", ncol=3, frameon=False)
-    fig.suptitle(f"FFN-only Wiki Probe Hidden Space by Layer ({method.upper()})", y=0.995, fontsize=16)
+    fig.suptitle(f"{MODEL_LABEL} Wiki Probe Hidden Space by Layer ({method.upper()})", y=0.995, fontsize=16)
     fig.tight_layout(rect=(0, 0, 1, 0.96))
     fig.savefig(out_path, dpi=220)
     plt.close(fig)
@@ -1077,7 +1084,7 @@ def plot_layer_average(dumps, out_path: Path, method: str, max_points: int, max_
     ax.plot(centroids[:, 0], centroids[:, 1], color="#111827", lw=1.6, alpha=0.78)
     ax.scatter(centroids[:, 0], centroids[:, 1], color="#111827", s=26, alpha=0.92)
     expand_limits(ax, coords)
-    ax.set_title(f"FFN-only Wiki Probe Hidden Space, Layer-Average ({method.upper()})", weight="bold")
+    ax.set_title(f"{MODEL_LABEL} Wiki Probe Hidden Space, Layer-Average ({method.upper()})", weight="bold")
     ax.set_xticks([])
     ax.set_yticks([])
     ax.grid(alpha=0.18)
@@ -1088,7 +1095,9 @@ def plot_layer_average(dumps, out_path: Path, method: str, max_points: int, max_
 
 
 def main():
+    global MODEL_LABEL
     args = parse_args()
+    MODEL_LABEL = args.model_label
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     probe_task = normalize_probe_task(args.probe_task)
