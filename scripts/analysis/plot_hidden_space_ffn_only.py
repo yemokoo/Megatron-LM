@@ -458,10 +458,10 @@ def draw_pairwise_density_panel(
             transform=ax.transAxes,
             ha="right",
             va="top",
-            fontsize=8.5,
+            fontsize=12,
             weight="bold",
             color="#111827",
-            bbox=dict(boxstyle="round,pad=0.25", facecolor="white", edgecolor="#cbd5e1", alpha=0.82),
+            bbox=dict(boxstyle="round,pad=0.30", facecolor="white", edgecolor="#94a3b8", alpha=0.88),
         )
     ax.set_xticks([])
     ax.set_yticks([])
