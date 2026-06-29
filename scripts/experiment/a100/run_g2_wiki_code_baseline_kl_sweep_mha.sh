@@ -50,6 +50,22 @@ export MOE_GROUPED_GEMM="${MOE_GROUPED_GEMM:-1}"
 export ATTN_LORA_GROUPED_GEMM="${ATTN_LORA_GROUPED_GEMM:-1}"
 export MOE_ROUTER_DTYPE="${MOE_ROUTER_DTYPE:-fp32}"
 
+dataset_path_for_task() {
+    local task="$1"
+    bash -lc "source scripts/experiment/a100/common.sh; dataset_dir_for_task $task"
+}
+
+probe_path_for_task() {
+    local task="$1"
+    bash -lc "source scripts/experiment/a100/common.sh; probe_dir_for_task $task"
+}
+
+export WIKI_TRAIN_DATASET="${WIKI_TRAIN_DATASET:-$(dataset_path_for_task wiki)}"
+export CODE_TRAIN_DATASET="${CODE_TRAIN_DATASET:-$(dataset_path_for_task code)}"
+export WIKI_PROBE_DATASET="${WIKI_PROBE_DATASET:-$(probe_path_for_task wiki)}"
+export CODE_PROBE_DATASET="${CODE_PROBE_DATASET:-$(probe_path_for_task code)}"
+export CONVERSATION_PROBE_DATASET="${CONVERSATION_PROBE_DATASET:-$(probe_path_for_task conversation)}"
+
 is_completed() {
     local run_dir="$1"
     local expected="${2:-$TRAIN_ITERS}"
@@ -109,6 +125,7 @@ run_dense16() {
             WANDB_MODE="$WANDB_MODE" \
             RUN_ID="$wiki_id" \
             TRAIN_WEIGHTS="$wiki_dir" \
+            TRAIN_DATASET="$WIKI_TRAIN_DATASET" \
             WANDB_PROJECT="$WANDB_PROJECT" \
             WANDB_EXP_NAME="G2 dense16 ffn5632 wiki" \
             FFN_HIDDEN_SIZE=5632 \
@@ -119,11 +136,12 @@ run_dense16() {
             EVAL_INTERVAL="$EVAL_INTERVAL" \
             LOG_INTERVAL="$LOG_INTERVAL" \
             SEED="$SEED" \
+            PROBE_DATASET="$WIKI_PROBE_DATASET" \
             PROBE_EVAL_INTERVAL="$PROBE_EVAL_INTERVAL" \
-            SECONDARY_PROBE_DATASET="$(bash -lc 'source scripts/experiment/a100/common.sh; probe_dir_for_task code')" \
+            SECONDARY_PROBE_DATASET="$CODE_PROBE_DATASET" \
             SECONDARY_PROBE_NAME=code_probe \
             SECONDARY_PROBE_EVAL_INTERVAL="$SECONDARY_PROBE_EVAL_INTERVAL" \
-            TERTIARY_PROBE_DATASET="$(bash -lc 'source scripts/experiment/a100/common.sh; probe_dir_for_task conversation')" \
+            TERTIARY_PROBE_DATASET="$CONVERSATION_PROBE_DATASET" \
             TERTIARY_PROBE_NAME=conversation_probe \
             TERTIARY_PROBE_EVAL_INTERVAL="$TERTIARY_PROBE_EVAL_INTERVAL" \
             MASTER_PORT="${DENSE16_WIKI_MASTER_PORT:-29871}" \
@@ -139,6 +157,7 @@ run_dense16() {
             RUN_ID="$code_id" \
             TRAIN_WEIGHTS="$code_dir" \
             STAGE1_WEIGHTS_DIR="$wiki_dir" \
+            TRAIN_DATASET="$CODE_TRAIN_DATASET" \
             WANDB_PROJECT="$WANDB_PROJECT" \
             WANDB_EXP_NAME="G2 dense16 ffn5632 wiki-to-code ${kl_tag}" \
             METADATA_STAGE="code_from_wiki_dense16_full_finetune" \
@@ -152,9 +171,11 @@ run_dense16() {
             SEED="$SEED" \
             OLD_MODEL_KL_COEFF="$kl_coeff" \
             OLD_MODEL_KL_TEMPERATURE="$OLD_MODEL_KL_TEMPERATURE" \
+            PROBE_DATASET="$CODE_PROBE_DATASET" \
             PROBE_EVAL_INTERVAL="$PROBE_EVAL_INTERVAL" \
+            SECONDARY_PROBE_DATASET="$WIKI_PROBE_DATASET" \
             SECONDARY_PROBE_EVAL_INTERVAL="$SECONDARY_PROBE_EVAL_INTERVAL" \
-            TERTIARY_PROBE_DATASET="$(bash -lc 'source scripts/experiment/a100/common.sh; probe_dir_for_task conversation')" \
+            TERTIARY_PROBE_DATASET="$CONVERSATION_PROBE_DATASET" \
             TERTIARY_PROBE_NAME=conversation_probe \
             TERTIARY_PROBE_EVAL_INTERVAL="$TERTIARY_PROBE_EVAL_INTERVAL" \
             MASTER_PORT="${DENSE16_CODE_MASTER_PORT:-29872}" \
@@ -219,6 +240,7 @@ run_fixed16() {
             RUN_ID="$code_id" \
             TRAIN_WEIGHTS="$code_dir" \
             STAGE1_WEIGHTS_DIR="$wiki_dir" \
+            TRAIN_DATASET="$CODE_TRAIN_DATASET" \
             RUN_LOG="$code_dir/logs/code_from_wiki_shared_router_hybrid_full_finetune.log" \
             WANDB_PROJECT="$WANDB_PROJECT" \
             WANDB_EXP_NAME="G2 fixed16 shared-router wiki-to-code full finetune ${kl_tag}" \
@@ -245,7 +267,9 @@ run_fixed16() {
             SEED="$SEED" \
             OLD_MODEL_KL_COEFF="$kl_coeff" \
             OLD_MODEL_KL_TEMPERATURE="$OLD_MODEL_KL_TEMPERATURE" \
+            PROBE_DATASET="$CODE_PROBE_DATASET" \
             PROBE_EVAL_INTERVAL="$PROBE_EVAL_INTERVAL" \
+            SECONDARY_PROBE_DATASET="$WIKI_PROBE_DATASET" \
             SECONDARY_PROBE_EVAL_INTERVAL="$SECONDARY_PROBE_EVAL_INTERVAL" \
             MASTER_PORT="${FIXED16_CODE_MASTER_PORT:-29874}" \
             bash scripts/experiment/continual_code_from_wiki_dense_local_bf16.sh
