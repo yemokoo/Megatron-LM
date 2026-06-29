@@ -138,8 +138,12 @@ export SHARED_ROUTER_TRAIN_MASK_EXISTING_EXPERTS_FROM_NUM_EXPERTS="${SHARED_ROUT
 export SHARED_ROUTER_HYBRID_TRAIN_ALL_EXPERTS_AND_ROUTER="${SHARED_ROUTER_HYBRID_TRAIN_ALL_EXPERTS_AND_ROUTER:-0}"
 export SHARED_ROUTER_HYBRID_TRAIN_ALL_ROUTER_ROWS="${SHARED_ROUTER_HYBRID_TRAIN_ALL_ROUTER_ROWS:-0}"
 export SHARED_ROUTER_HYBRID_PARTIAL_FREEZE_MASK="${SHARED_ROUTER_HYBRID_PARTIAL_FREEZE_MASK:-}"
+export SHARED_ROUTER_HYBRID_FREEZE_PREEXISTING_ONLY="${SHARED_ROUTER_HYBRID_FREEZE_PREEXISTING_ONLY:-0}"
 export SHARED_ROUTER_HYBRID_TOPK_WITH_ALL_NEW_EXPERTS="${SHARED_ROUTER_HYBRID_TOPK_WITH_ALL_NEW_EXPERTS:-0}"
 export SHARED_ROUTER_HYBRID_ALL_NEW_EXPERTS_FROM_NUM_EXPERTS="${SHARED_ROUTER_HYBRID_ALL_NEW_EXPERTS_FROM_NUM_EXPERTS:-$SOURCE_NUM_EXPERTS}"
+export OLD_MODEL_KL_COEFF="${OLD_MODEL_KL_COEFF:-0.0}"
+export OLD_MODEL_KL_TEMPERATURE="${OLD_MODEL_KL_TEMPERATURE:-1.0}"
+export ENABLE_OLD_MODEL_KL="${ENABLE_OLD_MODEL_KL:-}"
 export STAGE1_WEIGHTS_DIR="${STAGE1_WEIGHTS_DIR:-}"
 export STAGE1_SUBDIR="${STAGE1_SUBDIR:-a100/wiki-shared-router-hybrid-pretrain-local}"
 export SOURCE_REQUIRED_ITERS="${SOURCE_REQUIRED_ITERS:-1}"
@@ -181,6 +185,29 @@ export WANDB_LOG_CHECKPOINTS="${WANDB_LOG_CHECKPOINTS:-0}"
 
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
 export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=true
+
+if [ -z "$ENABLE_OLD_MODEL_KL" ]; then
+    if "$PYTHON_BIN" - <<'PY'
+import os
+raise SystemExit(0 if float(os.environ.get("OLD_MODEL_KL_COEFF", "0.0")) > 0.0 else 1)
+PY
+    then
+        export ENABLE_OLD_MODEL_KL=1
+    else
+        export ENABLE_OLD_MODEL_KL=0
+    fi
+fi
+
+if [ "$SHARED_ROUTER_HYBRID_FREEZE_PREEXISTING_ONLY" = "1" ]; then
+    if [ -n "$SHARED_ROUTER_HYBRID_PARTIAL_FREEZE_MASK" ]; then
+        echo "ERROR: SHARED_ROUTER_HYBRID_FREEZE_PREEXISTING_ONLY conflicts with partial freeze mask." >&2
+        exit 1
+    fi
+    if [ "$SHARED_ROUTER_HYBRID_TRAIN_ALL_EXPERTS_AND_ROUTER" = "1" ]; then
+        echo "ERROR: SHARED_ROUTER_HYBRID_FREEZE_PREEXISTING_ONLY conflicts with train-all-experts mode." >&2
+        exit 1
+    fi
+fi
 
 router_memory_requested() {
     [ "$ROUTER_MEMORY_FORCE_ENABLE_ZERO_COEFF" = "1" ] || {
@@ -370,9 +397,11 @@ metadata = {
     'train_new_experts_and_router_only': (
         os.environ.get('SHARED_ROUTER_HYBRID_TRAIN_ALL_EXPERTS_AND_ROUTER', '0') != '1'
         and os.environ.get('SHARED_ROUTER_HYBRID_PARTIAL_FREEZE_MASK', '') == ''
+        and os.environ.get('SHARED_ROUTER_HYBRID_FREEZE_PREEXISTING_ONLY', '0') != '1'
     ),
     'shared_router_hybrid_train_all_experts_and_router': os.environ.get('SHARED_ROUTER_HYBRID_TRAIN_ALL_EXPERTS_AND_ROUTER', '0') == '1',
     'shared_router_hybrid_partial_freeze_mask': os.environ.get('SHARED_ROUTER_HYBRID_PARTIAL_FREEZE_MASK', ''),
+    'shared_router_hybrid_freeze_preexisting_only': os.environ.get('SHARED_ROUTER_HYBRID_FREEZE_PREEXISTING_ONLY', '0') == '1',
     'shared_router_hybrid_train_all_router_rows': (
         os.environ.get('SHARED_ROUTER_HYBRID_TRAIN_ALL_EXPERTS_AND_ROUTER', '0') == '1'
         or os.environ.get('SHARED_ROUTER_HYBRID_TRAIN_ALL_ROUTER_ROWS', '0') == '1'
@@ -400,6 +429,9 @@ metadata = {
     'router_kl_min_delta': float(os.environ.get('ROUTER_KL_MIN_DELTA', '0.01')),
     'router_kl_warmup_steps': int(os.environ.get('ROUTER_KL_WARMUP_STEPS', '300')),
     'router_kl_smoothing_window': int(os.environ.get('ROUTER_KL_SMOOTHING_WINDOW', '3')),
+    'old_model_kl_enabled': os.environ.get('ENABLE_OLD_MODEL_KL', '0') == '1',
+    'old_model_kl_coeff': float(os.environ.get('OLD_MODEL_KL_COEFF', '0.0')),
+    'old_model_kl_temperature': float(os.environ.get('OLD_MODEL_KL_TEMPERATURE', '1.0')),
 }
 with open(os.environ['RUN_METADATA'], 'w', encoding='utf-8') as f:
     json.dump(metadata, f, indent=2)
@@ -479,10 +511,12 @@ if [ -n "$SHARED_ROUTER_HYBRID_PARTIAL_FREEZE_MASK" ]; then
     )
 elif [ "$SHARED_ROUTER_HYBRID_TRAIN_ALL_EXPERTS_AND_ROUTER" = "1" ]; then
     SHARED_ROUTER_ARGS+=(--shared-router-hybrid-train-all-experts-and-router-only)
+elif [ "$SHARED_ROUTER_HYBRID_FREEZE_PREEXISTING_ONLY" = "1" ]; then
+    :
 else
     SHARED_ROUTER_ARGS+=(--shared-router-hybrid-train-new-experts-and-router-only)
 fi
-if [ -z "$SHARED_ROUTER_HYBRID_PARTIAL_FREEZE_MASK" ] && [ "$SHARED_ROUTER_HYBRID_TRAIN_ALL_ROUTER_ROWS" = "1" ]; then
+if [ -z "$SHARED_ROUTER_HYBRID_PARTIAL_FREEZE_MASK" ] && [ "$SHARED_ROUTER_HYBRID_FREEZE_PREEXISTING_ONLY" != "1" ] && [ "$SHARED_ROUTER_HYBRID_TRAIN_ALL_ROUTER_ROWS" = "1" ]; then
     SHARED_ROUTER_ARGS+=(--shared-router-hybrid-train-all-router-rows)
 fi
 
@@ -546,6 +580,15 @@ if router_memory_requested; then
     fi
 fi
 
+OLD_MODEL_KL_ARGS=()
+if [ "$ENABLE_OLD_MODEL_KL" = "1" ]; then
+    OLD_MODEL_KL_ARGS+=(
+        --moe-old-model-kl-coeff "$OLD_MODEL_KL_COEFF"
+        --moe-old-model-kl-temperature "$OLD_MODEL_KL_TEMPERATURE"
+        --moe-old-model-kl-load "$SSD_SOURCE_WEIGHTS"
+    )
+fi
+
 torchrun \
     --nproc_per_node "$NPROC_PER_NODE" \
     --master_addr "$MASTER_ADDR" \
@@ -596,6 +639,7 @@ torchrun \
     --secondary-probe-data-path $(build_data_path "$SECONDARY_PROBE_DATASET") \
     "${TERTIARY_PROBE_ARGS[@]}" \
     "${ROUTER_MEMORY_ARGS[@]}" \
+    "${OLD_MODEL_KL_ARGS[@]}" \
     "${WANDB_ARGS[@]}" \
     "${DEBUG_TRAINABLE_ARGS[@]}"
 

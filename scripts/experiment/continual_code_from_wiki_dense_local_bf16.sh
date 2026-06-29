@@ -128,6 +128,7 @@ export GPU_LOG="${GPU_LOG:-$LOG_DIR/gpu_usage.csv}"
 export RUN_METADATA="${RUN_METADATA:-$LOG_DIR/run_metadata.json}"
 export DATASET_NAME="${DATASET_NAME:-code_exact}"
 export DATASET_SOURCE="${DATASET_SOURCE:-Python code exact train}"
+export METADATA_STAGE="${METADATA_STAGE:-code_from_wiki_dense}"
 export OLD_MODEL_KL_COEFF="${OLD_MODEL_KL_COEFF:-1.0}"
 export OLD_MODEL_KL_TEMPERATURE="${OLD_MODEL_KL_TEMPERATURE:-1.0}"
 export PROBE_DATASET="${PROBE_DATASET:-$LOCAL_DATASET/python-code-full/tokenized/EleutherAI/pythia-12b-step1800-test-matchwiki-exact}"
@@ -221,9 +222,10 @@ for idx_path in sorted(dataset_dir.glob('*.idx')):
     shards.append({'prefix': prefix.name, 'documents': shard_docs, 'tokens': shard_tokens})
 
 metadata = {
-    'stage': 'code_from_wiki_dense',
+    'stage': os.environ.get('METADATA_STAGE', 'code_from_wiki_dense'),
     'run_id': os.environ['RUN_ID'],
     'stage1_weights_dir': os.environ['STAGE1_WEIGHTS_DIR'],
+    'model_config_script': os.environ.get('MODEL_CONFIG_SCRIPT', ''),
     'dataset_name': os.environ['DATASET_NAME'],
     'dataset_source': os.environ['DATASET_SOURCE'],
     'train_dataset': {'path': str(dataset_dir), 'tokens': total_tokens, 'documents': total_documents, 'shards': shards},
@@ -233,6 +235,17 @@ metadata = {
     'num_layers': int(os.environ['NUM_LAYERS']),
     'hidden_size': int(os.environ['HIDDEN_SIZE']),
     'ffn_hidden_size': int(os.environ['FFN_HIDDEN_SIZE']),
+    'num_experts': int(os.environ.get('NUM_EXPERTS', '0')),
+    'moe_ffn_hidden_size': int(os.environ.get('MOE_FFN_HIDDEN_SIZE', '0')),
+    'moe_router_topk': int(os.environ.get('MOE_ROUTER_TOPK', '0')),
+    'attn_lora_rank': int(os.environ.get('ATTN_LORA_RANK', '0')),
+    'attn_lora_alpha': float(os.environ.get('ATTN_LORA_ALPHA', '1.0')),
+    'attn_full_rank_lora_rank': int(os.environ.get('ATTN_FULL_RANK_LORA_RANK', '0')),
+    'attn_full_rank_lora_alpha': float(os.environ.get('ATTN_FULL_RANK_LORA_ALPHA', '1.0')),
+    'attn_full_rank_lora_targets': os.environ.get('ATTN_FULL_RANK_LORA_TARGETS', ''),
+    'shared_router_hybrid': os.environ.get('MODEL_CONFIG_SCRIPT', '').endswith('flame-shared-router-hybrid-experts.sh'),
+    'moe_grouped_gemm': os.environ.get('MOE_GROUPED_GEMM', '0') == '1',
+    'attn_lora_grouped_gemm': os.environ.get('ATTN_LORA_GROUPED_GEMM', '0') == '1',
     'seed': int(os.environ['SEED']),
     'old_model_kl_coeff': float(os.environ['OLD_MODEL_KL_COEFF']),
     'old_model_kl_temperature': float(os.environ['OLD_MODEL_KL_TEMPERATURE']),
@@ -328,6 +341,14 @@ if [ -n "$TERTIARY_PROBE_DATASET" ]; then
     )
 fi
 
+DEBUG_TRAINABLE_ARGS=()
+if [ "${DEBUG_TRAINABLE_PARAMS_AND_EXIT:-0}" = "1" ]; then
+    DEBUG_TRAINABLE_ARGS+=(--debug-trainable-params-and-exit)
+    if [ -n "${DEBUG_TRAINABLE_PARAMS_PATH:-}" ]; then
+        DEBUG_TRAINABLE_ARGS+=(--debug-trainable-params-path "$DEBUG_TRAINABLE_PARAMS_PATH")
+    fi
+fi
+
 WANDB_ARGS=()
 if [ -n "$WANDB_PROJECT" ]; then
     WANDB_ARGS+=(
@@ -355,7 +376,8 @@ GPU_LOG_PID=$!
     --master_port "$MASTER_PORT" \
     pretrain_gpt.py \
     "${MODEL_ARGS[@]}" "${INFRA_ARGS[@]}" "${TRAIN_ARGS[@]}" \
-    "${DATA_ARGS[@]}" "${SAVE_ARGS[@]}" "${PROBE_ARGS[@]}" "${WANDB_ARGS[@]}" &
+    "${DATA_ARGS[@]}" "${SAVE_ARGS[@]}" "${PROBE_ARGS[@]}" "${WANDB_ARGS[@]}" \
+    "${DEBUG_TRAINABLE_ARGS[@]}" &
 TORCHRUN_PID=$!
 
 (
