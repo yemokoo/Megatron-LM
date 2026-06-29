@@ -1996,6 +1996,7 @@ def setup_model_and_optimizer(model_provider_func,
             args.router_memory_kl_coeff > 0
             or args.router_memory_force_enable_zero_coeff
         )
+        old_model_kl_requested_for_setup = args.moe_old_model_kl_coeff > 0
         if router_memory_requested_for_setup and args.router_memory_teacher_student_kl:
             for teacher_shard in source_model:
                 teacher_shard.eval()
@@ -2015,6 +2016,18 @@ def setup_model_and_optimizer(model_provider_func,
                 "Loaded old shared-router weights for router-memory KL "
                 f"from {args.shared_router_hybrid_expand_from_num_experts} experts."
             )
+        if old_model_kl_requested_for_setup:
+            for teacher_shard in source_model:
+                teacher_shard.eval()
+                for param in teacher_shard.parameters():
+                    param.requires_grad = False
+            set_old_moe_distill_teacher(source_model)
+            print_rank_0(
+                "Loaded old shared-router hybrid checkpoint as logits KD teacher "
+                f"with coefficient {args.moe_old_model_kl_coeff}."
+            )
+        else:
+            set_old_moe_distill_teacher(None)
 
         for target_shard, source_shard in zip(unwrapped_model, source_unwrapped_model):
             expand_moe_model(
@@ -2080,10 +2093,14 @@ def setup_model_and_optimizer(model_provider_func,
                         indent=2,
                     )
 
-        if not (router_memory_requested_for_setup and args.router_memory_teacher_student_kl):
+        if not (
+            (router_memory_requested_for_setup and args.router_memory_teacher_student_kl)
+            or old_model_kl_requested_for_setup
+        ):
             del source_model
             set_shared_router_memory_full_teacher(None)
-        set_old_moe_distill_teacher(None)
+        if not (router_memory_requested_for_setup and args.router_memory_teacher_student_kl):
+            set_shared_router_memory_full_teacher(None)
         args.iteration = 0 if args.finetune else 1
         if (args.fp16 or args.bf16) and optimizer is not None:
             optimizer.reload_model_params()
