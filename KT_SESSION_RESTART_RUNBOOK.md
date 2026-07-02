@@ -2,6 +2,149 @@
 
 KT 서버에서 새 터미널/세션을 열었을 때 현재 shared-router QKVO 실험 환경을 복구하는 순서입니다.
 
+## 0. 새 KT 세션 빠른 복구 커맨드
+
+아래 블록을 새 KT 세션에서 순서대로 실행합니다. `gh` 없이 GitHub token을 `git credential`에 저장하고, 세션마다 사라지는 `grouped_gemm`은 git tag에서 다시 빌드합니다.
+
+### 0.1 Runtime 확인
+
+```bash
+cd /home/work/Agent_HJ/30_flame_agent/LLM-continual-learning
+source scripts/miscellaneous/activate_kt_env.sh
+
+echo "=== runtime ==="
+which python
+which pip
+python - <<'PY'
+import torch
+print("torch", torch.__version__, "cuda", torch.version.cuda)
+print("gpu", torch.cuda.get_device_name(0))
+PY
+```
+
+### 0.2 GitHub token 저장 + main pull
+
+```bash
+cd /home/work/Agent_HJ/30_flame_agent/LLM-continual-learning
+
+git config --global credential.helper store
+printf "protocol=https\nhost=github.com\n\n" | git credential reject
+
+echo -n "GitHub token: "
+stty -echo
+read GITHUB_TOKEN
+stty echo
+echo
+
+printf "protocol=https\nhost=github.com\nusername=x-access-token\npassword=%s\n\n" "$GITHUB_TOKEN" | git credential approve
+unset GITHUB_TOKEN
+
+GIT_TERMINAL_PROMPT=0 git ls-remote https://github.com/yemokoo/LLM-continual-learning.git HEAD
+
+git fetch origin main
+git checkout main
+git pull --ff-only origin main
+
+git submodule sync
+git submodule update --init --recursive
+
+cd Megatron-LM
+git checkout qv-lora-bf16-fix
+git pull --ff-only origin qv-lora-bf16-fix
+cd ..
+```
+
+### 0.3 W&B 설치/로그인
+
+```bash
+cd /home/work/Agent_HJ/30_flame_agent/LLM-continual-learning
+source scripts/miscellaneous/activate_kt_env.sh
+
+PIP_CONFIG_FILE=/dev/null \
+python -m pip install --user --upgrade \
+  --index-url https://pypi.org/simple \
+  --disable-pip-version-check \
+  --timeout 60 --retries 1 \
+  "wandb>=0.27.0"
+
+mkdir -p ~/.config/wandb
+chmod 700 ~/.config/wandb
+
+echo -n "W&B API key: "
+stty -echo
+read WANDB_API_KEY
+stty echo
+echo
+
+cat > ~/.config/wandb/env <<EOF
+export WANDB_API_KEY="$WANDB_API_KEY"
+export WANDB_ENTITY="yemoyemo010831-korea-university"
+export WANDB_PROJECT="flame-continual-top2-qv-lora"
+EOF
+chmod 600 ~/.config/wandb/env
+unset WANDB_API_KEY
+
+source ~/.config/wandb/env
+
+python - <<'PY'
+import os, wandb, inspect
+print("wandb", wandb.__version__, inspect.getfile(wandb))
+print("WANDB_API_KEY length", len(os.environ.get("WANDB_API_KEY", "")))
+wandb.login(key=os.environ["WANDB_API_KEY"], relogin=True)
+print("wandb login ok")
+PY
+```
+
+### 0.4 grouped-gemm 확인 및 복구
+
+`flash-attn`은 현재 실험에서 새로 받지 않는 방향입니다. 여기서는 `grouped_gemm`과 TransformerEngine만 확인하고, 실패하면 기존에 성공했던 `fanshiqing/grouped_gemm@v1.1.4` 방식으로 복구합니다.
+
+```bash
+cd /home/work/Agent_HJ/30_flame_agent/LLM-continual-learning
+source scripts/miscellaneous/activate_kt_env.sh
+
+python - <<'PY'
+import grouped_gemm, transformer_engine.pytorch, inspect
+print("grouped_gemm", inspect.getfile(grouped_gemm))
+print("TE ok")
+PY
+```
+
+위 import가 실패하면 아래를 실행합니다.
+
+```bash
+PIP_CONFIG_FILE=/dev/null \
+python -m pip install --user --upgrade \
+  --index-url https://pypi.org/simple \
+  ninja wheel "packaging<25"
+
+MAX_JOBS=8 PIP_CONFIG_FILE=/dev/null \
+python -m pip install --user --no-build-isolation --no-cache-dir \
+  git+https://github.com/fanshiqing/grouped_gemm@v1.1.4
+```
+
+### 0.5 최종 확인
+
+```bash
+cd /home/work/Agent_HJ/30_flame_agent/LLM-continual-learning
+source scripts/miscellaneous/activate_kt_env.sh
+source ~/.config/wandb/env
+
+python - <<'PY'
+import torch, wandb, grouped_gemm, transformer_engine.pytorch, inspect
+print("torch", torch.__version__, "cuda", torch.version.cuda)
+print("gpu", torch.cuda.get_device_name(0))
+print("wandb", wandb.__version__, inspect.getfile(wandb))
+print("grouped_gemm", inspect.getfile(grouped_gemm))
+print("all ok")
+PY
+
+PYTHONPYCACHEPREFIX=/tmp/pycache python -m py_compile \
+  Megatron-LM/megatron/training/arguments.py \
+  Megatron-LM/megatron/training/training.py \
+  Megatron-LM/pretrain_gpt.py
+```
+
 핵심 순서:
 
 1. Repo 진입과 KT runtime 활성화
