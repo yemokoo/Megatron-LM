@@ -1771,6 +1771,16 @@ def setup_model_and_optimizer(model_provider_func,
     timers = get_timers()
     one_logger = get_one_logger()
 
+    if (
+        getattr(args, 'moe_expansion_distill_mode', 'none') != 'none'
+        and getattr(args, 'moe_old_model_kl_coeff', 0.0) <= 0.0
+    ):
+        raise RuntimeError(
+            "--moe-expansion-distill-mode requires --moe-old-model-kl-coeff > 0. "
+            "Expansion distillation always includes final-logit KL from the "
+            "pre-expansion teacher."
+        )
+
     model = get_model(model_provider_func, model_type)
     unwrapped_model = unwrap_model(model)
 

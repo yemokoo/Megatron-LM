@@ -2494,6 +2494,25 @@ def _add_moe_args(parser):
                        help='Scale factor lambda for KL distillation from the pre-expansion MoE teacher model during continual learning.')
     group.add_argument('--moe-old-model-kl-temperature', type=float, default=1.0,
                        help='Temperature used for old-model logits distillation during continual learning.')
+    group.add_argument('--moe-expansion-distill-mode', type=str, default='none',
+                       choices=['none', 'logits', 'logits_hidden', 'logits_hidden_router'],
+                       help='Pre-code expert-expansion alignment objective. logits uses old-model '
+                            'final-logit KL; logits_hidden also matches transformer layer outputs '
+                            'with MSE; logits_hidden_router additionally matches router softmax '
+                            'distributions after zero-padding teacher probabilities to the expanded '
+                            'student expert dimension.')
+    group.add_argument('--moe-expansion-distill-lm-loss-coeff', type=float, default=1.0,
+                       help='Scale for the normal next-token LM loss during MoE expansion '
+                            'distillation. Set to 0.0 for pure teacher-student alignment.')
+    group.add_argument('--moe-expansion-distill-hidden-mse-coeff', type=float, default=1.0,
+                       help='Scale for layer-output hidden-state MSE in logits_hidden and '
+                            'logits_hidden_router expansion distillation modes.')
+    group.add_argument('--moe-expansion-distill-router-kl-coeff', type=float, default=1.0,
+                       help='Scale for router softmax KL in logits_hidden_router expansion '
+                            'distillation mode.')
+    group.add_argument('--moe-expansion-distill-hidden-layers', type=str, default='all',
+                       help='Comma-separated 1-based transformer layer numbers to align with '
+                            'hidden MSE during expansion distillation, or all.')
     group.add_argument('--router-memory-data-path', nargs='*', default=None,
                        help='Old-task memory dataset blend for periodic shared-router KL distillation. '
                        'Format matches --data-path.')

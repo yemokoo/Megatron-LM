@@ -7,7 +7,7 @@ import json
 import torch
 import torch.nn.functional as F
 from functools import partial
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 import inspect
 
 from typing import List, Optional, Tuple, Union
@@ -29,6 +29,7 @@ from megatron.training import pretrain
 from megatron.core.utils import StragglerDetector
 from megatron.core.transformer.spec_utils import import_module
 from megatron.core.transformer.shared_router_hybrid import capture_shared_router_inputs
+from megatron.core.transformer.moe.continual_learning_utils import teacher_student_router_kl
 from megatron.training.utils import (
     get_batch_on_this_cp_rank,
     get_batch_on_this_tp_rank,
@@ -215,25 +216,40 @@ def loss_func(loss_mask: torch.Tensor, output_tensor: torch.Tensor):
 
     teacher_logits = None
     student_logits = None
+    hidden_mse_loss = None
+    router_kl_loss = None
     if isinstance(output_tensor, dict):
         losses = output_tensor["losses"].float()
         teacher_logits = output_tensor.get("teacher_logits")
         student_logits = output_tensor.get("student_logits")
+        hidden_mse_loss = output_tensor.get("hidden_mse_loss")
+        router_kl_loss = output_tensor.get("router_kl_loss")
     else:
         losses = output_tensor.float()
     loss_mask = loss_mask.view(-1).float()
     total_tokens = loss_mask.sum()
     lm_loss = torch.sum(losses.view(-1) * loss_mask)
+    lm_loss = lm_loss * getattr(args, "moe_expansion_distill_lm_loss_coeff", 1.0)
     loss = torch.cat([lm_loss.view(1), total_tokens.view(1)])
 
     if teacher_logits is not None and student_logits is not None:
         temperature = args.moe_old_model_kl_temperature
         student_log_probs = F.log_softmax(student_logits.float() / temperature, dim=-1)
         teacher_probs = F.softmax(teacher_logits.float() / temperature, dim=-1)
-        kl_loss = F.kl_div(student_log_probs, teacher_probs, reduction="none").sum(dim=-1)
-        kl_loss = torch.sum(kl_loss.view(-1) * loss_mask) / total_tokens.clamp_min(1.0)
+        kl_per_token = F.kl_div(student_log_probs, teacher_probs, reduction="none").sum(dim=-1)
+        kl_loss_sum = torch.sum(kl_per_token.view(-1) * loss_mask)
+        kl_loss = kl_loss_sum / total_tokens.clamp_min(1.0)
         kl_loss = kl_loss * (temperature ** 2)
-        loss[0] = loss[0] + args.moe_old_model_kl_coeff * kl_loss
+        if getattr(args, "moe_expansion_distill_mode", "none") != "none":
+            loss[0] = loss[0] + args.moe_old_model_kl_coeff * kl_loss_sum * (temperature ** 2)
+        else:
+            loss[0] = loss[0] + args.moe_old_model_kl_coeff * kl_loss
+
+    if hidden_mse_loss is not None:
+        loss[0] = loss[0] + args.moe_expansion_distill_hidden_mse_coeff * hidden_mse_loss
+
+    if router_kl_loss is not None:
+        loss[0] = loss[0] + args.moe_expansion_distill_router_kl_coeff * router_kl_loss
 
     if args.context_parallel_size > 1:
         torch.distributed.all_reduce(loss, group=mpu.get_context_parallel_group())
@@ -276,6 +292,14 @@ def loss_func(loss_mask: torch.Tensor, output_tensor: torch.Tensor):
         reporting_kl = torch.tensor([kl_loss.detach()], device=reporting_loss.device)
         torch.distributed.all_reduce(reporting_kl, group=mpu.get_data_parallel_group())
         reporting['kd loss'] = (reporting_kl[0], reporting_loss[1])
+    if hidden_mse_loss is not None:
+        hidden_mse_sum = hidden_mse_loss.detach().view(1)
+        torch.distributed.all_reduce(hidden_mse_sum, group=mpu.get_data_parallel_group())
+        reporting['hidden mse loss'] = (hidden_mse_sum[0], reporting_loss[1])
+    if router_kl_loss is not None:
+        router_kl_sum = router_kl_loss.detach().view(1)
+        torch.distributed.all_reduce(router_kl_sum, group=mpu.get_data_parallel_group())
+        reporting['router prob kl loss'] = (router_kl_sum[0], reporting_loss[1])
 
     # loss[0] is a view of loss, so it has ._base not None, which triggers assert error
     # in core/pipeline_parallel/schedule.py::deallocate_output_tensor, calling .clone()
@@ -307,31 +331,106 @@ def forward_step(data_iterator, model: GPTModel):
     timers('batch-generator').stop()
 
     teacher_model = get_old_moe_distill_teacher()
-    if teacher_model is not None and args.moe_old_model_kl_coeff > 0:
-        with stimer:
-            student_output = model(
-                tokens,
-                position_ids,
-                attention_mask,
-                labels=labels,
-                runtime_gather_output=True,
-                return_loss_and_logits=True,
+    distill_mode = getattr(args, "moe_expansion_distill_mode", "none")
+    expansion_distill_enabled = distill_mode != "none"
+    if expansion_distill_enabled and teacher_model is None:
+        raise RuntimeError(
+            "--moe-expansion-distill-mode requires a loaded pre-expansion teacher. "
+            "Check --moe-old-model-kl-load, --moe-expand-from-num-experts, and the "
+            "source checkpoint path."
+        )
+    teacher_kd_enabled = teacher_model is not None and (
+        args.moe_old_model_kl_coeff > 0 or expansion_distill_enabled
+    )
+    if teacher_kd_enabled:
+        if args.moe_old_model_kl_coeff <= 0:
+            raise RuntimeError(
+                "--moe-expansion-distill-mode requires --moe-old-model-kl-coeff > 0 "
+                "because all expansion-distill modes include final-logit KL."
             )
+        if args.pipeline_model_parallel_size != 1 and (
+            _distill_mode_includes_hidden(args) or _distill_mode_includes_router(args)
+        ):
+            raise RuntimeError(
+                "Hidden/router expansion distillation currently requires "
+                "--pipeline-model-parallel-size 1."
+            )
+
+        student_modules = _as_module_list(model)
+        teacher_modules = _as_module_list(teacher_model[0])
+        student_hidden_ctx = (
+            _capture_transformer_layer_outputs(
+                student_modules, args.moe_expansion_distill_hidden_layers, detach=False
+            )
+            if _distill_mode_includes_hidden(args)
+            else nullcontext({})
+        )
+        teacher_hidden_ctx = (
+            _capture_transformer_layer_outputs(
+                teacher_modules, args.moe_expansion_distill_hidden_layers, detach=True
+            )
+            if _distill_mode_includes_hidden(args)
+            else nullcontext({})
+        )
+        student_router_ctx = (
+            _capture_moe_router_inputs(student_modules, detach=False)
+            if _distill_mode_includes_router(args)
+            else nullcontext(({}, {}))
+        )
+        teacher_router_ctx = (
+            _capture_moe_router_inputs(teacher_modules, detach=True)
+            if _distill_mode_includes_router(args)
+            else nullcontext(({}, {}))
+        )
+
+        with stimer:
+            with student_hidden_ctx as student_hidden, student_router_ctx as (
+                student_router_inputs,
+                student_routers,
+            ):
+                student_output = model(
+                    tokens,
+                    position_ids,
+                    attention_mask,
+                    labels=labels,
+                    runtime_gather_output=True,
+                    return_loss_and_logits=True,
+                )
         output_tensor = student_output["losses"]
         student_logits = student_output["logits"]
         with torch.no_grad():
-            teacher_logits = teacher_model[0](
-                tokens,
-                position_ids,
-                attention_mask,
-                labels=None,
-                runtime_gather_output=True,
-            )
+            with teacher_hidden_ctx as teacher_hidden, teacher_router_ctx as (
+                teacher_router_inputs,
+                teacher_routers,
+            ):
+                teacher_logits = teacher_model[0](
+                    tokens,
+                    position_ids,
+                    attention_mask,
+                    labels=None,
+                    runtime_gather_output=True,
+                )
         output_tensor = {
             "losses": output_tensor,
             "student_logits": student_logits,
             "teacher_logits": teacher_logits,
         }
+        if _distill_mode_includes_hidden(args):
+            output_tensor["hidden_mse_loss"] = _masked_layer_hidden_mse(
+                student_hidden,
+                teacher_hidden,
+                labels,
+                loss_mask,
+            )
+        if _distill_mode_includes_router(args):
+            output_tensor["router_kl_loss"] = _masked_router_prob_kl(
+                student_router_inputs,
+                teacher_router_inputs,
+                student_routers,
+                teacher_routers,
+                labels,
+                loss_mask,
+            )
     else:
         with stimer:
             output_tensor = model(tokens, position_ids, attention_mask, labels=labels)
@@ -691,6 +790,18 @@ def _collect_transformer_layers(modules, layer_spec):
     return [(int(layer.layer_number), layer) for layer in layers if int(layer.layer_number) in selected]
 
 
+def _distill_mode_includes_hidden(args):
+    return args.moe_expansion_distill_mode in ("logits_hidden", "logits_hidden_router")
+
+
+def _distill_mode_includes_router(args):
+    return args.moe_expansion_distill_mode == "logits_hidden_router"
+
+
+def _as_module_list(model):
+    return model if isinstance(model, list) else [model]
+
+
 def _layer_output_tensor(output):
     if isinstance(output, tuple):
         output = output[0]
@@ -712,6 +823,144 @@ def _flatten_layer_hidden(hidden_states, labels):
     raise RuntimeError(
         f"Could not align hidden states {tuple(hidden_states.shape)} with labels {tuple(labels.shape)}"
     )
+
+
+@contextmanager
+def _capture_transformer_layer_outputs(modules, layer_spec, *, detach):
+    layer_modules = _collect_transformer_layers(modules, layer_spec)
+    captured = {}
+    handles = []
+
+    def make_hook(layer_number):
+        def hook(_module, _inputs, output):
+            tensor = _layer_output_tensor(output)
+            captured[layer_number] = tensor.detach() if detach else tensor
+
+        return hook
+
+    for layer_number, layer in layer_modules:
+        handles.append(layer.register_forward_hook(make_hook(layer_number)))
+
+    try:
+        yield captured
+    finally:
+        for handle in handles:
+            handle.remove()
+
+
+def _collect_moe_router_layers(modules):
+    router_layers = []
+    seen = set()
+    for module in unwrap_model(modules):
+        decoder = getattr(module, "decoder", None)
+        module_layers = getattr(decoder, "layers", None)
+        if module_layers is None:
+            continue
+        for layer in module_layers:
+            layer_number = getattr(layer, "layer_number", None)
+            mlp = getattr(layer, "mlp", None)
+            router = getattr(mlp, "router", None)
+            if layer_number is None or router is None or not hasattr(router, "gating"):
+                continue
+            key = (id(mlp), int(layer_number))
+            if key in seen:
+                continue
+            seen.add(key)
+            router_layers.append((int(layer_number), mlp, router))
+    return router_layers
+
+
+@contextmanager
+def _capture_moe_router_inputs(modules, *, detach):
+    captured = {}
+    routers = {}
+    handles = []
+
+    def make_hook(layer_number):
+        def hook(_module, inputs):
+            if not inputs:
+                return
+            hidden_states = inputs[0]
+            if not torch.is_tensor(hidden_states):
+                return
+            captured[layer_number] = hidden_states.detach() if detach else hidden_states
+
+        return hook
+
+    for layer_number, mlp, router in _collect_moe_router_layers(modules):
+        routers[layer_number] = router
+        handles.append(mlp.register_forward_pre_hook(make_hook(layer_number)))
+
+    try:
+        yield captured, routers
+    finally:
+        for handle in handles:
+            handle.remove()
+
+
+def _masked_layer_hidden_mse(student_hidden, teacher_hidden, labels, loss_mask):
+    common_layers = sorted(set(student_hidden) & set(teacher_hidden))
+    if not common_layers:
+        raise RuntimeError("Expansion hidden distillation requested, but no common layers were captured.")
+
+    flat_mask = loss_mask.reshape(-1).float()
+    layer_losses = []
+    for layer_number in common_layers:
+        student_flat = _flatten_layer_hidden(student_hidden[layer_number], labels)
+        teacher_flat = _flatten_layer_hidden(teacher_hidden[layer_number], labels)
+        if student_flat.shape != teacher_flat.shape:
+            raise RuntimeError(
+                "Hidden distillation shape mismatch at layer "
+                f"{layer_number}: student={tuple(student_flat.shape)} "
+                f"teacher={tuple(teacher_flat.shape)}"
+            )
+        per_token_mse = (student_flat.float() - teacher_flat.float()).pow(2).mean(dim=-1)
+        layer_losses.append(torch.sum(per_token_mse * flat_mask))
+    return torch.stack(layer_losses).mean()
+
+
+def _masked_router_prob_kl(
+    student_router_inputs,
+    teacher_router_inputs,
+    student_routers,
+    teacher_routers,
+    labels,
+    loss_mask,
+):
+    common_layers = sorted(
+        set(student_router_inputs)
+        & set(teacher_router_inputs)
+        & set(student_routers)
+        & set(teacher_routers)
+    )
+    if not common_layers:
+        raise RuntimeError("Expansion router distillation requested, but no common routers were captured.")
+
+    flat_mask = loss_mask.reshape(-1).bool()
+    layer_losses = []
+    for layer_number in common_layers:
+        student_flat = _flatten_layer_hidden(student_router_inputs[layer_number], labels)
+        teacher_flat = _flatten_layer_hidden(teacher_router_inputs[layer_number], labels)
+        if student_flat.shape[:-1] != teacher_flat.shape[:-1]:
+            raise RuntimeError(
+                "Router distillation token-shape mismatch at layer "
+                f"{layer_number}: student={tuple(student_flat.shape)} "
+                f"teacher={tuple(teacher_flat.shape)}"
+            )
+        student_flat = student_flat[flat_mask]
+        teacher_flat = teacher_flat[flat_mask]
+        if student_flat.numel() == 0:
+            continue
+        with torch.no_grad():
+            teacher_logits = teacher_routers[layer_number].gating(teacher_flat)
+        student_logits = student_routers[layer_number].gating(student_flat)
+        layer_losses.append(
+            teacher_student_router_kl(student_logits, teacher_logits) * student_flat.shape[0]
+        )
+
+    if not layer_losses:
+        raise RuntimeError("Expansion router distillation found zero valid tokens.")
+    return torch.stack(layer_losses).mean()
 
 
 def _run_hidden_space_dump(model, iteration):
