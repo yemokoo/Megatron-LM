@@ -82,8 +82,15 @@ export EVAL_INTERVAL="${EVAL_INTERVAL:-100}"
 export LOG_INTERVAL="${LOG_INTERVAL:-10}"
 export OLD_MODEL_KL_COEFF="${OLD_MODEL_KL_COEFF:-1.0}"
 export OLD_MODEL_KL_TEMPERATURE="${OLD_MODEL_KL_TEMPERATURE:-1.0}"
+export MOE_EXPANSION_DISTILL_MODE="${MOE_EXPANSION_DISTILL_MODE:-none}"
+export MOE_EXPANSION_DISTILL_LM_LOSS_COEFF="${MOE_EXPANSION_DISTILL_LM_LOSS_COEFF:-1.0}"
+export MOE_EXPANSION_DISTILL_HIDDEN_MSE_COEFF="${MOE_EXPANSION_DISTILL_HIDDEN_MSE_COEFF:-1.0}"
+export MOE_EXPANSION_DISTILL_ROUTER_KL_COEFF="${MOE_EXPANSION_DISTILL_ROUTER_KL_COEFF:-1.0}"
+export MOE_EXPANSION_DISTILL_HIDDEN_LAYERS="${MOE_EXPANSION_DISTILL_HIDDEN_LAYERS:-all}"
 if [ -z "${ENABLE_OLD_MODEL_KL:-}" ]; then
-    if [ "$TRAIN_NEW_EXPERTS_AND_ROUTER_ONLY" = "1" ]; then
+    if [ "$MOE_EXPANSION_DISTILL_MODE" != "none" ]; then
+        export ENABLE_OLD_MODEL_KL=1
+    elif [ "$TRAIN_NEW_EXPERTS_AND_ROUTER_ONLY" = "1" ]; then
         export ENABLE_OLD_MODEL_KL=0
     else
         export ENABLE_OLD_MODEL_KL=1
@@ -366,11 +373,21 @@ if [ "$TRAIN_NEW_EXPERTS_AND_ROUTER_ONLY" = "1" ]; then
     fi
 fi
 
-if [ "$ENABLE_OLD_MODEL_KL" = "1" ]; then
+if [ "$ENABLE_OLD_MODEL_KL" = "1" ] || [ "$MOE_EXPANSION_DISTILL_MODE" != "none" ]; then
     SAVE_ARGS+=(
         --moe-old-model-kl-load "$SSD_SOURCE_WEIGHTS"
         --moe-old-model-kl-coeff "$OLD_MODEL_KL_COEFF"
         --moe-old-model-kl-temperature "$OLD_MODEL_KL_TEMPERATURE"
+    )
+fi
+
+if [ "$MOE_EXPANSION_DISTILL_MODE" != "none" ]; then
+    SAVE_ARGS+=(
+        --moe-expansion-distill-mode "$MOE_EXPANSION_DISTILL_MODE"
+        --moe-expansion-distill-lm-loss-coeff "$MOE_EXPANSION_DISTILL_LM_LOSS_COEFF"
+        --moe-expansion-distill-hidden-mse-coeff "$MOE_EXPANSION_DISTILL_HIDDEN_MSE_COEFF"
+        --moe-expansion-distill-router-kl-coeff "$MOE_EXPANSION_DISTILL_ROUTER_KL_COEFF"
+        --moe-expansion-distill-hidden-layers "$MOE_EXPANSION_DISTILL_HIDDEN_LAYERS"
     )
 fi
 
