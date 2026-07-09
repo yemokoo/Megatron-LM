@@ -3,6 +3,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/common.sh"
+# common.sh sources activate_kt_env.sh, which clobbers SCRIPT_DIR with its own
+# location (scripts/miscellaneous). Restore it so the run_guarded_training.sh /
+# run_continual_moe_a100_bf16.sh lookups below resolve inside scripts/experiment/a100.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_ROOT"
 
 export LOCAL_SSD_ROOT="${LOCAL_SSD_ROOT:-/tmp/flame-moe}"
@@ -24,6 +28,10 @@ export TARGET_LOGICAL_STEP="$((SOURCE_LOGICAL_STEP + TRAIN_ITERS))"
 export PAUSE_SECONDS="${PAUSE_SECONDS:-180}"
 export DEBUG_TRAINABLE_PARAMS_AND_EXIT="${DEBUG_TRAINABLE_PARAMS_AND_EXIT:-0}"
 export RUN_ONLY_STAGE="${RUN_ONLY_STAGE:-all}"
+# Required iteration count of the ffn_only source checkpoint. Default 3600 = the
+# phase3 router-retuned wiki+code checkpoint. Override to 1800 to start conv from
+# the raw code checkpoint (no router finetune) — the "no-router-FT" exp3 variant.
+export FFN_SOURCE_REQUIRED_ITERS="${FFN_SOURCE_REQUIRED_ITERS:-3600}"
 
 export SOURCE_NUM_EXPERTS="${SOURCE_NUM_EXPERTS:-16}"
 export NUM_EXPERTS="${NUM_EXPERTS:-24}"
@@ -166,14 +174,28 @@ common_env=(
 )
 
 run_ffn_only() {
-    local run_id="${FFN_RUN_ID:-g2-ffn-only-phase4-conversation-from-router-retuned-e16to24-mb96-1800}"
+    # Freeze behaviour is overridable so the same code path serves both:
+    #   - freeze       (default): old experts + shared/attention all frozen
+    #   - attn_unfreeze        : old experts frozen, attention (shared) trained
+    local freeze_shared="${FFN_FREEZE_SHARED:-1}"
+    local train_attn="${FFN_TRAIN_ATTENTION_WITH_NEW_EXPERTS:-0}"
+    local freeze_dense_attn_lora="${FFN_FREEZE_DENSE_ATTENTION_LORA:-1}"
+    local mb="${FFN_MICRO_BATCH_SIZE:-96}"
+    local default_run_id
+    if [ "$train_attn" = "1" ]; then
+        default_run_id="g2-ffn-only-attn-unfreeze-phase4-conversation-from-router-retuned-e16to24-mb${mb}-1800"
+    else
+        default_run_id="g2-ffn-only-phase4-conversation-from-router-retuned-e16to24-mb${mb}-1800"
+    fi
+    local run_id="${FFN_RUN_ID:-$default_run_id}"
     local train_weights="${FFN_TRAIN_WEIGHTS:-$PHASE4_ROOT/$run_id}"
     local label="ffn_only"
+    [ "$train_attn" = "1" ] && label="ffn_only_attn_unfreeze"
     local debug_path="$train_weights/logs/trainable_params_debug.json"
 
     ensure_target_is_safe "$label" "$train_weights" || return 0
 
-    echo "[START] $label $(date)"
+    echo "[START] $label (freeze_shared=$freeze_shared train_attn=$train_attn) $(date)"
     env \
         "${common_env[@]}" \
         RUN_ID="$run_id" \
@@ -183,10 +205,10 @@ run_ffn_only() {
         STAGE_NAME=phase4_conversation_after_router_retune_ffn_only \
         STAGE_LABEL=phase4_conversation_ffn_only \
         SOURCE_WEIGHTS_DIR="$FFN_SOURCE" \
-        SOURCE_REQUIRED_ITERS=3600 \
-        FREEZE_SHARED=1 \
-        TRAIN_ATTENTION_WITH_NEW_EXPERTS=0 \
-        FREEZE_DENSE_ATTENTION_LORA_WITH_NEW_EXPERTS=1 \
+        SOURCE_REQUIRED_ITERS="$FFN_SOURCE_REQUIRED_ITERS" \
+        FREEZE_SHARED="$freeze_shared" \
+        TRAIN_ATTENTION_WITH_NEW_EXPERTS="$train_attn" \
+        FREEZE_DENSE_ATTENTION_LORA_WITH_NEW_EXPERTS="$freeze_dense_attn_lora" \
         MICRO_BATCH_SIZE="${FFN_MICRO_BATCH_SIZE:-96}" \
         ENABLE_OLD_MODEL_KL=0 \
         OLD_MODEL_KL_COEFF=0.0 \
@@ -261,7 +283,7 @@ check_dataset "conversation train" "$CONVERSATION_TRAIN"
 check_dataset "conversation probe" "$CONVERSATION_PROBE_DATASET"
 check_dataset "code probe" "$CODE_PROBE_DATASET"
 check_dataset "wiki probe" "$WIKI_PROBE_DATASET"
-check_completed_source "ffn_only" "$FFN_SOURCE" 3600
+check_completed_source "ffn_only" "$FFN_SOURCE" "$FFN_SOURCE_REQUIRED_ITERS"
 check_completed_source "exp1_freeze_wiki" "$EXP1_FREEZE_WIKI_SOURCE" 3600
 check_completed_source "exp2_unfreeze_wiki" "$EXP2_UNFREEZE_WIKI_SOURCE" 3600
 
@@ -290,6 +312,14 @@ case "$RUN_ONLY_STAGE" in
     ffn_only)
         run_ffn_only
         ;;
+    ffn_only_attn_unfreeze)
+        # Exp 3: expand 16->24, old experts frozen, attention (shared) trained.
+        FFN_TRAIN_ATTENTION_WITH_NEW_EXPERTS=1 \
+        FFN_FREEZE_DENSE_ATTENTION_LORA=0 \
+        FFN_FREEZE_SHARED=1 \
+        FFN_MASTER_PORT="${FFN_MASTER_PORT:-29814}" \
+            run_ffn_only
+        ;;
     exp1_freeze_wiki)
         run_shared_router \
             "exp1_freeze_wiki" \
@@ -312,7 +342,7 @@ case "$RUN_ONLY_STAGE" in
         ;;
     *)
         echo "[ERROR] invalid RUN_ONLY_STAGE=$RUN_ONLY_STAGE" >&2
-        echo "        choose one of: all, ffn_only, exp1_freeze_wiki, exp2_unfreeze_wiki" >&2
+        echo "        choose one of: all, ffn_only, ffn_only_attn_unfreeze, exp1_freeze_wiki, exp2_unfreeze_wiki" >&2
         exit 1
         ;;
 esac

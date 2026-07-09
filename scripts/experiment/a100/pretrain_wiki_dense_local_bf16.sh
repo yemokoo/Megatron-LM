@@ -3,6 +3,9 @@ set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 cd "$PROJECT_ROOT"
+# Puts Megatron-LM on PYTHONPATH; without it "import megatron" fails for the
+# metadata-summary heredocs below (they run before `cd Megatron-LM`).
+source "$PROJECT_ROOT/scripts/miscellaneous/activate_kt_env.sh"
 
 resolve_python() {
     if [ -x "$PROJECT_ROOT/.conda/envs/flame3090/bin/python" ]; then
@@ -131,6 +134,21 @@ echo "wiki dense run log: $RUN_LOG"
 echo "wiki dense GPU log: $GPU_LOG"
 echo "wiki dense metadata: $RUN_METADATA"
 rsync -rlptD --info=progress2 "$TRAIN_DATASET/" "$SSD_TRAIN_DATASET/"
+
+# --load always points at $SSD_WEIGHTS (below), which is ephemeral /tmp storage. If
+# a prior attempt already made progress and it was flushed to persistent storage
+# (e.g. after an OOM crash) but the SSD copy was since wiped, restore it here so
+# training resumes from the latest checkpoint instead of silently restarting from
+# scratch.
+if [ -f "$TRAIN_WEIGHTS/latest_checkpointed_iteration.txt" ] && [ ! -f "$SSD_WEIGHTS/latest_checkpointed_iteration.txt" ]; then
+    echo "wiki dense: restoring own in-progress checkpoint from $TRAIN_WEIGHTS to $SSD_WEIGHTS for resume"
+    rsync -rlptD \
+        --exclude 'logs/' \
+        --exclude 'wandb/' \
+        --exclude 'events.out.tfevents*' \
+        --exclude 'progress.txt' \
+        "$TRAIN_WEIGHTS/" "$SSD_WEIGHTS/"
+fi
 
 if [ -z "${TRAIN_ITERS:-}" ]; then
     export TRAIN_ITERS="$("$PYTHON_BIN" - <<'PY'
@@ -298,9 +316,20 @@ TORCHRUN_PID=$!
     done
 ) &
 
+set +e
 wait "$TORCHRUN_PID"
+TORCHRUN_EXIT=$?
+set -e
 kill "$GPU_LOG_PID" 2>/dev/null || true
+# Always flush to persistent storage, even on crash (e.g. OOM), so a rerun can
+# resume from the latest checkpoint instead of losing progress since the last
+# periodic (15-minute) rsync.
 rsync -rlptD "$SSD_WEIGHTS/" "$TRAIN_WEIGHTS/"
+
+if [ "$TORCHRUN_EXIT" -ne 0 ]; then
+    echo "[FAIL] wiki dense pretrain exited with code $TORCHRUN_EXIT; checkpoint flushed to $TRAIN_WEIGHTS for resume"
+    exit "$TORCHRUN_EXIT"
+fi
 
 echo "wiki dense pretrain complete. Checkpoint at: $TRAIN_WEIGHTS"
 echo "wiki dense run log saved at: $RUN_LOG"

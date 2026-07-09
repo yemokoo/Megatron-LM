@@ -3,6 +3,9 @@ set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 cd "$PROJECT_ROOT"
+# Puts Megatron-LM on PYTHONPATH; without it "import megatron" fails for the
+# metadata-summary heredocs used throughout the phase chain.
+source "$PROJECT_ROOT/scripts/miscellaneous/activate_kt_env.sh"
 
 resolve_python() {
     if [ -x "$PROJECT_ROOT/.conda/envs/flame3090/bin/python" ]; then

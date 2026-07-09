@@ -1,12 +1,15 @@
 # Local experiment artifacts
-/.local/
+.local/
 /.logs/
 /dataset/
+/data/
 /weights/
 /results/
+/analysis_outputs/
 /figures/
 /site/
 /logs/
+/smoke_logs/
 /slurm-*
 
 # Secrets and local env files
@@ -26,10 +29,12 @@ __pycache__/
 # Local Python / Conda environments
 /.conda/
 .venv/
+.venv-*/
 venv/
 
 # Experiment tracking
 wandb/
+wandb_shadow_backup_*/
 tensorboard/
 events.out.tfevents*
 
@@ -48,4 +53,5 @@ dist/
 # Editor / OS noise
 .vscode/
 .idea/
+.claude/
 .DS_Store

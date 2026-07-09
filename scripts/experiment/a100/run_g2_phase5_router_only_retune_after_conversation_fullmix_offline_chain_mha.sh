@@ -3,6 +3,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/common.sh"
+# common.sh sources activate_kt_env.sh, which clobbers SCRIPT_DIR with its own dir
+# (scripts/miscellaneous). Restore it so the run_guarded_training.sh / phase3_*.sh
+# lookups below resolve inside scripts/experiment/a100.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_ROOT"
 
 export PYTHONPATH="$PROJECT_ROOT/Megatron-LM${PYTHONPATH:+:$PYTHONPATH}"

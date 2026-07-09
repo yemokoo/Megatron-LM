@@ -3,6 +3,9 @@ set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$PROJECT_ROOT"
+# Puts Megatron-LM on PYTHONPATH; without it "import megatron" fails for the
+# metadata-summary heredocs below (they run before `cd Megatron-LM`).
+source "$PROJECT_ROOT/scripts/miscellaneous/activate_kt_env.sh"
 
 resolve_python() {
     if [ -x "$PROJECT_ROOT/.conda/envs/flame3090/bin/python" ]; then
@@ -202,6 +205,23 @@ rsync -rlptD \
     "$STAGE1_WEIGHTS_DIR/" "$SSD_SOURCE_WEIGHTS/"
 rsync -rlptD --info=progress2 "$TRAIN_DATASET/" "$SSD_CODE_TRAIN/"
 
+# --- own-progress resume: if this stage already saved a checkpoint in persistent
+# storage (e.g. a prior attempt OOM'd mid-stage), restore it and do a TRUE resume
+# (keep optimizer/rng/iteration) instead of restarting the stage from the source
+# checkpoint at iteration 0. Only the primary --load target changes here; the KD
+# teacher (--moe-old-model-kl-load) always stays pinned to the source checkpoint.
+RESUME_OWN_PROGRESS=0
+if [ -f "$TRAIN_WEIGHTS/latest_checkpointed_iteration.txt" ]; then
+    echo "code-from-wiki dense: found own in-progress checkpoint at $TRAIN_WEIGHTS, resuming from it (not restarting from source)"
+    rsync -rlptD \
+        --exclude 'logs/' \
+        --exclude 'wandb/' \
+        --exclude 'events.out.tfevents*' \
+        --exclude 'progress.txt' \
+        "$TRAIN_WEIGHTS/" "$SSD_TARGET_WEIGHTS/"
+    RESUME_OWN_PROGRESS=1
+fi
+
 "$PYTHON_BIN" - <<'PY'
 import json
 import os
@@ -266,10 +286,14 @@ INFRA_ARGS=(
     --expert-model-parallel-size "$EXPERT_MODEL_PARALLEL_SIZE"
     --distributed-timeout-minutes 30
     --no-persist-layer-norm
-    --finetune
-    --no-load-optim
-    --no-load-rng
 )
+if [ "$RESUME_OWN_PROGRESS" = "1" ]; then
+    # true resume: keep optimizer/rng state and the in-progress iteration count.
+    :
+else
+    # fresh start of this stage: finetune from the source checkpoint at iteration 0.
+    INFRA_ARGS+=(--finetune --no-load-optim --no-load-rng)
+fi
 
 TRAIN_ARGS=(
     --bf16
@@ -297,7 +321,7 @@ SAVE_ARGS=(
     --log-progress
     --save "$SSD_TARGET_WEIGHTS"
     --save-interval "$SAVE_INTERVAL"
-    --load "$SSD_SOURCE_WEIGHTS"
+    --load "$([ "$RESUME_OWN_PROGRESS" = "1" ] && echo "$SSD_TARGET_WEIGHTS" || echo "$SSD_SOURCE_WEIGHTS")"
     --eval-interval "$EVAL_INTERVAL"
     --tensorboard-dir "$SSD_TARGET_WEIGHTS"
     --moe-old-model-kl-coeff "$OLD_MODEL_KL_COEFF"
@@ -387,9 +411,20 @@ TORCHRUN_PID=$!
     done
 ) &
 
+set +e
 wait "$TORCHRUN_PID"
+TORCHRUN_EXIT=$?
+set -e
 kill "$GPU_LOG_PID" 2>/dev/null || true
+# Always flush to persistent storage, even on crash (e.g. OOM), so a rerun can
+# resume from the latest checkpoint instead of losing progress since the last
+# periodic (15-minute) rsync.
 rsync -rlptD "$SSD_TARGET_WEIGHTS/" "$TRAIN_WEIGHTS/"
+
+if [ "$TORCHRUN_EXIT" -ne 0 ]; then
+    echo "[FAIL] code-from-wiki dense training exited with code $TORCHRUN_EXIT; checkpoint flushed to $TRAIN_WEIGHTS for resume"
+    exit "$TORCHRUN_EXIT"
+fi
 
 echo "code-from-wiki dense continual training complete. Checkpoint at: $TRAIN_WEIGHTS"
 echo "code-from-wiki dense run log saved at: $RUN_LOG"
