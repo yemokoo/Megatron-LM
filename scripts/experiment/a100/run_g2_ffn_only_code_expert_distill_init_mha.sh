@@ -3,6 +3,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+# Preserve this script's dir: sourcing common.sh (-> activate_kt_env.sh) clobbers
+# SCRIPT_DIR, so keep our own handle for the final exec.
+A100_SCRIPTS_DIR="$SCRIPT_DIR"
 source "$SCRIPT_DIR/common.sh"
 
 MODE="${1:-${MOE_EXPANSION_DISTILL_MODE:-logits}}"
@@ -53,8 +56,8 @@ export MODEL_CONFIG_SCRIPT="${MODEL_CONFIG_SCRIPT:-scripts/experiment/a100/flame
 
 export MICRO_BATCH_SIZE="${MICRO_BATCH_SIZE:-96}"
 export GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-2304}"
-export TRAIN_ITERS="${TRAIN_ITERS:-300}"
-export SAVE_INTERVAL="${SAVE_INTERVAL:-$TRAIN_ITERS}"
+export TRAIN_ITERS="${TRAIN_ITERS:-1800}"
+export SAVE_INTERVAL="${SAVE_INTERVAL:-600}"
 export EVAL_INTERVAL="${EVAL_INTERVAL:-$TRAIN_ITERS}"
 export LOG_INTERVAL="${LOG_INTERVAL:-20}"
 export PROBE_EVAL_INTERVAL="${PROBE_EVAL_INTERVAL:-50}"
@@ -97,4 +100,4 @@ echo "[CONFIG] trainable=new FFN experts + new router rows only"
 echo "[CONFIG] losses: logit_kl=$OLD_MODEL_KL_COEFF hidden_mse=$MOE_EXPANSION_DISTILL_HIDDEN_MSE_COEFF router_kl=$MOE_EXPANSION_DISTILL_ROUTER_KL_COEFF lm_coeff=$MOE_EXPANSION_DISTILL_LM_LOSS_COEFF aux=$MOE_AUX_LOSS_COEFF z=$MOE_Z_LOSS_COEFF"
 echo "[CONFIG] data=$TRAIN_DATASET"
 
-exec bash "$SCRIPT_DIR/run_continual_moe_a100_bf16.sh"
+exec bash "$A100_SCRIPTS_DIR/run_continual_moe_a100_bf16.sh"

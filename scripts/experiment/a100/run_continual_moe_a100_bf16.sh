@@ -53,6 +53,11 @@ export LOCAL_DATASET="${LOCAL_DATASET:-$LOCAL_BASE/dataset}"
 export LOCAL_WEIGHTS="${LOCAL_WEIGHTS:-$LOCAL_BASE/weights}"
 export LOCAL_SSD_ROOT="${LOCAL_SSD_ROOT:-/tmp/flame-moe}"
 export DIRECT_LOCAL_SAVE="${DIRECT_LOCAL_SAVE:-0}"
+# When the source checkpoint is ALREADY expanded to the target expert count
+# (e.g. a pre-Code expansion-distill init), load it as a fresh finetune without
+# re-expanding: --finetune resets iteration to 0 and --moe-resume-from-num-experts
+# reapplies the new-experts+router freeze mask.
+export LOAD_EXPANDED_SOURCE="${LOAD_EXPANDED_SOURCE:-0}"
 
 export SSD_MOUNT="${LOCAL_SSD_ROOT}/${RUN_ID}"
 export SSD_TRAIN_DATASET="${SSD_MOUNT}/dataset/train"
@@ -347,6 +352,16 @@ SAVE_ARGS=(
 if [ "$RESUME_FROM_TARGET" = "1" ]; then
     SAVE_ARGS+=(
         --load "$SSD_TARGET_WEIGHTS"
+        --moe-resume-from-num-experts "$SOURCE_NUM_EXPERTS"
+    )
+elif [ "$LOAD_EXPANDED_SOURCE" = "1" ]; then
+    # Source is already expanded to NUM_EXPERTS: load fresh (iteration 0) without
+    # re-expanding, reapplying the new-experts+router freeze via resume-from.
+    SAVE_ARGS+=(
+        --load "$SSD_SOURCE_WEIGHTS"
+        --no-load-optim
+        --no-load-rng
+        --finetune
         --moe-resume-from-num-experts "$SOURCE_NUM_EXPERTS"
     )
 else
