@@ -143,6 +143,11 @@ export SHARED_ROUTER_HYBRID_TOPK_WITH_ALL_NEW_EXPERTS="${SHARED_ROUTER_HYBRID_TO
 export SHARED_ROUTER_HYBRID_ALL_NEW_EXPERTS_FROM_NUM_EXPERTS="${SHARED_ROUTER_HYBRID_ALL_NEW_EXPERTS_FROM_NUM_EXPERTS:-$SOURCE_NUM_EXPERTS}"
 export OLD_MODEL_KL_COEFF="${OLD_MODEL_KL_COEFF:-0.0}"
 export OLD_MODEL_KL_TEMPERATURE="${OLD_MODEL_KL_TEMPERATURE:-1.0}"
+export MOE_EXPANSION_DISTILL_MODE="${MOE_EXPANSION_DISTILL_MODE:-none}"
+export MOE_EXPANSION_DISTILL_LM_LOSS_COEFF="${MOE_EXPANSION_DISTILL_LM_LOSS_COEFF:-1.0}"
+export MOE_EXPANSION_DISTILL_HIDDEN_MSE_COEFF="${MOE_EXPANSION_DISTILL_HIDDEN_MSE_COEFF:-1.0}"
+export MOE_EXPANSION_DISTILL_ROUTER_KL_COEFF="${MOE_EXPANSION_DISTILL_ROUTER_KL_COEFF:-1.0}"
+export MOE_EXPANSION_DISTILL_HIDDEN_LAYERS="${MOE_EXPANSION_DISTILL_HIDDEN_LAYERS:-all}"
 export ENABLE_OLD_MODEL_KL="${ENABLE_OLD_MODEL_KL:-}"
 export STAGE1_WEIGHTS_DIR="${STAGE1_WEIGHTS_DIR:-}"
 export STAGE1_SUBDIR="${STAGE1_SUBDIR:-a100/wiki-shared-router-hybrid-pretrain-local}"
@@ -187,7 +192,9 @@ export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
 export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=true
 
 if [ -z "$ENABLE_OLD_MODEL_KL" ]; then
-    if "$PYTHON_BIN" - <<'PY'
+    if [ "$MOE_EXPANSION_DISTILL_MODE" != "none" ]; then
+        export ENABLE_OLD_MODEL_KL=1
+    elif "$PYTHON_BIN" - <<'PY'
 import os
 raise SystemExit(0 if float(os.environ.get("OLD_MODEL_KL_COEFF", "0.0")) > 0.0 else 1)
 PY
@@ -241,6 +248,9 @@ import re, sys
 iter_re = re.compile(r"(\[[^]]+\]) iteration\s+(\d+)/\s*(\d+)")
 ms_re = re.compile(r"elapsed time per iteration \(ms\):\s*([0-9.]+)")
 loss_re = re.compile(r"lm loss:\s*([0-9.Ee+-]+)")
+kd_re = re.compile(r"kd loss:\s*([0-9.Ee+-]+)")
+hidden_re = re.compile(r"hidden mse loss:\s*([0-9.Ee+-]+)")
+router_distill_re = re.compile(r"router prob kl loss:\s*([0-9.Ee+-]+)")
 tflops_re = re.compile(r"throughput per GPU \(TFLOP/s/GPU\):\s*([0-9.]+)")
 val_re = re.compile(r"validation loss at iteration\s+(\d+).*lm loss value:\s*([^|]+)")
 save_re = re.compile(r"saving checkpoint at iteration\s+(\d+)")
@@ -271,6 +281,9 @@ for line in sys.stdin:
         parts = [f"{m.group(1)} step {step}/{total}"]
         ms = ms_re.search(line)
         loss = loss_re.search(line)
+        kd = kd_re.search(line)
+        hidden = hidden_re.search(line)
+        router_distill = router_distill_re.search(line)
         tflops = tflops_re.search(line)
         if ms:
             seconds_per_iter = float(ms.group(1)) / 1000.0
@@ -284,6 +297,12 @@ for line in sys.stdin:
                     parts.append(f"end {end_at:%Y-%m-%d %H:%M:%S}")
         if loss:
             parts.append(f"lm loss {loss.group(1)}")
+        if kd:
+            parts.append(f"kd loss {kd.group(1)}")
+        if hidden:
+            parts.append(f"hidden mse {hidden.group(1)}")
+        if router_distill:
+            parts.append(f"router kl {router_distill.group(1)}")
         if tflops:
             parts.append(f"GPU {tflops.group(1)} TFLOP/s")
         print(" | ".join(parts), flush=True)
@@ -432,6 +451,11 @@ metadata = {
     'old_model_kl_enabled': os.environ.get('ENABLE_OLD_MODEL_KL', '0') == '1',
     'old_model_kl_coeff': float(os.environ.get('OLD_MODEL_KL_COEFF', '0.0')),
     'old_model_kl_temperature': float(os.environ.get('OLD_MODEL_KL_TEMPERATURE', '1.0')),
+    'moe_expansion_distill_mode': os.environ.get('MOE_EXPANSION_DISTILL_MODE', 'none'),
+    'moe_expansion_distill_lm_loss_coeff': float(os.environ.get('MOE_EXPANSION_DISTILL_LM_LOSS_COEFF', '1.0')),
+    'moe_expansion_distill_hidden_mse_coeff': float(os.environ.get('MOE_EXPANSION_DISTILL_HIDDEN_MSE_COEFF', '1.0')),
+    'moe_expansion_distill_router_kl_coeff': float(os.environ.get('MOE_EXPANSION_DISTILL_ROUTER_KL_COEFF', '1.0')),
+    'moe_expansion_distill_hidden_layers': os.environ.get('MOE_EXPANSION_DISTILL_HIDDEN_LAYERS', 'all'),
 }
 with open(os.environ['RUN_METADATA'], 'w', encoding='utf-8') as f:
     json.dump(metadata, f, indent=2)
@@ -589,6 +613,17 @@ if [ "$ENABLE_OLD_MODEL_KL" = "1" ]; then
     )
 fi
 
+EXPANSION_DISTILL_ARGS=()
+if [ "$MOE_EXPANSION_DISTILL_MODE" != "none" ]; then
+    EXPANSION_DISTILL_ARGS+=(
+        --moe-expansion-distill-mode "$MOE_EXPANSION_DISTILL_MODE"
+        --moe-expansion-distill-lm-loss-coeff "$MOE_EXPANSION_DISTILL_LM_LOSS_COEFF"
+        --moe-expansion-distill-hidden-mse-coeff "$MOE_EXPANSION_DISTILL_HIDDEN_MSE_COEFF"
+        --moe-expansion-distill-router-kl-coeff "$MOE_EXPANSION_DISTILL_ROUTER_KL_COEFF"
+        --moe-expansion-distill-hidden-layers "$MOE_EXPANSION_DISTILL_HIDDEN_LAYERS"
+    )
+fi
+
 torchrun \
     --nproc_per_node "$NPROC_PER_NODE" \
     --master_addr "$MASTER_ADDR" \
@@ -640,6 +675,7 @@ torchrun \
     "${TERTIARY_PROBE_ARGS[@]}" \
     "${ROUTER_MEMORY_ARGS[@]}" \
     "${OLD_MODEL_KL_ARGS[@]}" \
+    "${EXPANSION_DISTILL_ARGS[@]}" \
     "${WANDB_ARGS[@]}" \
     "${DEBUG_TRAINABLE_ARGS[@]}"
 
