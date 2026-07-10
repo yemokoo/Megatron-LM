@@ -36,15 +36,20 @@ from megatron.core.transformer.transformer_layer import (
 from megatron.core.utils import make_viewless_tensor
 
 
-_SHARED_ROUTER_INPUT_CAPTURE_STACK: List[list] = []
+_SHARED_ROUTER_INPUT_CAPTURE_STACK: List[Tuple[list, bool]] = []
 _SHARED_ROUTER_ROUTING_CAPTURE_STACK: List[list] = []
 
 
 @contextmanager
-def capture_shared_router_inputs():
-    """Capture detached inputs to each shared router during a forward pass."""
+def capture_shared_router_inputs(*, detach: bool = True):
+    """Capture inputs to each shared router during a forward pass.
+
+    Existing analysis and router-memory callers use detached inputs. Expansion
+    distillation can opt into the autograd-connected student inputs so router
+    alignment also supervises newly added experts in earlier layers.
+    """
     captured = []
-    _SHARED_ROUTER_INPUT_CAPTURE_STACK.append(captured)
+    _SHARED_ROUTER_INPUT_CAPTURE_STACK.append((captured, detach))
     try:
         yield captured
     finally:
@@ -1013,7 +1018,10 @@ class SharedRouterHybridTransformerLayer(MegatronModule, BaseTransformerLayer):
         if router is None:
             raise ValueError("Routing requested for a layer without experts.")
         if capture and _SHARED_ROUTER_INPUT_CAPTURE_STACK:
-            _SHARED_ROUTER_INPUT_CAPTURE_STACK[-1].append((self.layer_number, hidden_states.detach()))
+            captured, detach = _SHARED_ROUTER_INPUT_CAPTURE_STACK[-1]
+            captured.append(
+                (self.layer_number, hidden_states.detach() if detach else hidden_states)
+            )
 
         if (
             self.training

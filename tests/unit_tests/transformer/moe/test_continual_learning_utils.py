@@ -21,6 +21,7 @@ from megatron.core.transformer.shared_router_hybrid import (
     SharedRouterAttentionOnlyTransformerLayer,
     SharedRouterHybridTransformerLayer,
     TwoRouterHybridTransformerLayer,
+    capture_shared_router_inputs,
     topk_with_all_new_experts_routing,
 )
 from megatron.core.transformer.transformer_config import TransformerConfig
@@ -392,6 +393,72 @@ def test_freeze_all_but_new_moe_params_can_train_all_router_rows():
 
     assert torch.all(grad == 1)
     assert not model.dense.weight.requires_grad
+
+
+def test_freeze_all_but_new_moe_params_masks_old_ffn_attention_and_router_rows():
+    model = RouterLoraAndGroupedExpertsModel()
+
+    freeze_all_but_new_moe_params(
+        model,
+        num_existing_experts=2,
+        freeze_existing_experts=True,
+        freeze_existing_router=True,
+        train_dense_attention_lora=False,
+    )
+
+    model.zero_grad(set_to_none=True)
+    _trainable_expert_and_router_loss(model).backward()
+
+    _assert_router_rows_masked(model.router.weight.grad, {0, 1}, num_experts=4)
+    _assert_grouped_mlp_experts_masked(model.ffn_experts, {0, 1}, num_experts=4)
+    _assert_attention_expert_rows_masked(
+        model.attn_lora_experts, {0, 1}, num_experts=4
+    )
+    assert not model.q_full_rank_lora.weight.requires_grad
+    assert not model.dense.weight.requires_grad
+
+
+def test_shared_router_input_capture_can_preserve_student_autograd():
+    layer, _, _ = _build_attention_only_forward_harness()
+    hidden_states = torch.randn(2, 8, requires_grad=True)
+
+    with capture_shared_router_inputs(detach=False) as captured:
+        layer._compute_routing(hidden_states, layer.shared_expert_router)
+
+    assert len(captured) == 1
+    assert captured[0][0] == layer.layer_number
+    assert captured[0][1].requires_grad
+    assert captured[0][1] is hidden_states
+
+
+def test_shared_router_input_capture_detaches_by_default():
+    layer, _, _ = _build_attention_only_forward_harness()
+    hidden_states = torch.randn(2, 8, requires_grad=True)
+
+    with capture_shared_router_inputs() as captured:
+        layer._compute_routing(hidden_states, layer.shared_expert_router)
+
+    assert len(captured) == 1
+    assert not captured[0][1].requires_grad
+
+
+def test_shared_router_expansion_copies_old_attention_experts_and_keeps_new_init():
+    source = RouterLoraAndGroupedExpertsModel(num_experts=2)
+    target = RouterLoraAndGroupedExpertsModel(num_experts=4)
+
+    with torch.no_grad():
+        for offset, param in enumerate(source.attn_lora_experts.parameters(), start=1):
+            param.fill_(float(offset))
+        for param in target.attn_lora_experts.parameters():
+            param.fill_(-1.0)
+
+    expand_moe_model(target, source, num_existing_experts=2)
+
+    for source_param, target_param in zip(
+        source.attn_lora_experts.parameters(), target.attn_lora_experts.parameters()
+    ):
+        assert torch.equal(target_param[:2], source_param)
+        assert torch.all(target_param[2:] == -1.0)
 
 
 def test_freeze_all_but_new_moe_params_can_train_all_experts_and_router_rows():

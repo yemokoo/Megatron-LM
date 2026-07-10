@@ -373,12 +373,12 @@ def forward_step(data_iterator, model: GPTModel):
             else nullcontext({})
         )
         student_router_ctx = (
-            _capture_moe_router_inputs(student_modules, detach=False)
+            _capture_distill_router_inputs(student_modules, detach=False)
             if _distill_mode_includes_router(args)
             else nullcontext(({}, {}))
         )
         teacher_router_ctx = (
-            _capture_moe_router_inputs(teacher_modules, detach=True)
+            _capture_distill_router_inputs(teacher_modules, detach=True)
             if _distill_mode_includes_router(args)
             else nullcontext(({}, {}))
         )
@@ -898,6 +898,25 @@ def _capture_moe_router_inputs(modules, *, detach):
             handle.remove()
 
 
+@contextmanager
+def _capture_distill_router_inputs(modules, *, detach):
+    """Capture standard-MoE or shared-router inputs for expansion distillation."""
+    shared_routers = _collect_current_shared_routers(modules)
+    if shared_routers:
+        with capture_shared_router_inputs(detach=detach) as captured:
+            yield captured, shared_routers
+        return
+
+    with _capture_moe_router_inputs(modules, detach=detach) as captured:
+        yield captured
+
+
+def _router_inputs_by_layer(captured):
+    if isinstance(captured, dict):
+        return captured
+    return {int(layer_number): hidden_states for layer_number, hidden_states in captured}
+
+
 def _masked_layer_hidden_mse(student_hidden, teacher_hidden, labels, loss_mask):
     common_layers = sorted(set(student_hidden) & set(teacher_hidden))
     if not common_layers:
@@ -927,6 +946,8 @@ def _masked_router_prob_kl(
     labels,
     loss_mask,
 ):
+    student_router_inputs = _router_inputs_by_layer(student_router_inputs)
+    teacher_router_inputs = _router_inputs_by_layer(teacher_router_inputs)
     common_layers = sorted(
         set(student_router_inputs)
         & set(teacher_router_inputs)
