@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Replay an expert-expansion distillation pipeline to one lightweight W&B run.
+"""Replay expert-expansion distillation metrics to lightweight W&B runs.
 
 The checkpoint weights are never uploaded.  Checkpoint trackers are used only
 to validate the stages; probe and training metrics are parsed directly from the
@@ -68,6 +68,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--distill-iters", type=int, default=1800)
     parser.add_argument("--code-iters", type=int, default=1800)
     parser.add_argument("--retune-iters", type=int, default=1800)
+    parser.add_argument(
+        "--only-stage",
+        choices=["distill", "code", "retune"],
+        help="Upload only one stage as an independent W&B run.",
+    )
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--run-name", required=True)
     parser.add_argument("--project", default=os.environ.get("WANDB_PROJECT", "flame-continual-top2-qv-lora"))
@@ -316,16 +321,35 @@ def main() -> None:
     ]
 
     points: dict[int, dict[str, float]] = defaultdict(dict)
-    teacher_probes = last_teacher_probes(logs["teacher"], args.teacher_step)
-    if not teacher_probes:
-        raise RuntimeError(f"No teacher probes found in {logs['teacher']}")
-    for name, (acc, ppl) in teacher_probes.items():
-        add_metric(points, args.teacher_step, f"{name}/next_token_accuracy", acc)
-        add_metric(points, args.teacher_step, f"{name}/ppl", ppl)
-    add_metric(points, args.teacher_step, "stage/teacher_final", 1.0)
-    add_metric(points, args.teacher_step, "local_iteration", args.teacher_step)
+    if args.only_stage:
+        stage_index = {"distill": 0, "code": 1, "retune": 2}[args.only_stage]
+        selected_stages = [stages[stage_index]]
+        source_names = ["teacher", "distill", "code"]
+        source_name = source_names[stage_index]
+        source_log = logs[source_name]
+        source_step = trackers[source_name] or args.teacher_step
+        source_probes = last_teacher_probes(source_log, source_step)
+        if not source_probes:
+            raise RuntimeError(f"No source probes found in {source_log}")
+        boundary = selected_stages[0].display_base
+        for name, (acc, ppl) in source_probes.items():
+            add_metric(points, boundary, f"{name}/next_token_accuracy", acc)
+            add_metric(points, boundary, f"{name}/ppl", ppl)
+        add_metric(points, boundary, f"source/{source_name}_final", 1.0)
+        add_metric(points, boundary, "local_iteration", source_step)
+        teacher_probes = source_probes
+    else:
+        selected_stages = stages
+        teacher_probes = last_teacher_probes(logs["teacher"], args.teacher_step)
+        if not teacher_probes:
+            raise RuntimeError(f"No teacher probes found in {logs['teacher']}")
+        for name, (acc, ppl) in teacher_probes.items():
+            add_metric(points, args.teacher_step, f"{name}/next_token_accuracy", acc)
+            add_metric(points, args.teacher_step, f"{name}/ppl", ppl)
+        add_metric(points, args.teacher_step, "stage/teacher_final", 1.0)
+        add_metric(points, args.teacher_step, "local_iteration", args.teacher_step)
 
-    stage_counts = {stage.name: parse_stage(points, stage) for stage in stages}
+    stage_counts = {stage.name: parse_stage(points, stage) for stage in selected_stages}
     steps = sorted(points)
     if not steps:
         raise RuntimeError("No metrics were parsed.")
@@ -341,7 +365,9 @@ def main() -> None:
     for name, counts in stage_counts.items():
         print(f"{name:14s}: {counts}")
     print(f"steps={len(steps)} first={steps[0]} last={steps[-1]}")
-    for boundary in [args.teacher_step, code_base, retune_base, steps[-1]]:
+    boundaries = [stage.display_base for stage in selected_stages]
+    boundaries.append(steps[-1])
+    for boundary in dict.fromkeys(boundaries):
         print_boundary(points, boundary)
 
     if args.dry_run:
@@ -354,6 +380,7 @@ def main() -> None:
 
     config = {
         "relog_source": "expansion_distill_pipeline_logs",
+        "only_stage": args.only_stage or "all",
         "teacher_step": args.teacher_step,
         "distill_iters": args.distill_iters,
         "code_iters": args.code_iters,
