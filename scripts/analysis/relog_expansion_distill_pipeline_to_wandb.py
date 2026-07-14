@@ -103,12 +103,30 @@ def infer_log(run_dir: Path, explicit: str | None, stage_name: str) -> Path:
         return path
 
     log_dir = run_dir / "logs"
-    preferred_names = [
-        "run.log",
-        "phase3_run.log",
-        "phase3_moe_router_run.log",
-        "a_to_b_freeze.log",
-    ]
+
+    def score(path: Path) -> tuple[int, int, int]:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        return (len(PROBE_RE.findall(text)), len(ITER_RE.findall(text)), path.stat().st_size)
+
+    # Phase3 directories are commonly made by copying the phase2 checkpoint,
+    # including its logs/run.log.  Never let that copied phase2 log outrank the
+    # actual router-retune log merely because it contains more probe records.
+    if stage_name == "retune":
+        phase3_candidates = [
+            path
+            for path in [
+                log_dir / "phase3_run.log",
+                log_dir / "phase3_moe_router_run.log",
+                *sorted(log_dir.glob("phase3*.log")),
+            ]
+            if path.is_file()
+        ]
+        phase3_candidates = list(dict.fromkeys(phase3_candidates))
+        with_probes = [path for path in phase3_candidates if score(path)[0] > 0]
+        if with_probes:
+            return max(with_probes, key=score)
+
+    preferred_names = ["run.log", "a_to_b_freeze.log"]
     candidates: list[Path] = []
     for name in preferred_names:
         path = log_dir / name
@@ -119,10 +137,6 @@ def infer_log(run_dir: Path, explicit: str | None, stage_name: str) -> Path:
             candidates.append(path)
     if not candidates:
         raise FileNotFoundError(f"No log files found for {stage_name} under {log_dir}")
-
-    def score(path: Path) -> tuple[int, int, int]:
-        text = path.read_text(encoding="utf-8", errors="replace")
-        return (len(PROBE_RE.findall(text)), len(ITER_RE.findall(text)), path.stat().st_size)
 
     return max(candidates, key=score)
 
