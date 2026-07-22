@@ -16,7 +16,7 @@ import math
 import os
 import re
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 
@@ -52,6 +52,7 @@ class Stage:
     train_iters: int
     source_checkpoint_step: int
     keep_initial_probe: bool = False
+    display_step_scale: int = 1
 
 
 def parse_args() -> argparse.Namespace:
@@ -68,6 +69,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--distill-iters", type=int, default=1800)
     parser.add_argument("--code-iters", type=int, default=1800)
     parser.add_argument("--retune-iters", type=int, default=1800)
+    parser.add_argument(
+        "--display-step-scale",
+        type=int,
+        default=1,
+        help="Multiply each stage-relative step on the displayed W&B x-axis.",
+    )
+    parser.add_argument(
+        "--display-base-step",
+        type=int,
+        help="Override the displayed start step when uploading one stage.",
+    )
     parser.add_argument(
         "--only-stage",
         choices=["distill", "code", "retune"],
@@ -223,7 +235,7 @@ def parse_stage(
                 display_step = stage.display_base + 1
                 marker = f"stage/{stage.name}_post_expand_initial"
             else:
-                display_step = stage.display_base + relative
+                display_step = stage.display_base + relative * stage.display_step_scale
                 marker = f"stage/{stage.name}_active"
             add_metric(points, display_step, f"{name}/next_token_accuracy", acc)
             add_metric(points, display_step, f"{name}/ppl", ppl)
@@ -238,7 +250,7 @@ def parse_stage(
             relative = infer_training_relative_step(raw_step, stage)
             if relative is None or relative <= 0:
                 continue
-            display_step = stage.display_base + relative
+            display_step = stage.display_base + relative * stage.display_step_scale
             for metric_name, pattern in METRIC_PATTERNS.items():
                 match = pattern.search(line)
                 if match:
@@ -275,7 +287,12 @@ def parse_stage(
         if saved:
             relative = infer_training_relative_step(int(saved.group(1)), stage)
             if relative is not None and relative > 0:
-                add_metric(points, stage.display_base + relative, "checkpoint/saved", 1.0)
+                add_metric(
+                    points,
+                    stage.display_base + relative * stage.display_step_scale,
+                    "checkpoint/saved",
+                    1.0,
+                )
                 counts["checkpoint"] += 1
     return dict(counts)
 
@@ -306,6 +323,8 @@ def print_boundary(points: dict[int, dict[str, float]], step: int) -> None:
 
 def main() -> None:
     args = parse_args()
+    if args.display_step_scale < 1:
+        raise ValueError("--display-step-scale must be at least 1")
     teacher_dir = Path(args.teacher_dir)
     distill_dir = Path(args.distill_dir)
     code_dir = Path(args.code_dir)
@@ -326,18 +345,49 @@ def main() -> None:
     )}
 
     distill_base = args.teacher_step
-    code_base = distill_base + args.distill_iters
-    retune_base = code_base + args.code_iters
+    code_base = distill_base + args.distill_iters * args.display_step_scale
+    retune_base = code_base + args.code_iters * args.display_step_scale
     stages = [
-        Stage("distill_init", distill_dir, logs["distill"], distill_base, args.distill_iters, args.teacher_step, True),
-        Stage("code_train", code_dir, logs["code"], code_base, args.code_iters, trackers["distill"] or args.distill_iters),
-        Stage("router_retune", retune_dir, logs["retune"], retune_base, args.retune_iters, trackers["code"] or args.code_iters),
+        Stage(
+            "distill_init",
+            distill_dir,
+            logs["distill"],
+            distill_base,
+            args.distill_iters,
+            args.teacher_step,
+            True,
+            args.display_step_scale,
+        ),
+        Stage(
+            "code_train",
+            code_dir,
+            logs["code"],
+            code_base,
+            args.code_iters,
+            trackers["distill"] or args.distill_iters,
+            False,
+            args.display_step_scale,
+        ),
+        Stage(
+            "router_retune",
+            retune_dir,
+            logs["retune"],
+            retune_base,
+            args.retune_iters,
+            trackers["code"] or args.code_iters,
+            False,
+            args.display_step_scale,
+        ),
     ]
 
     points: dict[int, dict[str, float]] = defaultdict(dict)
     if args.only_stage:
         stage_index = {"distill": 0, "code": 1, "retune": 2}[args.only_stage]
-        selected_stages = [stages[stage_index]]
+        selected_stage = stages[stage_index]
+        if args.display_base_step is not None:
+            selected_stage = replace(selected_stage, display_base=args.display_base_step)
+            stages[stage_index] = selected_stage
+        selected_stages = [selected_stage]
         source_names = ["teacher", "distill", "code"]
         source_name = source_names[stage_index]
         source_log = logs[source_name]
@@ -399,11 +449,17 @@ def main() -> None:
         "distill_iters": args.distill_iters,
         "code_iters": args.code_iters,
         "retune_iters_requested": args.retune_iters,
+        "display_step_scale": args.display_step_scale,
+        "display_base_step_override": args.display_base_step,
         "display_mapping": {
             "teacher_final": args.teacher_step,
-            "distill_init": [distill_base, code_base],
-            "code_train": [code_base, retune_base],
-            "router_retune": [retune_base, retune_base + args.retune_iters],
+            **{
+                stage.name: [
+                    stage.display_base,
+                    stage.display_base + stage.train_iters * stage.display_step_scale,
+                ]
+                for stage in stages
+            },
         },
         "checkpoint_trackers": trackers,
         "run_dirs": {name: str(path) for name, path in zip(
