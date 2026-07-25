@@ -1,0 +1,99 @@
+================================================================================
+ G2 Pre-Code Expert-Init Distillation — 모델 / 로그 경로 정리
+ (wiki-distill 중심, code-init 비교 포함)
+ REPO: /home/work/Agent_HJ/30_flame_agent/LLM-continual-learning
+================================================================================
+
+공통 루트
+  WEIGHTS: /home/work/Agent_HJ/30_flame_agent/LLM-continual-learning/.local/weights/a100/mha/g2-checkpoints
+  LOGS   : /home/work/Agent_HJ/30_flame_agent/LLM-continual-learning/.local/logs
+
+각 모델 디렉토리 내부 구조:
+  <model_dir>/iter_00XXXXX/            체크포인트(distcp)
+  <model_dir>/latest_checkpointed_iteration.txt   최신 step
+  <model_dir>/logs/run.log            해당 런 상세 로그
+  <model_dir>/logs/run_metadata.json  설정 메타
+
+mode = logits | logits_hidden | logits_hidden_router
+  (디렉토리명은 하이픈: logits-hidden / logits-hidden-router)
+  (집계 로그명은 언더스코어: logits_hidden)
+
+================================================================================
+ 0. SOURCE (teacher = wiki 8-expert)  — distill의 원본/teacher
+================================================================================
+FFN-only  : $WEIGHTS/wiki/g2matched-top4-e8-ffn352-wiki-ffn-moe-mha-a100-bf16-mb128-1800   (step 1800)
+shared-rtr: $WEIGHTS/wiki/g2-top4-e8-ffn352-r256-wiki-shared-router-qkvo-mha-a100-bf16-mb72-1800   (step 1800)
+
+================================================================================
+ 1. FFN-only  (wiki-init)   [완료: A×3, B×3, C×3, Stage C = 1800 step]
+================================================================================
+[A] distill-init (wiki 데이터로 distill), mb48
+  $WEIGHTS/code/expansion_distill_init/g2-ffn-only-e8to16-code-expert-init-<mode>-wiki-distill-mha-a100-bf16-mb48-1800
+
+[B] code training, mb96
+  $WEIGHTS/code/from_distill_init/g2-ffn-only-e8to16-code-from-distill-init-<mode>-mha-a100-bf16-mb96-1800
+
+[C] router retune (wiki+code), mb96, 1800 step
+  $WEIGHTS/code/from_distill_init_phase3/g2-ffn-only-code-from-distill-init-<mode>-phase3-router-retune-wikicode-mb96-1800
+
+로그 (집계):
+  $LOGS/g2_ffn_only_distill_init/{A,B,C}_<mode>.log
+  $LOGS/g2_ffn_only_distill_init/run_all9_20260709_182759.log   (master)
+
+================================================================================
+ 2. shared-router / FFN+QKVO attention experts  (wiki-init)   [완료]
+================================================================================
+[A] distill-init (wiki), mb48
+  $WEIGHTS/code/shared_router_expansion_distill_init/g2-shared-router-e8to16-code-expert-init-<mode>-wiki-distill-qkvo-mha-a100-bf16-mb48-1800
+
+[B] code training, mb72
+  $WEIGHTS/code/shared_router_from_distill_init/g2-shared-router-e8to16-code-from-distill-init-<mode>-qkvo-mha-a100-bf16-mb72-1800
+
+[C] router retune (wiki+code), mb72, 1800 step
+  $WEIGHTS/code/shared_router_from_distill_init_phase3/g2-shared-router-code-from-distill-init-<mode>-phase3-router-retune-wikicode-mb72-1800
+
+로그 (집계):
+  $LOGS/g2_shared_router_distill_init/{A,B,C}_<mode>.log
+  $LOGS/g2_shared_router_distill_init/run_all9_20260711_014048.log   (master)
+  (주의: C logits_hidden_router 는 수동 재개분)
+  $LOGS/g2_shared_router_distill_init/C_logits_hidden_router_manual_20260712_154457.log
+
+================================================================================
+ 3. FFN-only  (code-init = code 데이터로 distill)  [비교용, logits/logits_hidden만 A→B→C]
+================================================================================
+[A] distill-init (CODE 데이터), mb48   (logits / logits-hidden / logits-hidden-router 모두 있음)
+  $WEIGHTS/code/expansion_distill_init/g2-ffn-only-e8to16-code-expert-init-<mode>-code-distill-mha-a100-bf16-mb48-1800
+
+[B] code training, mb96   (logits / logits-hidden 만)
+  $WEIGHTS/code/from_code_distill_init/g2-ffn-only-e8to16-code-from-distill-init-<mode>-mha-a100-bf16-mb96-1800
+
+[C] router retune (wiki+code), mb96, 300 step   (logits / logits_hidden 만)
+  $WEIGHTS/code/from_code_distill_init_phase3/g2-ffn-only-code-from-distill-init-<mode>-phase3-router-retune-wikicode-mb96-300
+
+로그:
+  $LOGS/g2_ffn_only_codeinit/{A,B,C}_<mode>.log
+  $LOGS/g2_ffn_only_codeinit/run_all9_20260713_002346.log   (master)
+  $LOGS/g2_ffn_only_codeinit/finetune_only_*.log            (C logits/logits_hidden 300-step 수행분)
+
+================================================================================
+ 결과 요약 (next_token_acc, wiki / code)
+================================================================================
+FFN-only wiki-init — Stage C 최종 (1800 step):
+  logits               : 0.457 / 0.665
+  logits_hidden        : 0.457 / 0.665
+  logits_hidden_router : 0.457 / 0.664
+
+FFN-only code-init — Stage C 최종 (300 step):
+  logits               : 0.454 / 0.663
+  logits_hidden        : 0.454 / 0.662
+
+shared-router wiki-init — Stage C 최종 (1800 step):
+  logits               : 0.395 / 0.683
+  logits_hidden        : 0.394 / 0.684
+  logits_hidden_router : 0.392 / 0.683   (2400 step에서 중단, 수렴값)
+
+메모:
+ - 세 distill 모드(logits / +hidden / +router)는 전 stage에서 사실상 동일 (차이 <0.006).
+ - loss 항 스케일: logit KL ~3e-8, hidden MSE ~1e-4, router KL ~1e-3 (5자리수 차이) → 계수 1.0씩이지만 실제 가중 불균형.
+ - code-init vs wiki-init: 중간(Stage B) wiki 유지는 code-init이 낮으나(0.37 vs 0.42), Stage C router retune 후 최종은 거의 동일.
+================================================================================

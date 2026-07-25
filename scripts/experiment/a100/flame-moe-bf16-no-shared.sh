@@ -30,5 +30,7 @@ MODEL_ARGS=(
     --init-method-std "${INIT_METHOD_STD:-0.02}"
 
     --tokenizer-type HuggingFaceTokenizer
-    --tokenizer-model EleutherAI/pythia-12b
+    # Keep the Hub ID as the default, but allow offline runs to point to a
+    # project-local tokenizer snapshot.
+    --tokenizer-model "${TOKENIZER_MODEL:-EleutherAI/pythia-12b}"
 )

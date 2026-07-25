@@ -36,6 +36,8 @@ def parse_args():
     parser.add_argument("--random-seed", type=int, default=1234)
     parser.add_argument("--cache-dir", default=None)
     parser.add_argument("--output-prefix", default="train_text_document")
+    parser.add_argument("--purpose", default="fixed_router_memory")
+    parser.add_argument("--metadata-name", default="router_memory_metadata.json")
     return parser.parse_args()
 
 
@@ -131,7 +133,7 @@ def main():
     dataset, prefixes = build_dataset(args)
     stats = materialize(dataset, output_prefix, args.samples)
     metadata = {
-        "purpose": "fixed_router_memory",
+        "purpose": args.purpose,
         "input_dir": str(args.input_dir),
         "dataset_split": args.dataset_split,
         "dataset_split_name": args.dataset_split_name,
@@ -143,7 +145,7 @@ def main():
         "memory": stats,
     }
     output_dir.mkdir(parents=True, exist_ok=True)
-    (output_dir / "router_memory_metadata.json").write_text(
+    (output_dir / args.metadata_name).write_text(
         json.dumps(metadata, indent=2), encoding="utf-8"
     )
     print(json.dumps(metadata, indent=2))

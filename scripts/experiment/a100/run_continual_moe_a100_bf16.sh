@@ -58,11 +58,26 @@ export DIRECT_LOCAL_SAVE="${DIRECT_LOCAL_SAVE:-0}"
 # re-expanding: --finetune resets iteration to 0 and --moe-resume-from-num-experts
 # reapplies the new-experts+router freeze mask.
 export LOAD_EXPANDED_SOURCE="${LOAD_EXPANDED_SOURCE:-0}"
+export MOE_INTERLEAVE_CODE_STEPS="${MOE_INTERLEAVE_CODE_STEPS:-0}"
+export MOE_INTERLEAVE_ROUTER_STEPS="${MOE_INTERLEAVE_ROUTER_STEPS:-0}"
+export MOE_INTERLEAVE_CODE_TOTAL_STEPS="${MOE_INTERLEAVE_CODE_TOTAL_STEPS:-0}"
+export MOE_INTERLEAVE_ROUTER_AFTER_FINAL="${MOE_INTERLEAVE_ROUTER_AFTER_FINAL:-1}"
+export MOE_JOINT_REPLAY_LM="${MOE_JOINT_REPLAY_LM:-0}"
+export JOINT_REPLAY_DATASET="${JOINT_REPLAY_DATASET:-}"
+export JOINT_REPLAY_SECONDARY_DATASET="${JOINT_REPLAY_SECONDARY_DATASET:-}"
+export JOINT_REPLAY_DATA_WEIGHT_MODE="${JOINT_REPLAY_DATA_WEIGHT_MODE:-equal_dataset}"
+export RECOVERY_SAVE_INTERVAL="${RECOVERY_SAVE_INTERVAL:-0}"
+export NO_SAVE_OPTIM="${NO_SAVE_OPTIM:-0}"
 
 export SSD_MOUNT="${LOCAL_SSD_ROOT}/${RUN_ID}"
 export SSD_TRAIN_DATASET="${SSD_MOUNT}/dataset/train"
+export SSD_TRAIN_DATASET_SECONDARY="${SSD_MOUNT}/dataset/train_secondary"
 export SSD_SOURCE_WEIGHTS="${SSD_MOUNT}/source_weights"
 export SSD_TARGET_WEIGHTS="${SSD_MOUNT}/target_weights"
+export SSD_INTERLEAVE_WIKI_DATASET="${SSD_MOUNT}/dataset/interleave_wiki_train"
+export SSD_INTERLEAVE_SECONDARY_DATASET="${SSD_MOUNT}/dataset/interleave_secondary_train"
+export SSD_JOINT_REPLAY_DATASET="${SSD_MOUNT}/dataset/joint_replay_train"
+export SSD_JOINT_REPLAY_SECONDARY_DATASET="${SSD_MOUNT}/dataset/joint_replay_secondary_train"
 
 export NUM_LAYERS="${NUM_LAYERS:-9}"
 export HIDDEN_SIZE="${HIDDEN_SIZE:-1024}"
@@ -114,6 +129,11 @@ export MODEL_CONFIG_SCRIPT="${MODEL_CONFIG_SCRIPT:-scripts/experiment/a100/flame
 export DATASET_SPLIT="${DATASET_SPLIT:-100,0,0}"
 
 export TRAIN_DATASET="${TRAIN_DATASET:-$(dataset_dir_for_task "$TARGET_TASK")}"
+export TRAIN_DATASET_SECONDARY="${TRAIN_DATASET_SECONDARY:-}"
+export TRAIN_DATA_WEIGHT_MODE="${TRAIN_DATA_WEIGHT_MODE:-equal_prefix}"
+export INTERLEAVE_WIKI_DATASET="${INTERLEAVE_WIKI_DATASET:-$(dataset_dir_for_task wiki)}"
+export INTERLEAVE_SECONDARY_DATASET="${INTERLEAVE_SECONDARY_DATASET:-}"
+export INTERLEAVE_ROUTER_DATA_WEIGHT_MODE="${INTERLEAVE_ROUTER_DATA_WEIGHT_MODE:-equal_prefix}"
 export SOURCE_RUN_SUBDIR="${SOURCE_RUN_SUBDIR:-$(weights_subdir_for_task "$SOURCE_TASK")}"
 export SOURCE_WEIGHTS_DIR="${SOURCE_WEIGHTS_DIR:-}"
 export SOURCE_REQUIRED_ITERS="${SOURCE_REQUIRED_ITERS:-1}"
@@ -170,7 +190,10 @@ export TERTIARY_PROBE_STEP_OFFSET="${TERTIARY_PROBE_STEP_OFFSET:-$PROBE_STEP_OFF
 export WANDB_STEP_OFFSET="${WANDB_STEP_OFFSET:-$PROBE_STEP_OFFSET}"
 
 RESUME_FROM_TARGET=0
-if [ "$RESUME_CONTINUAL_FROM_TRAIN_WEIGHTS" = "1" ] && [ -f "$TRAIN_WEIGHTS/latest_checkpointed_iteration.txt" ]; then
+if [ "$RESUME_CONTINUAL_FROM_TRAIN_WEIGHTS" = "1" ] && {
+    [ -f "$TRAIN_WEIGHTS/latest_checkpointed_iteration.txt" ] ||
+    [ -f "$TRAIN_WEIGHTS/non_persistent/latest_checkpointed_iteration.txt" ];
+}; then
     RESUME_FROM_TARGET=1
 fi
 
@@ -203,6 +226,19 @@ if [ "$LOG_SOURCE_PROBE_BASELINE_BEFORE_EXPAND" = "1" ] && [ -n "$WANDB_PROJECT"
 fi
 
 mkdir -p "$SSD_TRAIN_DATASET" "$SSD_SOURCE_WEIGHTS" "$SSD_TARGET_WEIGHTS" "$TRAIN_WEIGHTS" "$LOG_DIR"
+if [ -n "$TRAIN_DATASET_SECONDARY" ]; then
+    mkdir -p "$SSD_TRAIN_DATASET_SECONDARY"
+fi
+if [ "$MOE_JOINT_REPLAY_LM" = "1" ]; then
+    mkdir -p "$SSD_JOINT_REPLAY_DATASET"
+    [ -z "$JOINT_REPLAY_SECONDARY_DATASET" ] || mkdir -p "$SSD_JOINT_REPLAY_SECONDARY_DATASET"
+fi
+if [ "$MOE_INTERLEAVE_CODE_STEPS" -gt 0 ]; then
+    mkdir -p "$SSD_INTERLEAVE_WIKI_DATASET"
+    if [ -n "$INTERLEAVE_SECONDARY_DATASET" ]; then
+        mkdir -p "$SSD_INTERLEAVE_SECONDARY_DATASET"
+    fi
+fi
 
 GPU_LOG_PID=""
 SYNC_DONE=0
@@ -297,6 +333,19 @@ rsync -rlptD \
     --exclude 'progress.txt' \
     "$SOURCE_WEIGHTS_DIR/" "$SSD_SOURCE_WEIGHTS/"
 rsync -rlptD --info=progress2 "$TRAIN_DATASET/" "$SSD_TRAIN_DATASET/"
+if [ -n "$TRAIN_DATASET_SECONDARY" ]; then
+    rsync -rlptD --info=progress2 "$TRAIN_DATASET_SECONDARY/" "$SSD_TRAIN_DATASET_SECONDARY/"
+fi
+if [ "$MOE_JOINT_REPLAY_LM" = "1" ]; then
+    rsync -rlptD --info=progress2 "$JOINT_REPLAY_DATASET/" "$SSD_JOINT_REPLAY_DATASET/"
+    [ -z "$JOINT_REPLAY_SECONDARY_DATASET" ] || rsync -rlptD --info=progress2 "$JOINT_REPLAY_SECONDARY_DATASET/" "$SSD_JOINT_REPLAY_SECONDARY_DATASET/"
+fi
+if [ "$MOE_INTERLEAVE_CODE_STEPS" -gt 0 ]; then
+    rsync -rlptD --info=progress2 "$INTERLEAVE_WIKI_DATASET/" "$SSD_INTERLEAVE_WIKI_DATASET/"
+    if [ -n "$INTERLEAVE_SECONDARY_DATASET" ]; then
+        rsync -rlptD --info=progress2 "$INTERLEAVE_SECONDARY_DATASET/" "$SSD_INTERLEAVE_SECONDARY_DATASET/"
+    fi
+fi
 if [ "$RESUME_FROM_TARGET" = "1" ] && [ "$SSD_TARGET_WEIGHTS" != "$TRAIN_WEIGHTS" ]; then
     rsync -rlptD \
         --exclude 'logs/' \
@@ -331,11 +380,77 @@ TRAIN_ARGS=(
     --train-iters "$TRAIN_ITERS"
 )
 
+TRAIN_DATA_PATH_DIRS=("$SSD_TRAIN_DATASET")
+if [ -n "$TRAIN_DATASET_SECONDARY" ]; then
+    TRAIN_DATA_PATH_DIRS+=("$SSD_TRAIN_DATASET_SECONDARY")
+fi
+case "$TRAIN_DATA_WEIGHT_MODE" in
+    equal_dataset)
+        TRAIN_DATA_PATH="$(build_equal_dataset_data_path "${TRAIN_DATA_PATH_DIRS[@]}")"
+        ;;
+    equal_prefix)
+        TRAIN_DATA_PATH="$(build_data_path "${TRAIN_DATA_PATH_DIRS[@]}")"
+        ;;
+    *)
+        echo "ERROR: unsupported TRAIN_DATA_WEIGHT_MODE=$TRAIN_DATA_WEIGHT_MODE" >&2
+        exit 1
+        ;;
+esac
+
 DATA_ARGS=(
     --seq-length "${SEQ_LENGTH:-512}"
-    --data-path $(build_data_path "$SSD_TRAIN_DATASET")
+    --data-path $TRAIN_DATA_PATH
     --split "$DATASET_SPLIT"
 )
+
+INTERLEAVE_ARGS=()
+if [ "$MOE_JOINT_REPLAY_LM" = "1" ]; then
+    [ "$MOE_INTERLEAVE_CODE_STEPS" -eq 0 ] || { echo "ERROR: joint replay conflicts with interleave" >&2; exit 1; }
+    JOINT_DIRS=("$SSD_JOINT_REPLAY_DATASET")
+    [ -z "$JOINT_REPLAY_SECONDARY_DATASET" ] || JOINT_DIRS+=("$SSD_JOINT_REPLAY_SECONDARY_DATASET")
+    case "$JOINT_REPLAY_DATA_WEIGHT_MODE" in
+      equal_dataset) JOINT_PATH="$(build_equal_dataset_data_path "${JOINT_DIRS[@]}")" ;;
+      equal_prefix) JOINT_PATH="$(build_data_path "${JOINT_DIRS[@]}")" ;;
+      *) echo "ERROR: invalid joint replay weight mode" >&2; exit 1 ;;
+    esac
+    INTERLEAVE_ARGS+=(--moe-joint-replay-lm --moe-joint-replay-data-path $JOINT_PATH)
+fi
+if [ "$MOE_INTERLEAVE_CODE_STEPS" -gt 0 ]; then
+    INTERLEAVE_ROUTER_DATA_PATH_DIRS=("$SSD_INTERLEAVE_WIKI_DATASET")
+    if [ -n "$INTERLEAVE_SECONDARY_DATASET" ]; then
+        INTERLEAVE_ROUTER_DATA_PATH_DIRS+=("$SSD_INTERLEAVE_SECONDARY_DATASET")
+    fi
+    INTERLEAVE_ROUTER_DATA_PATH_DIRS+=("$SSD_TRAIN_DATASET")
+    case "$INTERLEAVE_ROUTER_DATA_WEIGHT_MODE" in
+        equal_dataset)
+            INTERLEAVE_ROUTER_DATA_PATH="$(build_equal_dataset_data_path "${INTERLEAVE_ROUTER_DATA_PATH_DIRS[@]}")"
+            ;;
+        equal_prefix)
+            INTERLEAVE_ROUTER_DATA_PATH="$(build_data_path "${INTERLEAVE_ROUTER_DATA_PATH_DIRS[@]}")"
+            ;;
+        *)
+            echo "ERROR: unsupported INTERLEAVE_ROUTER_DATA_WEIGHT_MODE=$INTERLEAVE_ROUTER_DATA_WEIGHT_MODE" >&2
+            exit 1
+            ;;
+    esac
+    INTERLEAVE_ARGS+=(
+        --moe-interleave-code-steps "$MOE_INTERLEAVE_CODE_STEPS"
+        --moe-interleave-router-steps "$MOE_INTERLEAVE_ROUTER_STEPS"
+        --moe-interleave-code-total-steps "$MOE_INTERLEAVE_CODE_TOTAL_STEPS"
+        --moe-interleave-router-data-path $INTERLEAVE_ROUTER_DATA_PATH
+        --moe-interleave-code-lr "${MOE_INTERLEAVE_CODE_LR:-$LR}"
+        --moe-interleave-code-min-lr "${MOE_INTERLEAVE_CODE_MIN_LR:-$MIN_LR}"
+        --moe-interleave-router-lr "${MOE_INTERLEAVE_ROUTER_LR:-$LR}"
+        --moe-interleave-router-min-lr "${MOE_INTERLEAVE_ROUTER_MIN_LR:-$MIN_LR}"
+        --moe-interleave-code-aux-loss-coeff "${MOE_INTERLEAVE_CODE_AUX_LOSS_COEFF:-${MOE_AUX_LOSS_COEFF:-0.01}}"
+        --moe-interleave-code-z-loss-coeff "${MOE_INTERLEAVE_CODE_Z_LOSS_COEFF:-${MOE_Z_LOSS_COEFF:-0.001}}"
+        --moe-interleave-router-aux-loss-coeff "${MOE_INTERLEAVE_ROUTER_AUX_LOSS_COEFF:-0.0}"
+        --moe-interleave-router-z-loss-coeff "${MOE_INTERLEAVE_ROUTER_Z_LOSS_COEFF:-0.0}"
+    )
+    if [ "$MOE_INTERLEAVE_ROUTER_AFTER_FINAL" = "1" ]; then
+        INTERLEAVE_ARGS+=(--moe-interleave-router-after-final)
+    fi
+fi
 
 SAVE_ARGS=(
     --log-interval "$LOG_INTERVAL"
@@ -348,12 +463,24 @@ SAVE_ARGS=(
     --moe-freeze-existing-experts
     --moe-freeze-existing-router
 )
+if [ "$NO_SAVE_OPTIM" = "1" ]; then
+    SAVE_ARGS+=(--no-save-optim)
+fi
+if [ "$RECOVERY_SAVE_INTERVAL" -gt 0 ]; then
+    SAVE_ARGS+=(
+        --non-persistent-save-interval "$RECOVERY_SAVE_INTERVAL"
+        --non-persistent-ckpt-type global
+    )
+fi
 
 if [ "$RESUME_FROM_TARGET" = "1" ]; then
     SAVE_ARGS+=(
         --load "$SSD_TARGET_WEIGHTS"
         --moe-resume-from-num-experts "$SOURCE_NUM_EXPERTS"
     )
+    if [ "$MOE_INTERLEAVE_CODE_STEPS" -gt 0 ] || [ "$NO_SAVE_OPTIM" = "1" ]; then
+        SAVE_ARGS+=(--no-load-optim --no-load-rng)
+    fi
 elif [ "$LOAD_EXPANDED_SOURCE" = "1" ]; then
     # Source is already expanded to NUM_EXPERTS: load fresh (iteration 0) without
     # re-expanding, reapplying the new-experts+router freeze via resume-from.
@@ -371,6 +498,7 @@ else
         --no-load-rng
         --finetune
         --moe-expand-from-num-experts "$SOURCE_NUM_EXPERTS"
+        --moe-resume-from-num-experts "$SOURCE_NUM_EXPERTS"
     )
 fi
 
@@ -491,8 +619,8 @@ GPU_LOG_PID=$!
     --master_port "$MASTER_PORT" \
     pretrain_gpt.py \
     "${MODEL_ARGS[@]}" "${INFRA_ARGS[@]}" "${TRAIN_ARGS[@]}" \
-    "${DATA_ARGS[@]}" "${SAVE_ARGS[@]}" "${PROBE_ARGS[@]}" "${WANDB_ARGS[@]}" \
-    "${DEBUG_TRAINABLE_ARGS[@]}"
+    "${DATA_ARGS[@]}" "${INTERLEAVE_ARGS[@]}" "${SAVE_ARGS[@]}" \
+    "${PROBE_ARGS[@]}" "${WANDB_ARGS[@]}" "${DEBUG_TRAINABLE_ARGS[@]}"
 
 kill "$GPU_LOG_PID" 2>/dev/null || true
 if [ "$SSD_TARGET_WEIGHTS" != "$TRAIN_WEIGHTS" ]; then

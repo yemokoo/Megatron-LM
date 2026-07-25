@@ -319,3 +319,310 @@ run naming 규칙:
 - 앞으로 실험 설계, 비교, 해석 질문이 들어오면 **항상 이 문서를 먼저 참고해서 답변**한다
 - 사용자가 빠르게 커맨드를 원하더라도, 비교축이 섞이면 먼저 그 위험을 짚고 정리한 뒤 진행한다
 - 즉 실험 진행은 단순 실행이 아니라, **대조군과 변인 통제를 먼저 합의하는 과정**을 포함해야 한다
+
+## 10. 2026-07 G2 FFN-Only KD + Joint LM Continual Chain
+
+### 10.1 핵심 아이디어
+
+과거 `Code 1 step -> router 1 step`처럼 optimizer update를 분리한 1/1 실험은 학습이 불안정하게 망가진 사례가 있었다. 이번 방식은 task loss와 replay loss의 gradient를 **한 optimizer update 안에서 aggregate**한다.
+
+Code stage:
+
+```text
+Code batch: new Code experts + all router rows에 gradient
+Wiki batch: all router rows에만 gradient
+두 backward gradient를 accumulate -> optimizer.step() 한 번
+
+L_code_stage = L_code_LM + L_wiki_LM
+```
+
+- lambda는 둘 다 1이다.
+- Wiki router loss도 KD가 아니라 일반 LM loss이다.
+- 1800은 micro-step이 아니라 optimizer step 수이다.
+- 기존 `expert update 1800 + router update 1800`을 1800개의 joint update로 합친 실험이다.
+
+Conversation stage:
+
+```text
+Conversation full batch 1개
++ Wiki/Code가 반씩 들어간 replay full batch 1개
+-> gradient aggregate -> optimizer.step() 한 번
+
+L_conv_stage ~= L_conversation + 0.5 L_wiki + 0.5 L_code
+Wiki : Code : Conversation sample 수 = 1 : 1 : 2
+```
+
+`1:1:2`는 loss coefficient를 직접 그렇게 설정한다는 뜻이 아니라 실제 sample 노출량이다.
+
+공통 구조:
+- Wiki source 8 experts -> Code 16 experts -> Conversation 24 experts
+- FFN experts only, router top-k 4, `moe_ffn_hidden_size=352`
+- GBS 2304, 기존 experts와 dense/attention trunk freeze
+- 각 stage의 새 experts + all router rows 학습
+- save interval 600 optimizer steps
+
+Wiki 8E source:
+
+```text
+.local/weights/a100/mha/g2-checkpoints/wiki/g2matched-top4-e8-ffn352-wiki-ffn-moe-mha-a100-bf16-mb128-1800
+```
+
+### 10.2 완료된 KD-init chain
+
+Chain script:
+
+```text
+scripts/experiment/a100/run_g2_ffn_only_joint_lm_code_kd_conversation_chain_mha.sh
+```
+
+사전 존재 8 -> 16 output-only KD init:
+
+```text
+.local/weights/a100/mha/g2-checkpoints/code/expansion_distill_init/g2-ffn-only-e8to16-code-expert-init-logits-wiki-distill-mha-a100-bf16-mb48-1800
+```
+
+- Wiki 8E를 16E로 확장한 뒤 Wiki output logits KD로 experts 9~16의 초기점을 만든 checkpoint이다.
+- KD는 continual task 학습 phase가 아니라 random init보다 나은 expert 초기점을 만들기 위한 phase이다.
+
+#### Run 1: Code + Wiki joint LM — 완료
+
+```text
+.local/weights/a100/mha/g2-checkpoints/code/joint_lm_replay/g2-ffn-only-code-wiki-joint-lm-allrouter-mb64-1800
+```
+
+- source: 위 8 -> 16 KD-init checkpoint
+- MB64, GBS2304, 1800 optimizer steps
+- trainable: experts 9~16 + all router rows
+- probe: Code, Wiki
+- final Code acc/PPL: `0.662594 / 6.331106`
+- final Wiki acc/PPL: `0.460090 / 18.22470`
+
+Log:
+
+```text
+.local/weights/a100/mha/g2-checkpoints/code/joint_lm_replay/g2-ffn-only-code-wiki-joint-lm-allrouter-mb64-1800/logs/a_to_b_freeze.log
+```
+
+#### Run 2: 16 -> 24 Wiki/Code output-only KD — 완료
+
+```text
+.local/weights/a100/mha/g2-checkpoints/conversation/expansion_distill_init_joint_code/g2-ffn-only-e16to24-conv-init-from-joint-code-logits-wikicode-distill-mb32-600
+```
+
+- source: Run 1의 16E checkpoint
+- MB32, 600 optimizer steps
+- experts 17~24의 Conversation 학습 전 초기점
+
+KD final probe (`local_iteration=600`; diagnostic display baseline은 5400):
+
+```text
+Wiki acc/PPL:         0.462014 / 18.00381
+Code acc/PPL:         0.658937 / 6.432723
+Conversation acc/PPL: 0.288416 / 65.47378
+```
+
+Log:
+
+```text
+.local/weights/a100/mha/g2-checkpoints/conversation/expansion_distill_init_joint_code/g2-ffn-only-e16to24-conv-init-from-joint-code-logits-wikicode-distill-mb32-600/logs/g2_ffn_only_conversation_expert_logits_init_freeze.log
+```
+
+#### Run 3: Conversation + Wiki/Code joint LM — 완료
+
+최종 유효 run:
+
+```text
+.local/weights/a100/mha/g2-checkpoints/conversation/joint_lm_replay/g2-ffn-only-conv-wikicode-joint-lm-allrouter-112-mb128-1800
+```
+
+- source: Run 2 KD-600 checkpoint
+- MB128, GBS2304, grad accumulation 9, 1800 optimizer steps
+- trainable: experts 17~24 + all router rows
+- Wiki:Code:Conversation sample 비율 1:1:2
+- probe: Conversation, Code, Wiki
+
+Final:
+
+```text
+Conversation acc/PPL: 0.382690 / 28.13186
+Code acc/PPL:         0.664720 / 6.258869
+Wiki acc/PPL:         0.458670 / 18.48050
+skipped/nan:          0 / 0
+final grad norm:      약 0.079
+```
+
+Run 3 reload-time -> final:
+
+```text
+Conversation: 0.287973 -> 0.382690
+Code:         0.664733 -> 0.664720
+Wiki:         0.458800 -> 0.458670
+```
+
+- 안정 구간 약 14.3 sec/step, 약 36 TFLOP/s/GPU
+- 최대 관측 VRAM 약 74.1GB/80GB; MB128보다 더 올리지 않는다.
+
+Log:
+
+```text
+.local/weights/a100/mha/g2-checkpoints/conversation/joint_lm_replay/g2-ffn-only-conv-wikicode-joint-lm-allrouter-112-mb128-1800/logs/code_to_conversation_freeze.log
+```
+
+중단된 MB64 Run 3:
+
+```text
+g2-ffn-only-conv-wikicode-joint-lm-allrouter-112-mb64-1800
+```
+
+- 약 200 step에서 Wiki tertiary probe 누락을 발견해 중단했다.
+- 600-step save 전이므로 유효 중간 checkpoint가 없고 최종 비교에 사용하지 않는다.
+
+### 10.3 결과 해석과 평가 단차
+
+- 분리 1/1 optimizer update와 달리 joint aggregation은 NaN/폭주 없이 완료됐다.
+- Conversation을 학습하면서 Code/Wiki가 거의 유지됐다.
+- 초기 급변 후 flat한 곡선 자체는 문제라기보다 빠른 초기 적응/수렴일 수 있다.
+
+중요한 evaluation discontinuity:
+
+```text
+KD final Wiki:     0.462014
+Run 3 reload Wiki: 0.458800
+Run 3 final Wiki:  0.458670
+```
+
+- KD final과 Run 3 reload 사이에는 optimizer update가 없다.
+- 따라서 `0.462014 -> 0.458800`을 forgetting으로 해석하면 안 된다.
+- MB/probe iterator/sample 차이에 따른 평가 단차일 가능성이 크다.
+- 실제 Run 3 내부 변화는 `0.458800 -> 0.458670`이다.
+- KD-600과 Run3-600/1200/1800을 동일 seed/sample/eval MB로 재평가해야 실제 drift를 판단할 수 있다.
+- 실제 drift라면 all-router gradient conflict, Wiki output KD 병행, router L2 anchor, GEM/PCGrad를 후보로 본다.
+
+학습 시간:
+
+```text
+Run 1: 약 7시간 38분
+Run 2: 약 3시간 2분
+Run 3: 약 7시간 27분
+유효 run 합: 약 18시간 7분
+smoke/중단 포함 wall time: 약 20시간 15분
+```
+
+## 11. Stepwise Diagnostic: KD Final -> First 100 Conv Steps
+
+목적:
+- KD 직후 Conversation joint 학습 초기 100 optimizer step에서 Conversation/Code/Wiki를 매 step 측정한다.
+- 초반 Wiki 변화가 언제 발생하는지 본다.
+
+설정:
+- source: Run 2 KD-600 checkpoint
+- MB128, GBS2304, train 100 steps
+- 세 probe 모두 interval 1, 각 25 eval iterations
+- 원래 1800-step 첫 구간을 재현하도록 `LR_DECAY_ITERS=1800`, `LR_WSD_DECAY_ITERS=180`, `LR_WARMUP_FRACTION=0.01`
+- diagnostic display: baseline 5400, 학습 후 step 1은 5401, step 100은 5500
+
+### 11.1 절대 지켜야 할 baseline 규칙
+
+- step 5400은 checkpoint reload 후 재평가값이 아니다.
+- step 5400은 반드시 Run 2 KD 로그의 최종값으로 대체한다.
+- 아래 6개를 **하나의 W&B payload**로 한 번에 기록한다.
+
+```text
+conversation_probe/next_token_accuracy = 0.288416
+conversation_probe/ppl                 = 65.47378
+code_probe/next_token_accuracy         = 0.658937
+code_probe/ppl                         = 6.432723
+wiki_probe/next_token_accuracy         = 0.462014
+wiki_probe/ppl                         = 18.00381
+```
+
+- `RUN_INITIAL_PROBE_EVAL=0`으로 실제 학습 probe는 5401부터 시작한다.
+- W&B monotonic-step 제한 때문에 baseline을 여러 calls로 나누면 안 된다.
+
+### 11.2 시도한 run 상태
+
+```text
+g2-ffn-only-conv-joint-kd-init-stepwise-probe-mb128-100
+```
+
+- probe가 600부터 찍혀 중단. INVALID.
+
+```text
+g2-ffn-only-conv-joint-kd-init-stepwise-probe-offset5400-mb128-100
+```
+
+- 5400에 reload-time probe를 기록했고 local step 8 부근에서 중단. INVALID.
+
+```text
+g2-ffn-only-conv-joint-kd-init-stepwise-probe-corrected-offset5400-mb128-100
+```
+
+- helper가 두 probe만 지원해 Wiki를 두 번째 call로 넣다가 monotonic-step 제한으로 거부됨. INVALID.
+
+```text
+g2-kdinit-conv-stepwise-exact-baseline-v2-5400-5500-mb128
+```
+
+- 6개 KD baseline을 single payload로 전송했고 W&B에 `uploading history steps 0-0`이 표시됨.
+- finish가 오래 대기해 프로세스를 종료했으므로 서버 반영을 재확인하기 전에는 이어 쓰지 않는다.
+- 실제 100-step 학습은 시작하지 않았다.
+
+현재 상태: 관련 학습 프로세스 없음. 사용자 변경 사항 대기 중.
+
+재개 체크리스트:
+1. 사용자 변경 사항을 먼저 반영한다.
+2. 새 clean W&B run ID를 권장한다.
+3. 6개 KD baseline이 step 5400에 모두 보이는지 확인한다.
+4. `RUN_INITIAL_PROBE_EVAL=0`으로 시작한다.
+5. Conversation/Code/Wiki가 5401부터 매 step 찍히는지 확인한다.
+
+## 12. Planned Ablation: No-KD Random Expansion Chain
+
+목적: KD-init과 random-init의 초기 안정성, 보존, sample efficiency, 최종 성능을 비교한다.
+
+계획한 2-run chain:
+
+```text
+Wiki 8E
+-> random 8 -> 16 expansion
+-> Code + Wiki joint aggregation 1800 (MB128)
+-> Code 16E
+-> random 16 -> 24 expansion
+-> Conversation + Wiki/Code joint aggregation 1800 (MB128)
+-> final 24E
+```
+
+Run A:
+- source Wiki 8E; experts 9~16/random router rows init
+- trainable experts 9~16 + all router rows
+- `L_code + L_wiki`, Code:Wiki 1:1
+- MB128, GBS2304, 1800 steps; Code/Wiki probes
+
+Run B:
+- source Run A 16E; experts 17~24/random router rows init
+- trainable experts 17~24 + all router rows
+- Conversation + equal Wiki/Code replay; sample 비율 1:1:2
+- MB128, GBS2304, 1800 steps; Conversation/Code/Wiki probes
+
+구현 주의:
+- 기존 KD-init runners는 `LOAD_EXPANDED_SOURCE=1`이라 unexpanded source에 그대로 쓰면 안 된다.
+- 새 분기에서 `LOAD_EXPANDED_SOURCE=0`으로 두고 Code는 `--moe-expand-from-num-experts 8`, Conversation은 `--moe-expand-from-num-experts 16`을 사용한다.
+- 별도 random-init checkpoint 없이 각 run 시작 시 expansion한다.
+
+상태: 설계만 완료. 아직 runner/chain 구현 및 실행 안 함. Stepwise diagnostic 이후 진행.
+
+## 13. Immediate Session Handoff
+
+새 세션에서 먼저 할 일:
+1. 이 문서의 10~13절을 읽는다.
+2. Stepwise diagnostic에 대한 사용자의 변경 사항을 확인한다.
+3. GPU/process 상태를 확인한다.
+4. partial/invalid W&B run을 최종 결과처럼 사용하지 않는다.
+5. clean 100-step diagnostic을 완료한 뒤 no-KD 2-run chain을 새 분기로 구현한다.
+
+하지 말아야 할 것:
+- 사용자 변경 사항 확인 전에 diagnostic 자동 시작
+- reload-time probe를 KD final 값으로 사용
+- step 5400 baseline을 여러 W&B calls로 분리
+- `LOAD_EXPANDED_SOURCE=1` runner에 unexpanded checkpoint 전달
+- invalid W&B run을 유효 대조군으로 사용

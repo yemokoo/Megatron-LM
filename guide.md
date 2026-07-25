@@ -1,3 +1,5 @@
+
+
 # FLAME-MoE Local Continual Learning Guide
 
 This guide explains how the local continual-learning experiment is wired, what is already implemented for MoE expansion, and what to change when you want to reproduce the phenomenon from Figure 3 of the FLAME paper at smaller scale.

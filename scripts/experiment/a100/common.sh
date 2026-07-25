@@ -86,6 +86,25 @@ print(' '.join(parts))
 PY
 }
 
+build_equal_dataset_data_path() {
+    "$PYTHON_BIN" - "$@" <<'PY'
+import sys
+from pathlib import Path
+
+parts = []
+for dataset_arg in sys.argv[1:]:
+    dataset_dir = Path(dataset_arg)
+    prefixes = [path.with_suffix('') for path in sorted(dataset_dir.glob('*.bin'))]
+    if not prefixes:
+        raise SystemExit(f"ERROR: no .bin files found in {dataset_dir}")
+    # Each dataset contributes total weight 1.0 regardless of shard count.
+    per_prefix_weight = 1.0 / len(prefixes)
+    for prefix in prefixes:
+        parts.extend([f'{per_prefix_weight:.17g}', str(prefix)])
+print(' '.join(parts))
+PY
+}
+
 build_token_weighted_data_path() {
     "$PYTHON_BIN" - "$@" <<'PY'
 import sys
