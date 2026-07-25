@@ -86,6 +86,7 @@ from megatron.core.transformer.shared_router_hybrid import (
     capture_shared_router_routing_maps,
 )
 from megatron.core.transformer.moe import upcycling_utils
+from megatron.core.transformer.moe.router import Router
 from megatron.core.transformer.moe.moe_utils import track_moe_metrics
 from megatron.core.parallel_state import (
     destroy_global_memory_buffer,
@@ -967,6 +968,307 @@ def preprocess_common_state_dict(common_state_dict):
     return preprocessed_common_state_dict
 
 
+def _moe_interleave_enabled(args):
+    return int(getattr(args, 'moe_interleave_code_steps', 0) or 0) > 0
+
+
+def _moe_joint_replay_enabled(args):
+    return bool(getattr(args, 'moe_joint_replay_lm', False))
+
+
+class _MoeJointReplayDataIterator(RerunDataIterator):
+    def __init__(self, primary, replay):
+        super().__init__(primary); self.replay=RerunDataIterator(replay)
+    def next_replay(self): return next(self.replay)
+    def advance(self): super().advance(); self.replay.advance()
+    def rewind(self): super().rewind(); self.replay.rewind()
+    def state_dict(self): return {'primary':super().state_dict(),'replay':self.replay.state_dict()}
+    def load_state_dict(self,s):
+        super().load_state_dict(s['primary']); self.replay.load_state_dict(s['replay'])
+
+
+class _MoeReplayIteratorView:
+    def __init__(self,joint): self.joint=joint
+    def __next__(self): return self.joint.next_replay()
+
+
+def _set_moe_loss_coefficients(model,aux,z):
+    args=get_args();args.moe_aux_loss_coeff=aux;args.moe_z_loss_coeff=z;seen=set()
+    for shard in unwrap_model(model):
+        for module in shard.modules():
+            c=getattr(module,'config',None)
+            if c is None or id(c) in seen: continue
+            seen.add(id(c))
+            if hasattr(c,'moe_aux_loss_coeff'): c.moe_aux_loss_coeff=aux
+            if hasattr(c,'moe_z_loss_coeff'): c.moe_z_loss_coeff=z
+
+
+def _snapshot_joint_replay_non_router_grads(parameters, router_param_ids):
+    snapshot = {}
+    for param in parameters:
+        if not param.requires_grad or id(param) in router_param_ids:
+            continue
+        grad = _param_grad_tensor(param)
+        snapshot[id(param)] = (param, None if grad is None else grad.detach().clone())
+    return snapshot
+
+
+def _restore_joint_replay_non_router_grads(snapshot):
+    for param, saved_grad in snapshot.values():
+        grad = _param_grad_tensor(param)
+        if grad is None:
+            continue
+        if saved_grad is None:
+            grad.zero_()
+        else:
+            grad.copy_(saved_grad)
+
+
+def _activate_moe_joint_replay_optimizer(model):
+    args=get_args()
+    if args.moe_resume_from_num_experts is None: raise ValueError('joint replay requires resume expert boundary')
+    if _moe_interleave_enabled(args): raise ValueError('joint replay conflicts with interleave')
+    if not args.moe_joint_replay_data_path: raise ValueError('joint replay data required')
+    for shard in unwrap_model(model):
+        freeze_all_but_new_moe_params(shard,args.moe_resume_from_num_experts,
+            freeze_existing_experts=True,freeze_existing_router=False,train_dense_attention_lora=False)
+    kw={f.name:getattr(args,f.name) for f in dataclasses.fields(OptimizerConfig) if hasattr(args,f.name)}
+    cfg=OptimizerConfig(**kw);cfg.timers=get_timers()
+    opt=get_megatron_optimizer(cfg,model,None,None,1.0,use_gloo_process_groups=args.enable_gloo_process_groups)
+    sched=get_optimizer_param_scheduler(opt)
+    print_rank_0('[JOINT-REPLAY] optimizer contains new experts and all router rows')
+    return opt,sched
+
+
+def _get_moe_interleave_schedule(args):
+    cached = getattr(args, '_moe_interleave_schedule', None)
+    if cached is not None:
+        return cached
+
+    code_steps = int(args.moe_interleave_code_steps)
+    router_steps = int(args.moe_interleave_router_steps)
+    code_total = int(args.moe_interleave_code_total_steps)
+    if code_steps <= 0 or router_steps <= 0 or code_total <= 0:
+        raise ValueError(
+            'Single-process MoE interleaving requires positive code, router, and total Code steps.'
+        )
+    if not args.moe_interleave_router_data_path:
+        raise ValueError('--moe-interleave-router-data-path is required for interleaving.')
+    if args.moe_resume_from_num_experts is None:
+        raise ValueError('--moe-resume-from-num-experts is required for interleaving.')
+    if args.virtual_pipeline_model_parallel_size is not None:
+        raise ValueError('Single-process MoE interleaving does not support virtual pipeline parallelism.')
+
+    schedule = []
+    cursor = 0
+    code_done = 0
+    block_index = 0
+    while code_done < code_total:
+        block_index += 1
+        chunk = min(code_steps, code_total - code_done)
+        schedule.append(('code', cursor, cursor + chunk, block_index))
+        cursor += chunk
+        code_done += chunk
+        run_router = code_done < code_total or args.moe_interleave_router_after_final
+        if run_router:
+            schedule.append(('router', cursor, cursor + router_steps, block_index))
+            cursor += router_steps
+
+    if int(args.train_iters) != cursor:
+        raise ValueError(
+            f'--train-iters must equal the interleave schedule length: expected {cursor}, '
+            f'got {args.train_iters}.'
+        )
+    args._moe_interleave_schedule = schedule
+    return schedule
+
+
+def _get_moe_interleave_position(args, iteration):
+    schedule = _get_moe_interleave_schedule(args)
+    iteration = int(iteration)
+    if iteration < 0 or iteration > int(args.train_iters):
+        raise ValueError(f'Interleave iteration out of range: {iteration}')
+
+    code_done = 0
+    router_done = 0
+    active = None
+    for phase, start, end, block_index in schedule:
+        completed = max(0, min(iteration, end) - start)
+        if phase == 'code':
+            code_done += completed
+        else:
+            router_done += completed
+        if start <= iteration < end:
+            active = (phase, start, end, block_index)
+    if active is None and iteration == int(args.train_iters):
+        active = ('done', iteration, iteration, schedule[-1][3])
+    return active, code_done, router_done
+
+
+class _MoeInterleavedTrainIterator:
+    def __init__(self, args, code_iterator, router_iterator):
+        self.args = args
+        self.code_iterator = code_iterator
+        self.router_iterator = router_iterator
+
+    def __next__(self):
+        active, _, _ = _get_moe_interleave_position(
+            self.args, getattr(self.args, 'curr_iteration', self.args.iteration)
+        )
+        if active[0] == 'code':
+            return next(self.code_iterator)
+        if active[0] == 'router':
+            return next(self.router_iterator)
+        raise StopIteration
+
+
+def _write_moe_interleave_state(args, iteration, phase):
+    if torch.distributed.get_rank() != 0 or not args.save:
+        return
+    _, code_done, router_done = _get_moe_interleave_position(args, iteration)
+    state_path = os.path.join(args.save, 'interleaved_state.env')
+    os.makedirs(os.path.dirname(state_path), exist_ok=True)
+    tmp_path = state_path + '.tmp'
+    with open(tmp_path, 'w', encoding='utf-8') as handle:
+        handle.write(f'CODE_STEPS_DONE={code_done}\n')
+        handle.write(f'ROUTER_STEPS_DONE={router_done}\n')
+        handle.write(f'ITERATION={iteration}\n')
+        handle.write(f'CURRENT_PHASE={phase}\n')
+        handle.write(f'CODE_TOTAL_STEPS={args.moe_interleave_code_total_steps}\n')
+        handle.write(f'INTERLEAVE_CODE_STEPS={args.moe_interleave_code_steps}\n')
+        handle.write(f'INTERLEAVE_ROUTER_STEPS={args.moe_interleave_router_steps}\n')
+    os.replace(tmp_path, state_path)
+
+
+def _activate_moe_interleave_main_params(optimizer):
+    """Point model parameters at the active optimizer's BF16 master weights."""
+    for inner_optimizer in getattr(optimizer, 'chained_optimizers', []):
+        _activate_moe_interleave_main_params(inner_optimizer)
+    float16_groups = getattr(optimizer, 'float16_groups', [])
+    main_groups = getattr(optimizer, 'fp32_from_float16_groups', [])
+    for model_group, main_group in zip(float16_groups, main_groups):
+        for model_param, main_param in zip(model_group, main_group):
+            model_param.main_param = main_param
+
+
+def _activate_moe_interleave_optimizer(model, phase, optimizer_cache):
+    args = get_args()
+    if phase not in ('code', 'router'):
+        raise ValueError(f'Unsupported interleave phase: {phase}')
+
+    if not hasattr(args, '_moe_interleave_base_lr'):
+        args._moe_interleave_base_lr = args.lr
+        args._moe_interleave_base_min_lr = args.min_lr
+        args._moe_interleave_base_aux = args.moe_aux_loss_coeff
+        args._moe_interleave_base_z = args.moe_z_loss_coeff
+
+    if phase == 'code':
+        for target_shard in unwrap_model(model):
+            freeze_all_but_new_moe_params(
+                target_shard,
+                args.moe_resume_from_num_experts,
+                freeze_existing_experts=True,
+                freeze_existing_router=True,
+                train_dense_attention_lora=not args.moe_freeze_dense_attention_lora_with_new_experts,
+            )
+        args.lr = args.moe_interleave_code_lr or args._moe_interleave_base_lr
+        args.min_lr = args.moe_interleave_code_min_lr or args._moe_interleave_base_min_lr
+        aux_coeff = (
+            args.moe_interleave_code_aux_loss_coeff
+            if args.moe_interleave_code_aux_loss_coeff is not None
+            else args._moe_interleave_base_aux
+        )
+        z_coeff = (
+            args.moe_interleave_code_z_loss_coeff
+            if args.moe_interleave_code_z_loss_coeff is not None
+            else args._moe_interleave_base_z
+        )
+    else:
+        for target_shard in unwrap_model(model):
+            freeze_all_but_router_params(target_shard)
+        args.lr = args.moe_interleave_router_lr or args._moe_interleave_base_lr
+        args.min_lr = args.moe_interleave_router_min_lr or args._moe_interleave_base_min_lr
+        aux_coeff = args.moe_interleave_router_aux_loss_coeff
+        z_coeff = args.moe_interleave_router_z_loss_coeff
+
+    args.moe_aux_loss_coeff = aux_coeff
+    args.moe_z_loss_coeff = z_coeff
+    seen_configs = set()
+    for target_shard in unwrap_model(model):
+        for module in target_shard.modules():
+            module_config = getattr(module, 'config', None)
+            if module_config is None or id(module_config) in seen_configs:
+                continue
+            seen_configs.add(id(module_config))
+            if hasattr(module_config, 'moe_aux_loss_coeff'):
+                module_config.moe_aux_loss_coeff = aux_coeff
+            if hasattr(module_config, 'moe_z_loss_coeff'):
+                module_config.moe_z_loss_coeff = z_coeff
+
+    trainable = sum(
+        param.numel()
+        for target_shard in unwrap_model(model)
+        for param in target_shard.parameters()
+        if param.requires_grad
+    )
+    if phase in optimizer_cache:
+        optimizer, scheduler = optimizer_cache[phase]
+        _activate_moe_interleave_main_params(optimizer)
+        optimizer.reload_model_params()
+        print_rank_0(
+            f'[INTERLEAVE] phase={phase} optimizer resumed; trainable={trainable:,} '
+            f'lr={args.lr} min_lr={args.min_lr} scheduler_samples={scheduler.num_steps}'
+        )
+        return optimizer, scheduler
+
+    kwargs = {}
+    for field in dataclasses.fields(OptimizerConfig):
+        if hasattr(args, field.name):
+            kwargs[field.name] = getattr(args, field.name)
+    optimizer_config = OptimizerConfig(**kwargs)
+    optimizer_config.timers = get_timers()
+    optimizer = get_megatron_optimizer(
+        optimizer_config,
+        model,
+        None,
+        None,
+        1.0,
+        use_gloo_process_groups=args.enable_gloo_process_groups,
+    )
+    # Each persistent optimizer advances only during its own phase.
+    _, total_code_steps, total_router_steps = _get_moe_interleave_position(
+        args, args.train_iters
+    )
+    phase_train_iters = total_code_steps if phase == 'code' else total_router_steps
+    original_train_iters = args.train_iters
+    original_lr_decay_iters = args.lr_decay_iters
+    original_lr_wsd_decay_iters = args.lr_wsd_decay_iters
+    try:
+        args.train_iters = phase_train_iters
+        if original_lr_decay_iters is not None:
+            args.lr_decay_iters = max(
+                1,
+                round(original_lr_decay_iters * phase_train_iters / original_train_iters),
+            )
+        if original_lr_wsd_decay_iters is not None:
+            args.lr_wsd_decay_iters = max(
+                1,
+                round(original_lr_wsd_decay_iters * phase_train_iters / original_train_iters),
+            )
+        scheduler = get_optimizer_param_scheduler(optimizer)
+    finally:
+        args.train_iters = original_train_iters
+        args.lr_decay_iters = original_lr_decay_iters
+        args.lr_wsd_decay_iters = original_lr_wsd_decay_iters
+    optimizer_cache[phase] = (optimizer, scheduler)
+    print_rank_0(
+        f'[INTERLEAVE] phase={phase} optimizer created; trainable={trainable:,} '
+        f'lr={args.lr} min_lr={args.min_lr} aux={aux_coeff} z={z_coeff} '
+        f'phase_train_iters={phase_train_iters}'
+    )
+    return optimizer, scheduler
+
+
 def pretrain(
     train_valid_test_dataset_provider,
     model_provider,
@@ -1126,7 +1428,76 @@ def pretrain(
     app_metrics['app_build_dataiters_start_time'] = one_logger_utils.get_timestamp_in_ms()
     timers('train/valid/test-data-iterators-setup', log_level=0).start(
         barrier=True)
-    if args.virtual_pipeline_model_parallel_size is not None:
+    if _moe_joint_replay_enabled(args):
+        saved=(args.consumed_train_samples,args.data_path,args.train_data_path,args.valid_data_path,args.test_data_path)
+        primary=build_train_valid_test_data_iterators(train_valid_test_dataset_provider)
+        try:
+            args.data_path=list(args.moe_joint_replay_data_path)
+            args.train_data_path=args.valid_data_path=args.test_data_path=None
+            args.consumed_train_samples=args.iteration*args.global_batch_size
+            replay=build_train_valid_test_data_iterators(train_valid_test_dataset_provider)
+        finally:
+            (args.consumed_train_samples,args.data_path,args.train_data_path,args.valid_data_path,args.test_data_path)=saved
+        train_data_iterator=_MoeJointReplayDataIterator(primary[0].iterable,replay[0].iterable)
+        valid_data_iterator,test_data_iterator=primary[1],primary[2]
+        print_rank_0(f'[JOINT-REPLAY] paired iterators resume={args.iteration}')
+    elif _moe_interleave_enabled(args):
+        _get_moe_interleave_schedule(args)
+        _, code_steps_done, router_steps_done = _get_moe_interleave_position(
+            args, args.iteration
+        )
+        original_consumed_train_samples = args.consumed_train_samples
+        original_consumed_valid_samples = args.consumed_valid_samples
+        original_data_path = args.data_path
+        original_train_data_path = args.train_data_path
+        original_valid_data_path = args.valid_data_path
+        original_test_data_path = args.test_data_path
+        try:
+            args.consumed_train_samples = code_steps_done * args.global_batch_size
+            code_iterators = build_train_valid_test_data_iterators(
+                train_valid_test_dataset_provider
+            )
+
+            args.data_path = list(args.moe_interleave_router_data_path)
+            args.train_data_path = None
+            args.valid_data_path = None
+            args.test_data_path = None
+            args.consumed_train_samples = router_steps_done * args.global_batch_size
+            args.consumed_valid_samples = 0
+            router_iterators = build_train_valid_test_data_iterators(
+                train_valid_test_dataset_provider
+            )
+        finally:
+            args.data_path = original_data_path
+            args.train_data_path = original_train_data_path
+            args.valid_data_path = original_valid_data_path
+            args.test_data_path = original_test_data_path
+            args.consumed_train_samples = original_consumed_train_samples
+            args.consumed_valid_samples = original_consumed_valid_samples
+
+        code_train_iterator = code_iterators[0]
+        router_train_iterator = router_iterators[0]
+        if code_train_iterator is None:
+            train_data_iterator = None
+        else:
+            if not isinstance(code_train_iterator, RerunDataIterator) or not isinstance(
+                router_train_iterator, RerunDataIterator
+            ):
+                raise TypeError('Interleave data iterators must be wrapped with RerunDataIterator.')
+            train_data_iterator = RerunDataIterator(
+                _MoeInterleavedTrainIterator(
+                    args,
+                    code_train_iterator.iterable,
+                    router_train_iterator.iterable,
+                )
+            )
+        valid_data_iterator = code_iterators[1]
+        test_data_iterator = code_iterators[2]
+        print_rank_0(
+            '[INTERLEAVE] built persistent Code and router-mixed data iterators; '
+            f'resume code_steps={code_steps_done}, router_steps={router_steps_done}'
+        )
+    elif args.virtual_pipeline_model_parallel_size is not None:
         train_data_iterator = []
         valid_data_iterator = []
         test_data_iterator = []
@@ -2658,6 +3029,43 @@ def train_step(
                 micro_batch_size=args.micro_batch_size,
                 decoder_seq_length=args.decoder_seq_length,
                 forward_only=False)
+        joint_replay_loss_dict={}
+        if _moe_joint_replay_enabled(args):
+            router_ids=set()
+            for shard in unwrap_model(model):
+                for module in shard.modules():
+                    if isinstance(module, Router):
+                        router_ids.update(id(p) for p in module.parameters(recurse=False))
+            trainable_parameters = (
+                param for shard in unwrap_model(model) for param in shard.parameters()
+            )
+            saved_grads = _snapshot_joint_replay_non_router_grads(
+                trainable_parameters, router_ids
+            )
+            aux,z=args.moe_aux_loss_coeff,args.moe_z_loss_coeff
+            _set_moe_loss_coefficients(model,0.0,0.0)
+            try:
+                with allow_existing_router_grads():
+                    replay_losses=forward_backward_func(
+                        forward_step_func=forward_step_func,data_iterator=_MoeReplayIteratorView(data_iterator),
+                        model=model,num_microbatches=get_num_microbatches(),seq_length=args.seq_length,
+                        micro_batch_size=args.micro_batch_size,decoder_seq_length=args.decoder_seq_length,
+                        forward_only=False)
+            finally: _set_moe_loss_coefficients(model,aux,z)
+            _restore_joint_replay_non_router_grads(saved_grads)
+            if replay_losses:
+                for key in replay_losses[0]:
+                    numerator = 0
+                    denominator = 0
+                    for microbatch_loss in replay_losses:
+                        value = microbatch_loss[key]
+                        if isinstance(value, (tuple, list)):
+                            numerator += value[0]
+                            denominator += value[1]
+                        else:
+                            numerator += value
+                            denominator += 1
+                    joint_replay_loss_dict[f'joint_replay/{key}'] = numerator / denominator
         router_memory_loss_dict = {}
         router_lm_grad_snapshot = None
         router_grad_metrics = {}
@@ -2761,6 +3169,7 @@ def train_step(
                     denominator += 1
             loss_reduced[key] = numerator / denominator
         loss_reduced.update(router_memory_loss_dict)
+        loss_reduced.update(joint_replay_loss_dict)
         loss_reduced.update(train_router_usage_metrics)
         lm_loss = loss_reduced.get('lm loss')
         router_kl = loss_reduced.get('router_memory_teacher_student/kl')
@@ -3273,6 +3682,31 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
 
     # Iterations.
     iteration = args.iteration
+    interleave_phase = None
+    interleave_optimizer_cache = {}
+    if _moe_joint_replay_enabled(args):
+        config.grad_scale_func=None;del optimizer;del opt_param_scheduler
+        gc.collect();torch.cuda.empty_cache();torch.distributed.barrier()
+        optimizer,opt_param_scheduler=_activate_moe_joint_replay_optimizer(model)
+    elif _moe_interleave_enabled(args):
+        active, code_done, router_done = _get_moe_interleave_position(args, iteration)
+        interleave_phase = active[0]
+        if interleave_phase == 'done':
+            raise ValueError('Interleave checkpoint is already at the configured final iteration.')
+        config.grad_scale_func = None
+        del optimizer
+        del opt_param_scheduler
+        gc.collect()
+        torch.cuda.empty_cache()
+        torch.distributed.barrier()
+        optimizer, opt_param_scheduler = _activate_moe_interleave_optimizer(
+            model, interleave_phase, interleave_optimizer_cache
+        )
+        _write_moe_interleave_state(args, iteration, interleave_phase)
+        print_rank_0(
+            f'[{interleave_phase.upper()}] start iteration={iteration} '
+            f'code_done={code_done} router_done={router_done} target={active[2]}'
+        )
     # Make sure rerun_state_machine has the right iteration loaded from checkpoint.
     rerun_state_machine = get_rerun_state_machine()
     if rerun_state_machine.current_iteration != iteration:
@@ -3543,6 +3977,26 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
 
     # Run training iterations till done.
     while iteration < args.train_iters:
+        if _moe_interleave_enabled(args):
+            active, code_done, router_done = _get_moe_interleave_position(args, iteration)
+            next_phase = active[0]
+            if next_phase != interleave_phase:
+                print_rank_0(
+                    f'[{interleave_phase.upper()}] done iteration={iteration} '
+                    f'code_done={code_done} router_done={router_done}'
+                )
+                config.grad_scale_func = None
+                torch.distributed.barrier()
+                optimizer, opt_param_scheduler = _activate_moe_interleave_optimizer(
+                    model, next_phase, interleave_optimizer_cache
+                )
+                config.grad_scale_func = optimizer.scale_loss
+                interleave_phase = next_phase
+                _write_moe_interleave_state(args, iteration, interleave_phase)
+                print_rank_0(
+                    f'[{interleave_phase.upper()}] start iteration={iteration} '
+                    f'code_done={code_done} router_done={router_done} target={active[2]}'
+                )
         if args.profile and torch.distributed.get_rank() in args.profile_ranks:
             if args.use_pytorch_profiler:
                 prof.step()
@@ -3606,15 +4060,33 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
         # gradients, then Wiki router KD gradients, then applies one optimizer step.
         args.curr_iteration = iteration
         ft_integration.on_training_step_start()
-        loss_dict, skipped_iter, should_checkpoint, should_exit, exit_code, grad_norm, num_zeros_in_grad = \
-            train_step(forward_step_func,
-                       train_data_iterator,
-                       model,
-                       optimizer,
-                       opt_param_scheduler,
-                       config,
-                       router_memory_accum_func=joint_router_memory_accum_func,
-                       router_memory_iteration=current_step)
+        step_context = (
+            allow_existing_router_grads()
+            if (
+                _moe_joint_replay_enabled(args)
+                or (_moe_interleave_enabled(args) and interleave_phase == 'router')
+            )
+            else nullcontext()
+        )
+        with step_context:
+            (
+                loss_dict,
+                skipped_iter,
+                should_checkpoint,
+                should_exit,
+                exit_code,
+                grad_norm,
+                num_zeros_in_grad,
+            ) = train_step(
+                forward_step_func,
+                train_data_iterator,
+                model,
+                optimizer,
+                opt_param_scheduler,
+                config,
+                router_memory_accum_func=joint_router_memory_accum_func,
+                router_memory_iteration=current_step,
+            )
         ft_integration.on_training_step_end()
         if should_checkpoint:
             save_checkpoint_and_time(iteration, model, optimizer,
@@ -3838,6 +4310,14 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
             wandb_writer.finish()
         ft_integration.shutdown()
         sys.exit(exit_code)
+
+    if _moe_interleave_enabled(args):
+        _, code_done, router_done = _get_moe_interleave_position(args, iteration)
+        print_rank_0(
+            f'[{interleave_phase.upper()}] done iteration={iteration} '
+            f'code_done={code_done} router_done={router_done}'
+        )
+        _write_moe_interleave_state(args, iteration, 'done')
 
     return iteration, num_floating_point_operations_so_far
 

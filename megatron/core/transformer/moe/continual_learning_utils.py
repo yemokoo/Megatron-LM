@@ -200,6 +200,14 @@ def expand_moe_model(target_model, source_model, num_existing_experts):
 
 
 def _freeze_router(module, num_existing_experts):
+    marker = getattr(module, "_continual_frozen_router_rows", None)
+    if marker == num_existing_experts:
+        return
+    if marker is not None:
+        raise RuntimeError(
+            "Router already has a continual-learning gradient hook for "
+            f"{marker} existing experts; cannot replace it with {num_existing_experts}."
+        )
     def _zero_existing_router_grads(grad):
         if _ALLOW_EXISTING_ROUTER_GRADS:
             return grad
@@ -208,6 +216,7 @@ def _freeze_router(module, num_existing_experts):
         return grad
 
     module.weight.register_hook(_zero_existing_router_grads)
+    module._continual_frozen_router_rows = num_existing_experts
 
 
 def _zero_grad_rows(param, frozen_indices: Set[int], *, allow_router_grads: bool = False):

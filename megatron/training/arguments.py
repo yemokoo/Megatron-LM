@@ -2488,6 +2488,38 @@ def _add_moe_args(parser):
                             'expansion where only new FFN experts and router rows should train.')
     group.add_argument('--moe-resume-from-num-experts', type=int, default=None,
                        help='When resuming from an already-expanded MoE checkpoint, re-apply continual-learning freezing using this many original experts.')
+    group.add_argument('--moe-interleave-code-steps', type=int, default=0,
+                       help='Run this many Code-only steps before each router-only block. '
+                            'A positive value enables single-process MoE interleaving.')
+    group.add_argument('--moe-interleave-router-steps', type=int, default=0,
+                       help='Run this many router-only mixed-data steps after each Code block.')
+    group.add_argument('--moe-interleave-code-total-steps', type=int, default=0,
+                       help='Total number of Code-only steps in a single-process interleaved run.')
+    group.add_argument('--moe-interleave-router-after-final', action='store_true',
+                       help='Run one final router-only block after the last Code block.')
+    group.add_argument('--moe-interleave-router-data-path', nargs='*', default=None,
+                       help='Weighted Megatron data-path list used during router-only blocks. '
+                            'The normal --data-path remains the Code-only data source.')
+    group.add_argument('--moe-interleave-code-lr', type=float, default=None,
+                       help='Learning rate for Code-only blocks. Defaults to --lr.')
+    group.add_argument('--moe-interleave-code-min-lr', type=float, default=None,
+                       help='Minimum learning rate for Code-only blocks. Defaults to --min-lr.')
+    group.add_argument('--moe-interleave-router-lr', type=float, default=None,
+                       help='Learning rate for router-only blocks. Defaults to --lr.')
+    group.add_argument('--moe-interleave-router-min-lr', type=float, default=None,
+                       help='Minimum learning rate for router-only blocks. Defaults to --min-lr.')
+    group.add_argument('--moe-interleave-code-aux-loss-coeff', type=float, default=None,
+                       help='MoE auxiliary-loss coefficient for Code-only blocks.')
+    group.add_argument('--moe-interleave-code-z-loss-coeff', type=float, default=None,
+                       help='MoE z-loss coefficient for Code-only blocks.')
+    group.add_argument('--moe-interleave-router-aux-loss-coeff', type=float, default=0.0,
+                       help='MoE auxiliary-loss coefficient for router-only blocks.')
+    group.add_argument('--moe-interleave-router-z-loss-coeff', type=float, default=0.0,
+                       help='MoE z-loss coefficient for router-only blocks.')
+    group.add_argument('--moe-joint-replay-lm', action='store_true',
+                       help='Accumulate primary and replay LM backward passes before one update.')
+    group.add_argument('--moe-joint-replay-data-path', nargs='*', default=None,
+                       help='Weighted data path for router-only replay LM.')
     group.add_argument('--moe-old-model-kl-load', type=str, default=None,
                        help='Checkpoint directory for reconstructing the pre-expansion MoE teacher during resumed continual learning.')
     group.add_argument('--moe-old-model-kl-coeff', type=float, default=0.0,
