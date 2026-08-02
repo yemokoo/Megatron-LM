@@ -197,6 +197,38 @@ Entry points:
 주의:
 - shared-router-hybrid에서는 FFN과 attention LoRA가 router를 공유하므로, 이 분석은 **shared router top-2 pair**만 추적하면 된다
 
+### 4.4 Same-Token Hidden Preservation: Wiki-only -> KD Init -> Code:Wiki 1:1
+
+- Dump runner: `scripts/experiment/a100/run_g2_ffn_only_kd_1to1_hidden_space_probes_mha.sh`
+- Joint-PCA plotter: `scripts/analysis/plot_hidden_space_kd_1to1.py`
+
+목적:
+
+- Wiki-only, Wiki output-logits KD 직후, Code:Wiki = 1:1 LM 학습 후 모델에 동일한 Wiki/Code token 순서를 입력한다.
+- 각 Transformer layer에서 같은 token 위치의 hidden state가 KD 및 Code 학습 뒤에도 유지되는지 확인한다.
+- Wiki hidden이 유지되는 token/subspace가 있으면, raw Wiki replay 없이 저장된 hidden prototype/anchor로 router logits 또는 old-expert group routing을 맞출 수 있는지 후속 실험의 근거로 사용한다.
+- 저장된 hidden을 사용하는 방식은 raw-data replay는 아니지만 feature-space replay/regularization으로 해석한다.
+
+판정 기준:
+
+- probe별로 세 체크포인트 hidden을 함께 중심화하고 layer별 공동 PCA/KDE 분포를 비교한다. Wiki와 Code probe의 PCA는 서로 분리한다.
+- PCA 분포 중첩만으로 보존을 결론 내리지 않고, 동일 token 기준 paired cosine, symmetric normalized L2, cosine threshold별 보존 비율을 함께 본다.
+- 세 dump의 token id, sample index, token position이 완전히 같지 않으면 plot 생성을 중단한다.
+
+2026-07-31 산출물:
+
+- Root: `/home/work/Agent_HJ/30_flame_agent/LLM-continual-learning/.local/analysis/g2-ffn-only-kd-1to1-hidden-space`
+- Wiki/Code probe 각각 3개 checkpoint x 2048 동일 token, 9개 Transformer layer hidden dump 완료.
+- Wiki probe token identity SHA-256: `8d2559043db6791da8d4e58bc95b22bce4dbd9d37905d5e1732ab6e2ce040599`
+- Code probe token identity SHA-256: `f12ed0ddfdea184589c3b01febcd03ee31a4646ce4a3ba81bbba5bdb562a0224`
+
+초기 결과:
+
+- Wiki probe, Wiki-only vs Code:Wiki 1:1의 layer-average paired cosine은 `0.998732`, cosine >= 0.99 token 비율은 `0.993164`이다.
+- Code probe, Wiki-only vs Code:Wiki 1:1의 layer-average paired cosine은 `0.622178`, cosine >= 0.99 token 비율은 `0.001465`이다.
+- Wiki output-logits KD 직후는 Wiki/Code probe 모두 Wiki-only 대비 layer-average paired cosine이 `0.9997` 이상으로, KD 자체는 hidden을 거의 유지했다.
+- 현재 결과는 Wiki 표현을 유지하면서 Code 표현이 깊은 layer에서 크게 재구성된 패턴을 보인다. 단, Code:Wiki 1:1 학습 자체가 Wiki replay를 사용했으므로 replay-free 보존의 증거는 아니며, raw replay를 hidden anchor로 대체하는 후속 실험의 근거로만 해석한다.
+
 ## 5. Current Known Runs and Storage
 
 아래 경로는 KT 서버 기준 주요 저장 위치 메모입니다.
@@ -218,11 +250,35 @@ Entry points:
 - F3 code: `/home/work/Agent_HJ/30_flame_agent/LLM-continual-learning/.local/weights/a100/mha/f-attn-r16-lora-bf16/f3-wiki-to-code-ffn-moe-unfreeze-attn-r16-lora-mha-a100-bf16-mb64-1800-nobase`
 - F-QVO code: `/home/work/Agent_HJ/30_flame_agent/LLM-continual-learning/.local/weights/a100/mha/f-attn-qvo-full-rank-lora-bf16/fqvo-wiki-to-code-ffn-moe-unfreeze-attn-full-rank-lora-mha-a100-bf16-mb64-1800-nobase`
 
-### 5.4 Important Logs
+### 5.4 G2 FFN-only LPR / KD + Joint-Replay Runs (2026-07-30~31)
+
+공통 Wiki source:
+
+- Wiki-only, 8 experts, step 1800 완료: `/home/work/Agent_HJ/30_flame_agent/LLM-continual-learning/.local/weights/a100/mha/g2-checkpoints/wiki/g2matched-top4-e8-ffn352-wiki-ffn-moe-mha-a100-bf16-mb128-1800`
+
+LPR chain, `1800 -> 360 -> 1800 -> 360`, 전 단계 완료:
+
+- Code task, 8 -> 16 experts, step 1800: `/home/work/Agent_HJ/30_flame_agent/LLM-continual-learning/.local/weights/a100/mha/g2-checkpoints/lpr_chain/code_task/g2-ffn-only-e8to16-code-lm-aux-z-mb96-1800-lpr-chain`
+- Code router LPR, 추가 360 steps, 누적 tracker 2160: `/home/work/Agent_HJ/30_flame_agent/LLM-continual-learning/.local/weights/a100/mha/g2-checkpoints/lpr_chain/code_router/g2-ffn-only-code-router-lpr-gamma0.1-equal-token-mb96-360`
+- Conversation task, 16 -> 24 experts, step 1800: `/home/work/Agent_HJ/30_flame_agent/LLM-continual-learning/.local/weights/a100/mha/g2-checkpoints/lpr_chain/conversation_task/g2-ffn-only-e16to24-conversation-lm-aux-z-mb64-1800-from-lpr`
+- Conversation router LPR, 추가 360 steps, 누적 tracker 2160: `/home/work/Agent_HJ/30_flame_agent/LLM-continual-learning/.local/weights/a100/mha/g2-checkpoints/lpr_chain/conversation_router/g2-ffn-only-conversation-router-lpr-gamma0.1-equal-token-mb64-360`
+
+KD initialization + new-expert LR-ramp joint-replay chain, 전 단계 완료:
+
+- Wiki output-logits KD로 Code expert 8 -> 16 초기화, step 1800, MB 48: `/home/work/Agent_HJ/30_flame_agent/LLM-continual-learning/.local/weights/a100/mha/g2-checkpoints/code/expansion_distill_init/g2-ffn-only-e8to16-code-expert-init-logits-wiki-distill-mha-a100-bf16-mb48-1800`
+- Code:Wiki = 1:1 joint LM, step 1800, MB 96, 새 expert LR ramp 1~900: `/home/work/Agent_HJ/30_flame_agent/LLM-continual-learning/.local/weights/a100/mha/g2-checkpoints/code/joint_lm_replay_ramp/g2-ffn-only-code-wiki-joint-lm-allrouter-newexpert-ramp900-mb96-1800`
+- Wiki:Code = 1:1 output-logits KD로 Conversation expert 16 -> 24 초기화, step 600, MB 32: `/home/work/Agent_HJ/30_flame_agent/LLM-continual-learning/.local/weights/a100/mha/g2-checkpoints/conversation/expansion_distill_init_joint_code_ramp/g2-ffn-only-e16to24-conv-init-from-code-ramp900-logits-wikicode-kd-mb32-600`
+- Wiki:Code:Conversation = 1:1:2 joint LM, step 1800, MB 96, 새 expert LR ramp 1~900: `/home/work/Agent_HJ/30_flame_agent/LLM-continual-learning/.local/weights/a100/mha/g2-checkpoints/conversation/joint_lm_replay_ramp/g2-ffn-only-conv-wikicode-joint-lm-allrouter-112-newexpert-ramp900-mb96-1800`
+
+다음 hidden-space 검증의 `KD + 1:1` 대상은 위 Code:Wiki = 1:1 joint LM 체크포인트이다. 동일 token 순서 비교를 위해 Wiki-only source와 KD 직후 체크포인트도 함께 보존한다.
+
+### 5.5 Important Logs
 
 - `E5` chain log: `/home/work/Agent_HJ/30_flame_agent/LLM-continual-learning/offline_chain_e5_fullrank_qv_mha.log`
 - `F3` continual log: `/home/work/Agent_HJ/30_flame_agent/LLM-continual-learning/f3_code_rank16_lora_mb64_nobase.log`
 - `F-QVO` continual log: `/home/work/Agent_HJ/30_flame_agent/LLM-continual-learning/fqvo_code_full_rank_lora_mb64_nobase.log`
+- G2 LPR chain logs: `/home/work/Agent_HJ/30_flame_agent/LLM-continual-learning/.local/weights/a100/mha/g2-checkpoints/lpr_chain/*/*/logs`
+- G2 KD + LR-ramp chain logs: `/home/work/Agent_HJ/30_flame_agent/LLM-continual-learning/.local/logs/g2_kd_ramp900_code_kd_ramp900_conversation_chain`
 
 ## 6. Current Findings
 

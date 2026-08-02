@@ -70,6 +70,9 @@ export DIRECT_LOCAL_SAVE="${DIRECT_LOCAL_SAVE:-1}"
 
 export SSD_MOUNT="${LOCAL_SSD_ROOT}/${RUN_ID}"
 export SSD_CODE_TRAIN="${SSD_MOUNT}/dataset/code_train"
+export SSD_CODE_TRAIN_SECONDARY="${SSD_MOUNT}/dataset/code_train_secondary"
+export SSD_JOINT_REPLAY_DATASET="${SSD_MOUNT}/dataset/joint_replay_train"
+export SSD_JOINT_REPLAY_SECONDARY_DATASET="${SSD_MOUNT}/dataset/joint_replay_secondary_train"
 export SSD_ROUTER_MEMORY="${SSD_MOUNT}/dataset/router_memory"
 export SSD_ROUTER_MEMORY_EVAL="${SSD_MOUNT}/dataset/router_memory_eval"
 export SSD_SOURCE_WEIGHTS="${SSD_MOUNT}/source_weights"
@@ -103,6 +106,7 @@ export SAVE_INTERVAL="${SAVE_INTERVAL:-300}"
 export SAVE_CHECKPOINTS="${SAVE_CHECKPOINTS:-1}"
 export EVAL_INTERVAL="${EVAL_INTERVAL:-1000}"
 export LOG_INTERVAL="${LOG_INTERVAL:-10}"
+export TENSORBOARD_LOG_INTERVAL="${TENSORBOARD_LOG_INTERVAL:-1}"
 export TRAIN_LOG_STEP_TIME_ONLY="${TRAIN_LOG_STEP_TIME_ONLY:-1}"
 export LR="${LR:-3e-4}"
 export MIN_LR="${MIN_LR:-3e-5}"
@@ -110,11 +114,19 @@ export LR_DECAY_STYLE="${LR_DECAY_STYLE:-WSD}"
 export LR_WARMUP_FRACTION="${LR_WARMUP_FRACTION:-0.01}"
 export LR_DECAY_ITERS="${LR_DECAY_ITERS:-$TRAIN_ITERS}"
 export LR_WSD_DECAY_ITERS="${LR_WSD_DECAY_ITERS:-$((TRAIN_ITERS / 10))}"
+export MOE_NEW_EXPERT_LR_RAMP_STEPS="${MOE_NEW_EXPERT_LR_RAMP_STEPS:-0}"
+export NO_SAVE_OPTIM="${NO_SAVE_OPTIM:-0}"
 export MODEL_CONFIG_SCRIPT="${MODEL_CONFIG_SCRIPT:-configs/model/flame-shared-router-hybrid-experts.sh}"
 export DATASET_SPLIT="${DATASET_SPLIT:-100,0,0}"
 export SEED="${SEED:-1234}"
 
 export TRAIN_DATASET="${TRAIN_DATASET:-$(dataset_dir_for_task code)}"
+export TRAIN_DATASET_SECONDARY="${TRAIN_DATASET_SECONDARY:-}"
+export TRAIN_DATA_WEIGHT_MODE="${TRAIN_DATA_WEIGHT_MODE:-equal_prefix}"
+export MOE_JOINT_REPLAY_LM="${MOE_JOINT_REPLAY_LM:-0}"
+export JOINT_REPLAY_DATASET="${JOINT_REPLAY_DATASET:-}"
+export JOINT_REPLAY_SECONDARY_DATASET="${JOINT_REPLAY_SECONDARY_DATASET:-}"
+export JOINT_REPLAY_DATA_WEIGHT_MODE="${JOINT_REPLAY_DATA_WEIGHT_MODE:-equal_dataset}"
 export ROUTER_MEMORY_KL_COEFF="${ROUTER_MEMORY_KL_COEFF:-0.0}"
 export ROUTER_MEMORY_FORCE_ENABLE_ZERO_COEFF="${ROUTER_MEMORY_FORCE_ENABLE_ZERO_COEFF:-0}"
 export ROUTER_MEMORY_FRACTION="${ROUTER_MEMORY_FRACTION:-0.05}"
@@ -165,6 +177,7 @@ export DATASET_SOURCE="${DATASET_SOURCE:-Python code exact train}"
 export PROBE_DATASET="${PROBE_DATASET:-$(probe_dir_for_task code)}"
 export PROBE_NAME="${PROBE_NAME:-code_probe}"
 export PROBE_EVAL_ITERS="${PROBE_EVAL_ITERS:-25}"
+export PROBE_MICRO_BATCH_SIZE="${PROBE_MICRO_BATCH_SIZE:-}"
 export PROBE_EVAL_INTERVAL="${PROBE_EVAL_INTERVAL:-100}"
 export SECONDARY_PROBE_DATASET="${SECONDARY_PROBE_DATASET:-$(probe_dir_for_task wiki)}"
 export SECONDARY_PROBE_NAME="${SECONDARY_PROBE_NAME:-wiki_probe}"
@@ -222,6 +235,11 @@ router_memory_requested() {
     }
 }
 
+if [ "$MOE_JOINT_REPLAY_LM" = "1" ] && [ -z "$JOINT_REPLAY_DATASET" ]; then
+    echo "ERROR: MOE_JOINT_REPLAY_LM=1 requires JOINT_REPLAY_DATASET." >&2
+    exit 1
+fi
+
 export STAGE1_WEIGHTS_DIR="$(resolve_stage1_dir)"
 export PROBE_STEP_OFFSET="${PROBE_STEP_OFFSET:-$(read_stage1_train_iters)}"
 export SECONDARY_PROBE_STEP_OFFSET="${SECONDARY_PROBE_STEP_OFFSET:-$PROBE_STEP_OFFSET}"
@@ -241,6 +259,15 @@ mkdir -p \
     "$SSD_TARGET_WEIGHTS" \
     "$TRAIN_WEIGHTS" \
     "$LOG_DIR"
+if [ -n "$TRAIN_DATASET_SECONDARY" ]; then
+    mkdir -p "$SSD_CODE_TRAIN_SECONDARY"
+fi
+if [ "$MOE_JOINT_REPLAY_LM" = "1" ]; then
+    mkdir -p "$SSD_JOINT_REPLAY_DATASET"
+    if [ -n "$JOINT_REPLAY_SECONDARY_DATASET" ]; then
+        mkdir -p "$SSD_JOINT_REPLAY_SECONDARY_DATASET"
+    fi
+fi
 exec > >(
     tee -a "$RUN_LOG" | "$PYTHON_BIN" -u -c '
 from datetime import datetime, timedelta
@@ -342,6 +369,16 @@ if [ -n "$RESUME_FROM_WEIGHTS" ]; then
         "$RESUME_FROM_WEIGHTS/" "$SSD_RESUME_WEIGHTS/"
 fi
 rsync -rlptD --info=progress2 "$TRAIN_DATASET/" "$SSD_CODE_TRAIN/"
+if [ -n "$TRAIN_DATASET_SECONDARY" ]; then
+    rsync -rlptD --info=progress2 "$TRAIN_DATASET_SECONDARY/" "$SSD_CODE_TRAIN_SECONDARY/"
+fi
+if [ "$MOE_JOINT_REPLAY_LM" = "1" ]; then
+    rsync -rlptD --info=progress2 "$JOINT_REPLAY_DATASET/" "$SSD_JOINT_REPLAY_DATASET/"
+    if [ -n "$JOINT_REPLAY_SECONDARY_DATASET" ]; then
+        rsync -rlptD --info=progress2 \
+            "$JOINT_REPLAY_SECONDARY_DATASET/" "$SSD_JOINT_REPLAY_SECONDARY_DATASET/"
+    fi
+fi
 if router_memory_requested; then
     if ! compgen -G "$ROUTER_MEMORY_DATASET/*.bin" >/dev/null; then
         echo "ERROR: fixed router-memory dataset not found: $ROUTER_MEMORY_DATASET" >&2
@@ -389,6 +426,8 @@ metadata = {
     'dataset_name': os.environ['DATASET_NAME'],
     'dataset_source': os.environ['DATASET_SOURCE'],
     'train_dataset': {'path': str(dataset_dir), 'tokens': total_tokens, 'documents': total_documents, 'shards': shards},
+    'train_dataset_secondary': os.environ.get('TRAIN_DATASET_SECONDARY', ''),
+    'train_data_weight_mode': os.environ.get('TRAIN_DATA_WEIGHT_MODE', 'equal_prefix'),
     'train_iters': int(os.environ['TRAIN_ITERS']),
     'save_checkpoints': os.environ.get('SAVE_CHECKPOINTS', '1') == '1',
     'micro_batch_size': int(os.environ['MICRO_BATCH_SIZE']),
@@ -401,6 +440,11 @@ metadata = {
     'source_num_experts': int(os.environ['SOURCE_NUM_EXPERTS']),
     'target_num_experts': int(os.environ['NUM_EXPERTS']),
     'moe_router_topk': int(os.environ['MOE_ROUTER_TOPK']),
+    'moe_joint_replay_lm': os.environ.get('MOE_JOINT_REPLAY_LM', '0') == '1',
+    'joint_replay_dataset': os.environ.get('JOINT_REPLAY_DATASET', ''),
+    'joint_replay_secondary_dataset': os.environ.get('JOINT_REPLAY_SECONDARY_DATASET', ''),
+    'joint_replay_data_weight_mode': os.environ.get('JOINT_REPLAY_DATA_WEIGHT_MODE', 'equal_dataset'),
+    'moe_new_expert_lr_ramp_steps': int(os.environ.get('MOE_NEW_EXPERT_LR_RAMP_STEPS', '0')),
     'moe_aux_loss_coeff': float(os.environ.get('MOE_AUX_LOSS_COEFF', '0.01')),
     'moe_z_loss_coeff': float(os.environ.get('MOE_Z_LOSS_COEFF', '0.001')),
     'attn_lora_rank': int(os.environ['ATTN_LORA_RANK']),
@@ -495,6 +539,9 @@ SAVE_ARGS=(
     --save "$SSD_TARGET_WEIGHTS"
     --save-interval "$SAVE_INTERVAL"
 )
+if [ "$NO_SAVE_OPTIM" = "1" ]; then
+    SAVE_ARGS+=(--no-save-optim)
+fi
 if [ "$SAVE_CHECKPOINTS" != "1" ]; then
     SAVE_ARGS+=(--skip-train-end-save)
 fi
@@ -554,6 +601,11 @@ if [ "$RUN_INITIAL_PROBE_EVAL" = "1" ]; then
     INITIAL_PROBE_ARGS+=(--run-initial-probe-eval)
 fi
 
+PROBE_MICRO_BATCH_ARGS=()
+if [ -n "$PROBE_MICRO_BATCH_SIZE" ]; then
+    PROBE_MICRO_BATCH_ARGS+=(--probe-micro-batch-size "$PROBE_MICRO_BATCH_SIZE")
+fi
+
 TERTIARY_PROBE_ARGS=()
 if [ -n "$TERTIARY_PROBE_DATASET" ]; then
     TERTIARY_PROBE_ARGS+=(
@@ -604,6 +656,52 @@ if router_memory_requested; then
     fi
 fi
 
+JOINT_REPLAY_ARGS=()
+if [ "$MOE_JOINT_REPLAY_LM" = "1" ]; then
+    JOINT_REPLAY_DIRS=("$SSD_JOINT_REPLAY_DATASET")
+    if [ -n "$JOINT_REPLAY_SECONDARY_DATASET" ]; then
+        JOINT_REPLAY_DIRS+=("$SSD_JOINT_REPLAY_SECONDARY_DATASET")
+    fi
+    case "$JOINT_REPLAY_DATA_WEIGHT_MODE" in
+        equal_dataset)
+            JOINT_REPLAY_DATA_PATH="$(build_equal_dataset_data_path "${JOINT_REPLAY_DIRS[@]}")"
+            ;;
+        equal_prefix)
+            JOINT_REPLAY_DATA_PATH="$(build_data_path "${JOINT_REPLAY_DIRS[@]}")"
+            ;;
+        *)
+            echo "ERROR: unsupported JOINT_REPLAY_DATA_WEIGHT_MODE=$JOINT_REPLAY_DATA_WEIGHT_MODE" >&2
+            exit 1
+            ;;
+    esac
+    JOINT_REPLAY_ARGS+=(
+        --moe-joint-replay-lm
+        --moe-joint-replay-data-path $JOINT_REPLAY_DATA_PATH
+    )
+fi
+
+NEW_EXPERT_LR_ARGS=()
+if [ "$MOE_NEW_EXPERT_LR_RAMP_STEPS" -gt 0 ]; then
+    NEW_EXPERT_LR_ARGS+=(--moe-new-expert-lr-ramp-steps "$MOE_NEW_EXPERT_LR_RAMP_STEPS")
+fi
+
+TRAIN_DATA_DIRS=("$SSD_CODE_TRAIN")
+if [ -n "$TRAIN_DATASET_SECONDARY" ]; then
+    TRAIN_DATA_DIRS+=("$SSD_CODE_TRAIN_SECONDARY")
+fi
+case "$TRAIN_DATA_WEIGHT_MODE" in
+    equal_dataset)
+        TRAIN_DATA_PATH="$(build_equal_dataset_data_path "${TRAIN_DATA_DIRS[@]}")"
+        ;;
+    equal_prefix)
+        TRAIN_DATA_PATH="$(build_data_path "${TRAIN_DATA_DIRS[@]}")"
+        ;;
+    *)
+        echo "ERROR: unsupported TRAIN_DATA_WEIGHT_MODE=$TRAIN_DATA_WEIGHT_MODE" >&2
+        exit 1
+        ;;
+esac
+
 OLD_MODEL_KL_ARGS=()
 if [ "$ENABLE_OLD_MODEL_KL" = "1" ]; then
     OLD_MODEL_KL_ARGS+=(
@@ -649,9 +747,10 @@ torchrun \
     "${SHARED_ROUTER_MODE_ARGS[@]}" \
     "${SHARED_ROUTER_ARGS[@]}" \
     --seq-length "${SEQ_LENGTH:-512}" \
-    --data-path $(build_data_path "$SSD_CODE_TRAIN") \
+    --data-path $TRAIN_DATA_PATH \
     --split "$DATASET_SPLIT" \
     --log-interval "$LOG_INTERVAL" \
+    --tensorboard-log-interval "$TENSORBOARD_LOG_INTERVAL" \
     --log-throughput \
     --log-progress \
     "${LOG_STYLE_ARGS[@]}" \
@@ -667,12 +766,15 @@ torchrun \
     --probe-step-offset "$PROBE_STEP_OFFSET" \
     --probe-data-path $(build_data_path "$PROBE_DATASET") \
     "${INITIAL_PROBE_ARGS[@]}" \
+    "${PROBE_MICRO_BATCH_ARGS[@]}" \
     --secondary-probe-name "$SECONDARY_PROBE_NAME" \
     --secondary-probe-eval-iters "$SECONDARY_PROBE_EVAL_ITERS" \
     --secondary-probe-eval-interval "$SECONDARY_PROBE_EVAL_INTERVAL" \
     --secondary-probe-step-offset "$SECONDARY_PROBE_STEP_OFFSET" \
     --secondary-probe-data-path $(build_data_path "$SECONDARY_PROBE_DATASET") \
     "${TERTIARY_PROBE_ARGS[@]}" \
+    "${JOINT_REPLAY_ARGS[@]}" \
+    "${NEW_EXPERT_LR_ARGS[@]}" \
     "${ROUTER_MEMORY_ARGS[@]}" \
     "${OLD_MODEL_KL_ARGS[@]}" \
     "${EXPANSION_DISTILL_ARGS[@]}" \

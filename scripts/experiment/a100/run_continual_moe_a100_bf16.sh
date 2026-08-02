@@ -100,6 +100,7 @@ export TRAIN_ITERS="${TRAIN_ITERS:-1800}"
 export SAVE_INTERVAL="${SAVE_INTERVAL:-300}"
 export EVAL_INTERVAL="${EVAL_INTERVAL:-100}"
 export LOG_INTERVAL="${LOG_INTERVAL:-10}"
+export TENSORBOARD_LOG_INTERVAL="${TENSORBOARD_LOG_INTERVAL:-1}"
 export OLD_MODEL_KL_COEFF="${OLD_MODEL_KL_COEFF:-1.0}"
 export OLD_MODEL_KL_TEMPERATURE="${OLD_MODEL_KL_TEMPERATURE:-1.0}"
 export MOE_EXPANSION_DISTILL_MODE="${MOE_EXPANSION_DISTILL_MODE:-none}"
@@ -125,6 +126,7 @@ export LR_DECAY_STYLE="${LR_DECAY_STYLE:-WSD}"
 export LR_WARMUP_FRACTION="${LR_WARMUP_FRACTION:-0.01}"
 export LR_DECAY_ITERS="${LR_DECAY_ITERS:-$TRAIN_ITERS}"
 export LR_WSD_DECAY_ITERS="${LR_WSD_DECAY_ITERS:-$((TRAIN_ITERS / 10))}"
+export MOE_NEW_EXPERT_LR_RAMP_STEPS="${MOE_NEW_EXPERT_LR_RAMP_STEPS:-0}"
 export MODEL_CONFIG_SCRIPT="${MODEL_CONFIG_SCRIPT:-scripts/experiment/a100/flame-moe-bf16-no-shared.sh}"
 export DATASET_SPLIT="${DATASET_SPLIT:-100,0,0}"
 
@@ -148,6 +150,7 @@ export DATASET_SOURCE="${DATASET_SOURCE:-$(dataset_source_for_task "$TARGET_TASK
 export PROBE_DATASET="${PROBE_DATASET:-$(probe_dir_for_task "$TARGET_TASK")}"
 export PROBE_NAME="${PROBE_NAME:-${TARGET_TASK}_probe}"
 export PROBE_EVAL_ITERS="${PROBE_EVAL_ITERS:-25}"
+export PROBE_MICRO_BATCH_SIZE="${PROBE_MICRO_BATCH_SIZE:-}"
 export PROBE_EVAL_INTERVAL="${PROBE_EVAL_INTERVAL:-100}"
 export SECONDARY_PROBE_DATASET="${SECONDARY_PROBE_DATASET:-$(probe_dir_for_task "$SOURCE_TASK")}"
 export SECONDARY_PROBE_NAME="${SECONDARY_PROBE_NAME:-${SOURCE_TASK}_probe}"
@@ -454,6 +457,7 @@ fi
 
 SAVE_ARGS=(
     --log-interval "$LOG_INTERVAL"
+    --tensorboard-log-interval "$TENSORBOARD_LOG_INTERVAL"
     --log-throughput
     --log-progress
     --save "$SSD_TARGET_WEIGHTS"
@@ -515,6 +519,9 @@ if [ "$TRAIN_NEW_EXPERTS_AND_ROUTER_ONLY" = "1" ]; then
         SAVE_ARGS+=(--moe-freeze-dense-attention-lora-with-new-experts)
     fi
 fi
+if [ "$MOE_NEW_EXPERT_LR_RAMP_STEPS" -gt 0 ]; then
+    SAVE_ARGS+=(--moe-new-expert-lr-ramp-steps "$MOE_NEW_EXPERT_LR_RAMP_STEPS")
+fi
 
 if [ "$ENABLE_OLD_MODEL_KL" = "1" ] || [ "$MOE_EXPANSION_DISTILL_MODE" != "none" ]; then
     SAVE_ARGS+=(
@@ -541,6 +548,9 @@ PROBE_ARGS=(
     --probe-step-offset "$PROBE_STEP_OFFSET"
     --probe-data-path $(build_data_path "$PROBE_DATASET")
 )
+if [ -n "$PROBE_MICRO_BATCH_SIZE" ]; then
+    PROBE_ARGS+=(--probe-micro-batch-size "$PROBE_MICRO_BATCH_SIZE")
+fi
 
 if [ "$RUN_INITIAL_PROBE_EVAL" = "1" ]; then
     PROBE_ARGS+=(--run-initial-probe-eval)

@@ -1,5 +1,6 @@
 # Local experiment artifacts
 .local/
+artifacts/
 /.logs/
 /dataset/
 /data/
@@ -11,6 +12,8 @@
 /logs/
 /smoke_logs/
 /slurm-*
+*.log
+*.orig
 
 # Secrets and local env files
 /scripts/secret.sh

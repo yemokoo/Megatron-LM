@@ -55,16 +55,24 @@ class Stage:
     display_step_scale: int = 1
 
 
+def nonempty_path(value: str) -> str:
+    if not value.strip():
+        raise argparse.ArgumentTypeError(
+            "path must not be empty; check the shell variable passed to this option"
+        )
+    return value
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--teacher-dir", required=True)
-    parser.add_argument("--distill-dir", required=True)
-    parser.add_argument("--code-dir", required=True)
-    parser.add_argument("--retune-dir", required=True)
-    parser.add_argument("--teacher-log")
-    parser.add_argument("--distill-log")
-    parser.add_argument("--code-log")
-    parser.add_argument("--retune-log")
+    parser.add_argument("--teacher-dir", required=True, type=nonempty_path)
+    parser.add_argument("--distill-dir", required=True, type=nonempty_path)
+    parser.add_argument("--code-dir", required=True, type=nonempty_path)
+    parser.add_argument("--retune-dir", required=True, type=nonempty_path)
+    parser.add_argument("--teacher-log", type=nonempty_path)
+    parser.add_argument("--distill-log", type=nonempty_path)
+    parser.add_argument("--code-log", type=nonempty_path)
+    parser.add_argument("--retune-log", type=nonempty_path)
     parser.add_argument("--teacher-step", type=int, default=1800)
     parser.add_argument("--distill-iters", type=int, default=1800)
     parser.add_argument("--code-iters", type=int, default=1800)

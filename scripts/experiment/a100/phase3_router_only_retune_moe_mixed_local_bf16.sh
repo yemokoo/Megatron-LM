@@ -95,6 +95,9 @@ export TRAIN_DATASET_CONVERSATION="${TRAIN_DATASET_CONVERSATION:-}"
 export DATASET_NAME="${DATASET_NAME:-wiki_code_mixed_exact}"
 export DATASET_SOURCE="${DATASET_SOURCE:-Wikipedia exact train + Python code exact train}"
 export MIXED_DATA_WEIGHT_MODE="${MIXED_DATA_WEIGHT_MODE:-equal}"
+export MOE_LPR_LOSS_COEFF="${MOE_LPR_LOSS_COEFF:-0.0}"
+export MOE_LPR_DATASET_PREFIX_COUNTS="${MOE_LPR_DATASET_PREFIX_COUNTS:-}"
+export MOE_LPR_TASK_EXPERT_RANGES="${MOE_LPR_TASK_EXPERT_RANGES:-}"
 export PROBE_DATASET="${PROBE_DATASET:-$(probe_dir_for_task code)}"
 export PROBE_NAME="${PROBE_NAME:-code_probe}"
 export PROBE_EVAL_ITERS="${PROBE_EVAL_ITERS:-25}"
@@ -122,6 +125,7 @@ export WANDB_STEP_OFFSET="${WANDB_STEP_OFFSET:-0}"
 export WANDB_LOG_CHECKPOINTS="${WANDB_LOG_CHECKPOINTS:-0}"
 export DEBUG_TRAINABLE_PARAMS_AND_EXIT="${DEBUG_TRAINABLE_PARAMS_AND_EXIT:-0}"
 export DEBUG_TRAINABLE_PARAMS_PATH="${DEBUG_TRAINABLE_PARAMS_PATH:-}"
+export DIAGNOSTIC_OVERRIDE_CONSUMED_TRAIN_SAMPLES="${DIAGNOSTIC_OVERRIDE_CONSUMED_TRAIN_SAMPLES:-}"
 
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
 export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=true
@@ -250,7 +254,10 @@ metadata = {
     'combined_tokens': combined_tokens,
     'trainable': 'MoE router weights only',
     'frozen': 'all FFN experts, attention LoRA adapters if present, dense trunk, embeddings, and output weights',
-    'loss': 'standard final language-modeling loss',
+    'loss': 'LM loss plus task-group LPR on configured old tasks' if float(os.environ['MOE_LPR_LOSS_COEFF']) > 0 else 'standard final language-modeling loss',
+    'moe_lpr_loss_coeff': float(os.environ['MOE_LPR_LOSS_COEFF']),
+    'moe_lpr_dataset_prefix_counts': os.environ['MOE_LPR_DATASET_PREFIX_COUNTS'] or None,
+    'moe_lpr_task_expert_ranges': os.environ['MOE_LPR_TASK_EXPERT_RANGES'] or None,
     'train_router_usage_log_interval': int(os.environ['TRAIN_ROUTER_USAGE_LOG_INTERVAL']),
     'train_router_usage_log_path': os.environ['TRAIN_ROUTER_USAGE_LOG_PATH'],
     'moe_aux_loss_coeff': float(os.environ['MOE_AUX_LOSS_COEFF']),
@@ -326,10 +333,23 @@ TRAIN_DATA_PATH_DIRS=("$SSD_WIKI_TRAIN" "$SSD_CODE_TRAIN")
 if [ -n "$TRAIN_DATASET_CONVERSATION" ]; then
     TRAIN_DATA_PATH_DIRS+=("$SSD_CONVERSATION_TRAIN")
 fi
-if [ "$MIXED_DATA_WEIGHT_MODE" = "token_proportional" ]; then
-    TRAIN_DATA_PATH="$(build_token_weighted_data_path "${TRAIN_DATA_PATH_DIRS[@]}")"
-else
-    TRAIN_DATA_PATH="$(build_data_path "${TRAIN_DATA_PATH_DIRS[@]}")"
+case "$MIXED_DATA_WEIGHT_MODE" in
+    token_proportional) TRAIN_DATA_PATH="$(build_token_weighted_data_path "${TRAIN_DATA_PATH_DIRS[@]}")" ;;
+    equal_dataset|equal) TRAIN_DATA_PATH="$(build_equal_dataset_data_path "${TRAIN_DATA_PATH_DIRS[@]}")" ;;
+    equal_prefix) TRAIN_DATA_PATH="$(build_data_path "${TRAIN_DATA_PATH_DIRS[@]}")" ;;
+    *) echo "ERROR: unsupported MIXED_DATA_WEIGHT_MODE=$MIXED_DATA_WEIGHT_MODE" >&2; exit 1 ;;
+esac
+
+DIAGNOSTIC_ARGS=()
+if [ -n "$DIAGNOSTIC_OVERRIDE_CONSUMED_TRAIN_SAMPLES" ]; then
+    DIAGNOSTIC_ARGS+=(--diagnostic-override-consumed-train-samples "$DIAGNOSTIC_OVERRIDE_CONSUMED_TRAIN_SAMPLES")
+fi
+
+LPR_ARGS=()
+if [ "$MOE_LPR_LOSS_COEFF" != "0" ] && [ "$MOE_LPR_LOSS_COEFF" != "0.0" ]; then
+    [ -n "$MOE_LPR_DATASET_PREFIX_COUNTS" ] || { echo "ERROR: MOE_LPR_DATASET_PREFIX_COUNTS is required" >&2; exit 1; }
+    [ -n "$MOE_LPR_TASK_EXPERT_RANGES" ] || { echo "ERROR: MOE_LPR_TASK_EXPERT_RANGES is required" >&2; exit 1; }
+    LPR_ARGS+=(--moe-lpr-loss-coeff "$MOE_LPR_LOSS_COEFF" --moe-lpr-dataset-prefix-counts "$MOE_LPR_DATASET_PREFIX_COUNTS" --moe-lpr-task-expert-ranges "$MOE_LPR_TASK_EXPERT_RANGES")
 fi
 
 TERTIARY_PROBE_ARGS=()
@@ -367,6 +387,8 @@ torchrun \
     --seed "$SEED" \
     --moe-resume-from-num-experts "$RESUME_FROM_NUM_EXPERTS" \
     --moe-train-router-only \
+    "${LPR_ARGS[@]}" \
+    "${DIAGNOSTIC_ARGS[@]}" \
     --train-router-usage-log-interval "$TRAIN_ROUTER_USAGE_LOG_INTERVAL" \
     --train-router-usage-log-path "$TRAIN_ROUTER_USAGE_LOG_PATH" \
     --train-router-usage-num-existing-experts "$SOURCE_NUM_EXPERTS" \
