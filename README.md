@@ -200,29 +200,35 @@ Representative output folders:
 
 ## Environment Setup
 
-For a reproducible A100-side setup, use:
-- [environment.a100.yml](./environment.a100.yml)
-- [install_a100_env.sh](./scripts/miscellaneous/install_a100_env.sh)
-- [KT_24_07_SETUP.md](./KT_24_07_SETUP.md) for the KT no-conda path
+FLAME/Megatron and TRACE/SLoRA use separate runtimes. The complete migration
+contract and exact commands are in [environments/README_KO.md](./environments/README_KO.md).
 
-Typical flow on a remote server:
+For FLAME/G2 Megatron, use the dedicated Conda environment:
+
 ```bash
-conda activate base
+git submodule update --init --recursive
 bash scripts/miscellaneous/install_a100_env.sh
+conda activate flame-megatron-a100
+source scripts/miscellaneous/activate_flame_env.sh
+python scripts/miscellaneous/verify_flame_env.py --require-gpu
 ```
 
-This creates a conda environment, installs PyTorch/CUDA packages, then builds:
-- [apex](./apex)
-- [TransformerEngine](./TransformerEngine)
+This installs PyTorch 2.4.1+cu124 and builds grouped-gemm, Apex,
+TransformerEngine, and flash-attn against one isolated ABI. The observed NGC
+24.07 runtime that produced the current G2 checkpoints is recorded in
+[reference-runtime.json](./environments/flame-megatron/reference-runtime.json).
 
-If you are resuming on the KT server from the NGC `24.07` image, prefer the no-conda KT path instead:
+For the vendored TRACE/SLoRA project, use its separate project-local venv:
 
 ```bash
-bash scripts/miscellaneous/install_kt_24_07_no_conda.sh
-source scripts/miscellaneous/activate_kt_env.sh
+cd trace
+./scripts/setup_runtime.sh
+source .venv-runtime/bin/activate
+python scripts/runtime_preflight.py --skip-gpu
 ```
 
-The setup is intended to approximate the current local Docker/conda environment without shipping the Docker image itself.
+Do not use `pip install --user` for either runtime and do not mix their
+`PYTHONPATH`s.
 
 ## Git / Upload Notes
 

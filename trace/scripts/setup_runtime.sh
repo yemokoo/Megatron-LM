@@ -3,6 +3,7 @@ set -euo pipefail
 
 # Prevent host user packages from shadowing the project virtualenv.
 unset PYTHONPATH
+export PYTHONNOUSERSITE=1
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV="${SLORA_VENV:-${ROOT}/.venv-runtime}"
@@ -38,11 +39,8 @@ if ! "${PYTHON}" -c 'import torch; assert torch.__version__ == "2.4.1+cu124"' 2>
   fi
   retry env PIP_CONFIG_FILE=/dev/null "${PIP}" install --timeout 60 "${TORCH_WHEEL}"
 fi
-retry env PIP_CONFIG_FILE=/dev/null "${PIP}" install --timeout 60 -r "${ROOT}/config/requirements-runtime.txt"
-
-"${PYTHON}" -m pip freeze \
-  | sed -E "s#^torch @ file:.*#torch==2.4.1+cu124#" \
-  > "${ROOT}/config/requirements-runtime.lock"
+retry env PIP_CONFIG_FILE=/dev/null "${PIP}" install --timeout 60 \
+  -r "${ROOT}/config/requirements-runtime.lock"
 "${PYTHON}" - <<'PY'
 import importlib
 
@@ -61,6 +59,8 @@ packages = [
     "quadprog",
     "sacrebleu",
     "sacremoses",
+    "huggingface_hub",
+    "wandb",
 ]
 for package in packages:
     module = importlib.import_module(package)

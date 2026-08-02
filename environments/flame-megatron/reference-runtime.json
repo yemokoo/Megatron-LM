@@ -1,0 +1,48 @@
+{
+  "captured_at_utc": "2026-08-02",
+  "purpose": "Reference for the server runtime that produced the current G2 checkpoints",
+  "base_runtime": "NVIDIA NGC PyTorch 24.07 family",
+  "host": {
+    "os": "Ubuntu 22.04",
+    "python": "3.10.12",
+    "nvidia_driver": "575.51.03",
+    "cuda_toolkit": "12.5.82",
+    "gcc": "11.4.0",
+    "gpu": "NVIDIA A100 80GB"
+  },
+  "python_packages": {
+    "torch": "2.4.0a0+3bcc3cddb5.nv24.07",
+    "torch_cuda": "12.5",
+    "torch_cudnn": "9.2.1",
+    "torch_nccl": "2.22.3",
+    "torchvision": "0.19.0a0",
+    "apex": "0.1 (NGC binary)",
+    "transformer-engine": "1.8.0+37280ec (NGC binary)",
+    "grouped-gemm": "1.1.4",
+    "flash-attn": "2.4.2",
+    "transformers": "4.33.1",
+    "tokenizers": "0.13.3",
+    "datasets": "2.20.0",
+    "accelerate": "0.33.0",
+    "huggingface-hub": "0.24.2",
+    "wandb": "0.28.1",
+    "tensorboard": "2.9.0",
+    "numpy": "1.21.5",
+    "scipy": "1.13.1",
+    "sentencepiece": "0.1.96",
+    "safetensors": "0.4.3",
+    "einops": "0.8.0",
+    "protobuf": "3.20.3"
+  },
+  "source_commits": {
+    "Megatron-LM": "22af3b7399ca3f7ac4e2b11ca0fae2a7eb4a4ddc",
+    "apex": "c02c6c891eedfabf91f0de8127d7636d4292356d",
+    "TransformerEngine": "fc034785f5e3a5bc5600a88766d9a1d75137ce77",
+    "grouped-gemm": "172fada89fa7364fe5d026b3a0dfab58b591ffdd"
+  },
+  "notes": [
+    "The NGC alpha torch and NGC extension binaries cannot be reproduced bit-for-bit from ordinary Conda/PyPI packages.",
+    "The portable Conda installer uses torch 2.4.1+cu124 and builds the repository-pinned extension sources.",
+    "The portable environment intentionally uses numpy 1.26.4 to avoid the inconsistent system-site numpy/scipy combination in the reference host."
+  ]
+}

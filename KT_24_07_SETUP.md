@@ -1,150 +1,45 @@
-# KT 24.07 Setup
+# KT / NGC 24.07 Setup
 
-Use this when the KT server session must start from the allowed NGC PyTorch `24.07` image and creating a separate conda environment is not the preferred path.
+> 이전의 `/usr/bin/python + pip --user + torch 2.5.1` 복구 절차는 폐기했다.
+> 사용자 전역 패키지와 NGC 기본 패키지가 섞여 checkpoint 재현성을 보장하지
+> 못하기 때문이다. 새 서버의 정식 절차는
+> [environments/README_KO.md](./environments/README_KO.md)다.
 
-## Validated KT Snapshot
+## 권장 선택
 
-The currently observed KT runtime is:
-- Ubuntu `22.04.4`
-- `2x NVIDIA A100 80GB PCIe`
-- system `python` = `/usr/bin/python` (`Python 3.10.12`)
-- `pip` installed into `~/.local`
-- `torch 2.5.1`, `torchvision 0.20.1`, `torchaudio 2.5.1`
-- local source installs for `apex` and `transformer_engine`
+KT에서 NGC PyTorch image를 골라야 한다면 `24.07`을 base로 사용한다. Python
+3.10과 PyTorch 2.4 계열이라 현재 G2 checkpoint를 만든 서버와 가장 가깝다.
 
-This means the canonical KT restore path should match that reality:
-- no extra conda env
-- no required project venv
-- restore packages into the KT user-site environment and then source the repo helper
+- container artifact까지 최대한 같아야 할 때: NGC 24.07 안에서 stock runtime을
+  유지하고 저장소 import/smoke를 먼저 검증한다.
+- 서버를 옮겨도 다시 만들 수 있는 환경이 필요할 때: NGC 또는 호스트 위에 별도
+  Conda `flame-megatron-a100`을 만든다.
+- TRACE/SLoRA: 위 두 경우와 관계없이 `trace/.venv-runtime`을 따로 만든다.
 
-## Why 24.07
-
-Among the allowed presets (`25.05`, `25.01`, `24.07`, `23.09`), `24.07` is the closest conservative fit for this repo because:
-- it keeps Python `3.10`
-- it is less disruptive for Megatron-LM + TransformerEngine + Apex than the Python `3.12` images
-- it is newer than `23.09` while still staying relatively close to the previously validated local stack
-
-## Session Assumption
-
-- one KT session = one Docker/container session
-- do not create a separate conda env unless the platform explicitly supports and expects it
-- install the project dependencies into the KT session's system Python user site (`~/.local`)
-- restore the repo runtime with `source scripts/miscellaneous/activate_kt_env.sh`
-
-## Setup Steps
-
-We treat the NGC `24.07` image as the base session, then recreate a project-local Python environment on top of it each time.
-
-Recommended order on KT:
+## Portable Conda 절차
 
 ```bash
-git clone <YOUR_GITHUB_URL>
-cd FLAME-MoE
-git checkout slurm
-```
-
-## GitHub Credential Restore
-
-KT code-server often injects `GIT_ASKPASS` variables, which can make `git pull`
-hang or repeatedly ask for credentials. Use HTTPS plus Git's local credential
-store so each new KT session only needs one token registration.
-
-Run this once per recreated KT home directory:
-
-```bash
-git config --global credential.helper store
-git config --global credential.useHttpPath false
-
-unset GIT_ASKPASS SSH_ASKPASS \
-  VSCODE_GIT_ASKPASS_NODE VSCODE_GIT_ASKPASS_EXTRA_ARGS \
-  VSCODE_GIT_IPC_HANDLE VSCODE_GIT_ASKPASS_MAIN
-
-read -p "GitHub username: " GITHUB_USER
-read -s -p "GitHub token: " GITHUB_TOKEN
-echo
-
-printf "https://%s:%s@github.com\n" "$GITHUB_USER" "$GITHUB_TOKEN" > ~/.git-credentials
-chmod 600 ~/.git-credentials
-unset GITHUB_TOKEN
-
-git remote set-url origin https://github.com/yemokoo/LLM-continual-learning.git
-GIT_TERMINAL_PROMPT=0 git ls-remote origin >/tmp/git_auth_check.txt && tail -n 3 /tmp/git_auth_check.txt
-```
-
-After that, normal pulls should not ask again:
-
-```bash
-unset GIT_ASKPASS SSH_ASKPASS \
-  VSCODE_GIT_ASKPASS_NODE VSCODE_GIT_ASKPASS_EXTRA_ARGS \
-  VSCODE_GIT_IPC_HANDLE VSCODE_GIT_ASKPASS_MAIN
-
-git pull origin slurm
+git clone https://github.com/yemokoo/LLM-continual-learning.git
+cd LLM-continual-learning
 git submodule update --init --recursive
+
+bash scripts/miscellaneous/install_a100_env.sh
+conda activate flame-megatron-a100
+source scripts/miscellaneous/activate_flame_env.sh
+python scripts/miscellaneous/verify_flame_env.py --require-gpu
 ```
 
-If the platform reclaims low-utilization sessions, start a tiny GPU warmup in another pane before or during install:
+검증 후 현재 G2 설정의 1~10 step smoke를 통과하기 전에는 장시간 학습을 시작하지
+않는다.
+
+## TRACE/SLoRA 절차
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 python scripts/miscellaneous/session_warmup.py
+cd trace
+./scripts/setup_runtime.sh
+source .venv-runtime/bin/activate
+python scripts/runtime_preflight.py --skip-gpu
 ```
 
-or
-
-```bash
-CUDA_VISIBLE_DEVICES=0 bash scripts/miscellaneous/run_session_warmup.sh
-```
-
-The default warmup is intentionally light: roughly 1 second of compute followed by 4 seconds of sleep. If KT still reclaims the session, increase the load a bit:
-
-```bash
-CUDA_VISIBLE_DEVICES=0 python scripts/miscellaneous/session_warmup.py --matrix-size 3072 --compute-seconds 2.0 --sleep-seconds 2.0
-```
-
-Leave warmup running while dependencies install, then stop it with `Ctrl-C`.
-
-```bash
-bash scripts/miscellaneous/install_kt_24_07_no_conda.sh
-source scripts/miscellaneous/activate_kt_env.sh
-```
-
-## Smoke Tests
-
-```bash
-python -c 'import torch; print(torch.__version__, torch.version.cuda)'
-python -c 'import transformer_engine, apex; print("imports ok")'
-python Megatron-LM/pretrain_gpt.py --help >/tmp/pretrain_help.txt && tail -n 5 /tmp/pretrain_help.txt
-```
-
-## Important Runtime Note
-
-Several eval/analysis wrapper scripts used to assume the local path `.conda/envs/flame3090/bin/python`.
-They now fall back to `python` / `python3` automatically if that local conda env does not exist.
-
-On KT, the preferred path is now:
-- start from the NGC `24.07` session
-- recreate the user-site runtime with the helper install script
-- source `scripts/miscellaneous/activate_kt_env.sh` before running training or eval
-
-The setup script explicitly reinstalls a KT user-site PyTorch stack close to the previously validated local environment:
-- Python `3.10`
-- `torch 2.5.1+cu121`
-- `torchvision 0.20.1+cu121`
-- `torchaudio 2.5.1+cu121`
-- local Apex and TransformerEngine builds
-
-## Recommended Bring-Up Strategy
-
-1. Start from NGC PyTorch `24.07`
-2. Clone repo and checkout `slurm`
-3. Run the no-conda install script
-4. Source `scripts/miscellaneous/activate_kt_env.sh`
-5. Confirm PyTorch + Apex + TransformerEngine imports
-6. Run a tiny Megatron smoke test
-7. Only then resume training/eval
-
-## Precision Note
-
-Because KT uses A100, `bf16` becomes realistic again. But for bring-up:
-- first confirm the recreated KT runtime imports and Megatron help path
-- then run a tiny smoke test
-- only after that switch the main training path to `bf16`
+과거 호환을 위해 `install_kt_24_07_no_conda.sh`와 `activate_kt_env.sh` 파일은
+남겨 두었지만 신규 서버 재현에는 사용하지 않는다.

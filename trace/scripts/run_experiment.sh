@@ -3,6 +3,7 @@ set -euo pipefail
 
 # Do not allow host user packages to shadow the project virtualenv.
 unset PYTHONPATH
+export PYTHONNOUSERSITE=1
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV_BIN="${ROOT}/.venv-runtime/bin"

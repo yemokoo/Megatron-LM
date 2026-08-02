@@ -1,0 +1,7 @@
+# Download, upload, monitoring, and server diagnostics used around TRACE runs.
+# The complete transitive resolution is committed in requirements-runtime.lock.
+huggingface_hub==0.36.2
+hf-xet==1.5.2
+wandb==0.28.1
+sentry-sdk==2.66.1
+nvidia-ml-py==13.610.43

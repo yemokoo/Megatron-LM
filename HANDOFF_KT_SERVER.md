@@ -12,16 +12,16 @@ The next environment is a KT internal server with A100 GPUs. Because of that har
 ## Important Repo State
 
 Branch in active use:
-- `slurm`
+- `main`
 
 Top-level docs and setup files already updated:
-- KT image preset decision: if restricted to the shown NGC presets, start from `24.07` and use the no-conda setup path in `KT_24_07_SETUP.md`
+- two-runtime migration guide: `environments/README_KO.md`
+- KT image preset decision: if restricted to the shown NGC presets, start from `24.07` and use the isolated Conda path in `KT_24_07_SETUP.md`
 - `README.md`
 - `.gitignore`
 - `environment.a100.yml`
 - `scripts/miscellaneous/install_a100_env.sh`
 - `KT_24_07_SETUP.md`
-- `scripts/miscellaneous/install_kt_24_07_no_conda.sh`
 - `scripts/release/install_hf_tools.sh`
 - `scripts/release/upload_models_to_hf.py`
 
@@ -126,19 +126,18 @@ Reasoning:
 - it is newer and more practical than `23.09`, while still staying conservative
 
 Important nuance:
-- choose `24.07` as the base image
-- do not rely on the image's stock `PyTorch 2.4` as the final runtime
-- recreate the KT user-site runtime with `scripts/miscellaneous/install_kt_24_07_no_conda.sh`
-- source `scripts/miscellaneous/activate_kt_env.sh` in each new KT session
-- that install path now matches the currently observed KT runtime: `/usr/bin/python`, `~/.local` packages, `Python 3.10`, `torch 2.5.1+cu121`, local Apex, and local TransformerEngine
+- choose `24.07` as the closest exact binary baseline when containers are allowed
+- for a portable host install, use the isolated `flame-megatron-a100` Conda path
+- do not recreate the old mixed `/usr/bin/python` plus `~/.local` runtime
+- keep the independent `trace/.venv-runtime` environment separate
 
 Practical KT-server plan:
 1. start from NGC PyTorch `24.07`
 2. clone this repo and checkout `slurm`
 3. if the session is reclaimed on low utilization, run `python scripts/miscellaneous/session_warmup.py` in another pane while installing
 4. default warmup is light (`1s` compute / `4s` sleep); if needed, raise it with `--matrix-size 3072 --compute-seconds 2.0 --sleep-seconds 2.0`
-5. run `bash scripts/miscellaneous/install_kt_24_07_no_conda.sh`
-6. `source scripts/miscellaneous/activate_kt_env.sh`
+5. run `bash scripts/miscellaneous/install_a100_env.sh`
+6. activate Conda and `source scripts/miscellaneous/activate_flame_env.sh`
 7. run smoke tests before full training/eval
 
 GitHub credential restore for KT:

@@ -84,9 +84,10 @@ cd LLM-continual-learning/trace
 source .venv-runtime/bin/activate
 ```
 
-설치가 끝나면 `config/requirements-runtime.lock`이 생성된다. 스크립트는 전역
-`PYTHONPATH`를 차단하고 이 가상환경을 자동 사용하므로 activation은 선택 사항이다.
-같은 setup 명령을 다시 실행해도 이미 설치된 고정 버전을 재사용한다.
+설치 스크립트는 저장소에 commit된 `config/requirements-runtime.lock`을 그대로
+설치한다. 전역 `PYTHONPATH`를 차단하고 실행 스크립트가 이 가상환경을 자동
+사용하므로 activation은 선택 사항이다. 같은 setup 명령을 다시 실행해도 이미
+설치된 고정 버전을 재사용한다.
 
 ## 2. 모델과 데이터 확인
 

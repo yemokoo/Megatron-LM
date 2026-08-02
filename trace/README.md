@@ -11,6 +11,7 @@ contract and `manifests/source_provenance.json` for the vendored source revision
 
 The current Korean runbook and one-command launchers are:
 
+- `../environments/README_KO.md` for the separate FLAME Conda and TRACE venv contracts
 - `EXPERIMENTS.md` for the implementation/change index and live experiment log
 - `docs/RUNBOOK_KO.md`
 - `docs/PORTABILITY_KO.md` for moving the project to a new server

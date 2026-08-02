@@ -19,11 +19,16 @@
 
 ## 새 서버 준비
 
+FLAME/Megatron 환경과 이 환경은 합치지 않는다. TRACE는 Python 3.10 기반
+project-local venv를 사용하며 전체 버전 관계는 상위
+`environments/README_KO.md`에 정리되어 있다.
+
 ```bash
 git clone <repository-url>
 cd LLM-continual-learning/trace
 
 ./scripts/setup_runtime.sh
+source .venv-runtime/bin/activate
 hf auth login
 ./scripts/data/download_trace_from_hf.sh
 ./scripts/download_paper_models.sh
@@ -46,3 +51,7 @@ python scripts/preflight.py --mode full \
 `implementations/llmcl_benchmark/scripts` 안의 예전 서버 전용 one-off 스크립트는
 실험 기록 보존용이며 일부는 과거 절대경로를 포함한다. 현재 지원 실행은 반드시
 `trace/scripts/baselines`의 래퍼를 통한다.
+
+런타임의 직접 의존성은 `config/requirements-runtime.txt`, HF/W&B 도구는
+`config/requirements-tools.txt`, 완전한 transitive resolution은
+`config/requirements-runtime.lock`에 고정되어 있다.

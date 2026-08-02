@@ -1,40 +1,15 @@
-name: flame-moe-a100
+name: flame-megatron-a100
 channels:
-  - pytorch
-  - nvidia
   - conda-forge
 dependencies:
+  # Python/build tools only. CUDA-enabled PyTorch is installed by
+  # scripts/miscellaneous/install_a100_env.sh from the official cu124 index.
   - python=3.10
-  - pip
+  - pip=24.3.1
+  - setuptools=75.6.0
+  - wheel=0.45.1
   - git
-  - cmake
-  - ninja
+  - cmake=3.30
+  - ninja=1.11
   - make
   - pkg-config
-  - setuptools
-  - wheel
-  - numpy=1.26.4
-  - pybind11
-  - pytorch=2.6.*
-  - torchvision=0.21.*
-  - torchaudio=2.6.*
-  - pytorch-cuda=12.1
-  - transformers
-  - tensorboard
-  - einops
-  - flask-restful
-  - nltk
-  - pytest
-  - pytest-asyncio
-  - pytest-cov
-  - pytest-mock
-  - pytest-random-order
-  - sentencepiece
-  - tiktoken
-  - wrapt
-  - zarr
-  - pip:
-      - wandb
-      - tensorstore!=0.1.46,!=0.1.72
-      - nvidia-modelopt[torch]>=0.19.0
-      - nvidia-resiliency-ext
