@@ -39,9 +39,9 @@ Wiki source checkpoint는 baseline과 KD/1-phase가 공유하므로 Hub에서 �
 
 ## 2026-08-02 검증 상태
 
-- G2 enabled 15개: tracker와 최종 iteration 디렉터리 검증 완료, 선택 용량 약 54.38 GiB.
+- G2 enabled 16개: tracker와 최종 iteration 디렉터리 검증 완료, 선택 용량 약 55.62 GiB.
 - TRACE enabled 41개: 각 task root의 최종 weight 검증 완료, 선택 용량 약 33.51 GiB. 중간 `checkpoint-*`와 중복 rank shard는 선택되지 않는다.
-- Attention load-fix v3의 마지막 Conversation 1-phase는 목표 1800이지만 tracker가 1200이므로 manifest에서 disabled 상태다. 1800 저장 완료를 확인하기 전에는 업로드하지 않는다.
+- Attention load-fix v3의 마지막 Conversation 1-phase는 2026-08-02에 1800 step과 최종 checkpoint 저장이 완료되어 manifest에 포함했다.
 - weight가 없는 EWC/LwF/GEM/O-LoRA 결과 디렉터리는 모델 업로드 대상이 아니다.
 
 ## 사용법
