@@ -759,6 +759,15 @@ def validate_args(args, defaults={}):
             "--moe-train-router-only requires --moe-expand-from-num-experts "
             "or --moe-resume-from-num-experts."
         )
+    assert args.moe_lpr_loss_coeff >= 0.0, "--moe-lpr-loss-coeff must be non-negative."
+    if args.moe_lpr_loss_coeff > 0.0:
+        assert args.moe_train_router_only, "LPR requires --moe-train-router-only."
+        assert args.pipeline_model_parallel_size == 1, "LPR currently requires pipeline parallel size 1."
+        assert args.moe_lpr_dataset_prefix_counts and args.moe_lpr_task_expert_ranges, "LPR task specifications are required."
+        lpr_counts = [int(v) for v in args.moe_lpr_dataset_prefix_counts.split(",")]
+        lpr_ranges = args.moe_lpr_task_expert_ranges.split(",")
+        assert lpr_counts and all(v > 0 for v in lpr_counts) and len(lpr_counts) == len(lpr_ranges), "Invalid LPR task specifications."
+
     shared_router_hybrid_train_modes = [
         args.shared_router_hybrid_train_new_experts_and_router_only,
         args.shared_router_hybrid_train_all_experts_and_router_only,
@@ -1345,6 +1354,9 @@ def _add_logging_args(parser):
                        help='Display/log name for the probe dataset.')
     group.add_argument('--probe-eval-iters', type=int, default=0,
                        help='Number of iterations for probe evaluation.')
+    group.add_argument('--probe-micro-batch-size', type=int, default=None,
+                       help='Optional micro batch size used only by primary, secondary, and '
+                            'tertiary probe evaluation. Training micro batch size is unchanged.')
     group.add_argument('--probe-eval-interval', type=int, default=0,
                        help='Run probe evaluation every N training iterations.')
     group.add_argument('--probe-step-offset', type=int, default=0,
@@ -2480,6 +2492,12 @@ def _add_moe_args(parser):
                        help='When expanding from a smaller MoE checkpoint, freeze every parameter except the newly added experts and the trainable portion of the expanded router.')
     group.add_argument('--moe-train-router-only', action='store_true',
                        help='When expanding or resuming an expanded MoE checkpoint, freeze every parameter except the MoE router weights. Intended for router-only retuning with fixed experts.')
+    group.add_argument('--moe-lpr-loss-coeff', type=float, default=0.0,
+                       help='Coefficient for task-group language-prior routing loss during router-only retuning. Zero disables LPR.')
+    group.add_argument('--moe-lpr-dataset-prefix-counts', type=str, default=None,
+                       help='Comma-separated prefix counts per task in --data-path order, e.g. 1,1,42.')
+    group.add_argument('--moe-lpr-task-expert-ranges', type=str, default=None,
+                       help='Comma-separated task expert ranges; use start:end for old tasks and - for the newest task, e.g. 0:8,8:16,-.')
     group.add_argument('--moe-train-attention-with-new-experts', action='store_true',
                        help='With --moe-train-new-experts-and-router-only, also keep self-attention parameters trainable while the rest of the shared trunk remains frozen.')
     group.add_argument('--moe-freeze-dense-attention-lora-with-new-experts', action='store_true',
@@ -2488,6 +2506,11 @@ def _add_moe_args(parser):
                             'expansion where only new FFN experts and router rows should train.')
     group.add_argument('--moe-resume-from-num-experts', type=int, default=None,
                        help='When resuming from an already-expanded MoE checkpoint, re-apply continual-learning freezing using this many original experts.')
+    group.add_argument('--moe-new-expert-lr-ramp-steps', type=int, default=0,
+                       help='If positive, linearly ramp the expert-parallel optimizer-group '
+                            'learning rate from exactly zero on the first update to the normal '
+                            'scheduled learning rate on this update. Router learning rates are '
+                            'unchanged. Intended for new-expert continual-learning diagnostics.')
     group.add_argument('--moe-interleave-code-steps', type=int, default=0,
                        help='Run this many Code-only steps before each router-only block. '
                             'A positive value enables single-process MoE interleaving.')

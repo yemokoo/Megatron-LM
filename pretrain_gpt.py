@@ -192,7 +192,12 @@ def get_batch(data_iterator):
     # slice batch along sequence dimension for context parallelism
     batch = get_batch_on_this_cp_rank(batch)
 
-    return batch.values()
+    if getattr(get_args(), "moe_lpr_loss_coeff", 0.0) > 0.0:
+        get_args()._moe_lpr_dataset_ids = batch["dataset_id"]
+    return (
+        batch["tokens"], batch["labels"], batch["loss_mask"],
+        batch["attention_mask"], batch["position_ids"],
+    )
 
 
 # define spiky loss as a loss that's 10x the max loss observed
@@ -218,12 +223,14 @@ def loss_func(loss_mask: torch.Tensor, output_tensor: torch.Tensor):
     student_logits = None
     hidden_mse_loss = None
     router_kl_loss = None
+    lpr_loss = None
     if isinstance(output_tensor, dict):
         losses = output_tensor["losses"].float()
         teacher_logits = output_tensor.get("teacher_logits")
         student_logits = output_tensor.get("student_logits")
         hidden_mse_loss = output_tensor.get("hidden_mse_loss")
         router_kl_loss = output_tensor.get("router_kl_loss")
+        lpr_loss = output_tensor.get("lpr_loss")
     else:
         losses = output_tensor.float()
     loss_mask = loss_mask.view(-1).float()
@@ -250,6 +257,9 @@ def loss_func(loss_mask: torch.Tensor, output_tensor: torch.Tensor):
 
     if router_kl_loss is not None:
         loss[0] = loss[0] + args.moe_expansion_distill_router_kl_coeff * router_kl_loss
+
+    if lpr_loss is not None:
+        loss[0] = loss[0] + args.moe_lpr_loss_coeff * lpr_loss
 
     if args.context_parallel_size > 1:
         torch.distributed.all_reduce(loss, group=mpu.get_context_parallel_group())
@@ -289,9 +299,15 @@ def loss_func(loss_mask: torch.Tensor, output_tensor: torch.Tensor):
     torch.distributed.all_reduce(reporting_loss, group=mpu.get_data_parallel_group())
     reporting = {'lm loss': (reporting_loss[0], reporting_loss[1])}
     if teacher_logits is not None and student_logits is not None:
-        reporting_kl = torch.tensor([kl_loss.detach()], device=reporting_loss.device)
-        torch.distributed.all_reduce(reporting_kl, group=mpu.get_data_parallel_group())
-        reporting['kd loss'] = (reporting_kl[0], reporting_loss[1])
+        reporting_kl_sum = (kl_loss_sum.detach() * (temperature ** 2)).view(1)
+        if args.context_parallel_size > 1:
+            torch.distributed.all_reduce(
+                reporting_kl_sum, group=mpu.get_context_parallel_group()
+            )
+        torch.distributed.all_reduce(
+            reporting_kl_sum, group=mpu.get_data_parallel_group()
+        )
+        reporting['kd loss'] = (reporting_kl_sum[0], reporting_loss[1])
     if hidden_mse_loss is not None:
         hidden_mse_sum = hidden_mse_loss.detach().view(1)
         torch.distributed.all_reduce(hidden_mse_sum, group=mpu.get_data_parallel_group())
@@ -300,6 +316,10 @@ def loss_func(loss_mask: torch.Tensor, output_tensor: torch.Tensor):
         router_kl_sum = router_kl_loss.detach().view(1)
         torch.distributed.all_reduce(router_kl_sum, group=mpu.get_data_parallel_group())
         reporting['router prob kl loss'] = (router_kl_sum[0], reporting_loss[1])
+    if lpr_loss is not None:
+        lpr_sum = lpr_loss.detach().view(1)
+        torch.distributed.all_reduce(lpr_sum, group=mpu.get_data_parallel_group())
+        reporting['lpr loss'] = (lpr_sum[0], reporting_loss[1])
 
     # loss[0] is a view of loss, so it has ._base not None, which triggers assert error
     # in core/pipeline_parallel/schedule.py::deallocate_output_tensor, calling .clone()
@@ -310,6 +330,57 @@ def loss_func(loss_mask: torch.Tensor, output_tensor: torch.Tensor):
         local_num_tokens,
         reporting,
     )
+
+
+def _masked_task_group_lpr(router_inputs, routers, labels, loss_mask, dataset_ids, args):
+    """Summed old-task group NLL, averaged across MoE layers."""
+    router_inputs = _router_inputs_by_layer(router_inputs)
+    common_layers = sorted(set(router_inputs) & set(routers))
+    if not common_layers:
+        raise RuntimeError("Task-group LPR captured no MoE router inputs.")
+
+    prefix_counts = [int(v) for v in args.moe_lpr_dataset_prefix_counts.split(",")]
+    range_specs = args.moe_lpr_task_expert_ranges.split(",")
+    expert_ranges = [None if v == "-" else tuple(map(int, v.split(":"))) for v in range_specs]
+    if len(prefix_counts) != len(expert_ranges) or any(v <= 0 for v in prefix_counts):
+        raise RuntimeError("Invalid LPR task prefix-count/range specification.")
+    if dataset_ids.dim() != 1 or dataset_ids.shape[0] != labels.shape[0]:
+        raise RuntimeError(f"LPR dataset_id shape mismatch: {tuple(dataset_ids.shape)} vs {tuple(labels.shape)}")
+
+    sample_task_ids = torch.empty_like(dataset_ids)
+    lower = 0
+    for task_id, count in enumerate(prefix_counts):
+        upper = lower + count
+        sample_task_ids[(dataset_ids >= lower) & (dataset_ids < upper)] = task_id
+        lower = upper
+    if int(dataset_ids.max().item()) >= lower:
+        raise RuntimeError(f"LPR dataset_id exceeds configured {lower} prefixes.")
+
+    token_task_ids = sample_task_ids[:, None].expand_as(labels).reshape(-1)
+    flat_loss_mask = loss_mask.reshape(-1).bool()
+    layer_losses = []
+    for layer_number in common_layers:
+        flat_hidden = _flatten_layer_hidden(router_inputs[layer_number], labels)
+        log_probs = torch.log_softmax(routers[layer_number].gating(flat_hidden).float(), dim=-1)
+        layer_loss = log_probs.new_zeros(())
+        supervised = 0
+        for task_id, expert_range in enumerate(expert_ranges):
+            if expert_range is None:
+                continue
+            token_mask = flat_loss_mask & (token_task_ids == task_id)
+            count = int(token_mask.sum().item())
+            if count == 0:
+                continue
+            start, end = expert_range
+            if not (0 <= start < end <= log_probs.shape[-1]):
+                raise RuntimeError(f"LPR expert range {start}:{end} is invalid for {log_probs.shape[-1]} experts.")
+            layer_loss = layer_loss - torch.logsumexp(log_probs[token_mask, start:end], dim=-1).sum()
+            supervised += count
+        if supervised:
+            layer_losses.append(layer_loss)
+    if not layer_losses:
+        raise RuntimeError("Task-group LPR found zero supervised old-task tokens.")
+    return torch.stack(layer_losses).mean()
 
 
 def forward_step(data_iterator, model: GPTModel):
@@ -431,6 +502,19 @@ def forward_step(data_iterator, model: GPTModel):
                 labels,
                 loss_mask,
             )
+    elif args.moe_lpr_loss_coeff > 0.0 and _as_module_list(model)[0].training:
+        with _capture_distill_router_inputs(_as_module_list(model), detach=False) as (lpr_inputs, lpr_routers):
+            with stimer:
+                losses = model(tokens, position_ids, attention_mask, labels=labels)
+        dataset_ids = getattr(args, "_moe_lpr_dataset_ids", None)
+        if dataset_ids is None:
+            raise RuntimeError("LPR batch dataset IDs were not populated.")
+        output_tensor = {
+            "losses": losses,
+            "lpr_loss": _masked_task_group_lpr(
+                lpr_inputs, lpr_routers, labels, loss_mask, dataset_ids, args
+            ),
+        }
     else:
         with stimer:
             output_tensor = model(tokens, position_ids, attention_mask, labels=labels)
@@ -536,7 +620,13 @@ def _build_probe_dataloader(probe_data_path, probe_eval_iters, cache_key):
         is_dataset_built_on_rank,
         config,
     ).build()
-    _PROBE_DATALOADER[cache_key] = build_pretraining_data_loader(valid_ds, 0)
+    training_micro_batch_size = args.micro_batch_size
+    if args.probe_micro_batch_size is not None:
+        args.micro_batch_size = args.probe_micro_batch_size
+    try:
+        _PROBE_DATALOADER[cache_key] = build_pretraining_data_loader(valid_ds, 0)
+    finally:
+        args.micro_batch_size = training_micro_batch_size
     return _PROBE_DATALOADER[cache_key]
 
 
@@ -1155,7 +1245,13 @@ def _run_single_probe_evaluation(
 
     with torch.no_grad():
         for _ in range(probe_eval_iters):
-            tokens, labels, loss_mask, attention_mask, position_ids = get_batch(probe_iterator)
+            training_micro_batch_size = args.micro_batch_size
+            if args.probe_micro_batch_size is not None:
+                args.micro_batch_size = args.probe_micro_batch_size
+            try:
+                tokens, labels, loss_mask, attention_mask, position_ids = get_batch(probe_iterator)
+            finally:
+                args.micro_batch_size = training_micro_batch_size
             if router_usage_enabled and routers:
                 with capture_shared_router_inputs() as captured_router_inputs:
                     logits = modules[0](

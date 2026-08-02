@@ -80,7 +80,8 @@ def _get_param_groups(
 
     use_decoupled_learning_rate = decoupled_lr is not None
 
-    # Map (wd_mult, lr_mult, is_expert_parallel, is_decoupled_lr) to params.
+    # Map optimizer properties to params. The new-expert marker deliberately
+    # creates a separate LR group even when expert model parallelism is 1.
     params_map = {}
     for model_chunk in model_chunks:
         if model_chunk.ddp_config.use_custom_fsdp:
@@ -93,12 +94,22 @@ def _get_param_groups(
                 continue
 
             is_expert_parallel = not getattr(param, 'allreduce', True)
+            is_new_expert_lr_ramp = bool(getattr(param, '_new_expert_lr_ramp', False))
+            has_frozen_rows = bool(
+                getattr(param, '_exclude_from_weight_decay_for_frozen_rows', False)
+            )
 
             if no_weight_decay_cond is not None:
                 no_wd = no_weight_decay_cond(name, param)
             else:
                 # Do not regularize biases and norm parameters.
                 no_wd = name.endswith(".bias") or len(param.shape) == 1
+            # A single grouped expert/router tensor can contain both frozen old
+            # rows and trainable new rows. AdamW applies decoupled weight decay
+            # to the whole tensor even when the old-row gradients are exactly
+            # zero, so such tensors must be placed in a no-decay group to keep
+            # the frozen rows bitwise immutable.
+            no_wd = no_wd or has_frozen_rows
 
             if scale_lr_cond is not None:
                 scale_lr = scale_lr_cond(name, param)
@@ -122,13 +133,25 @@ def _get_param_groups(
             ):
                 is_decoupled_lr = True
 
-            key = (wd_mult, _lr_mult, is_expert_parallel, is_decoupled_lr)
+            key = (
+                wd_mult,
+                _lr_mult,
+                is_expert_parallel,
+                is_decoupled_lr,
+                is_new_expert_lr_ramp,
+            )
             if key not in params_map:
                 params_map[key] = []
             params_map[key].append(param)
 
     param_groups = []
-    for (wd_mult, _lr_mult, is_expert_parallel, is_decoupled_lr), params in params_map.items():
+    for (
+        wd_mult,
+        _lr_mult,
+        is_expert_parallel,
+        is_decoupled_lr,
+        is_new_expert_lr_ramp,
+    ), params in params_map.items():
         assert len(params) > 0
         param_group = {
             'params': params,
@@ -136,6 +159,7 @@ def _get_param_groups(
             'lr_mult': _lr_mult,
             'is_expert_parallel': is_expert_parallel,
             'is_decoupled_lr': is_decoupled_lr,
+            'is_new_expert_lr_ramp': is_new_expert_lr_ramp,
         }
         param_groups.append(param_group)
 

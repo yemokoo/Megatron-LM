@@ -11,6 +11,7 @@ from megatron.core.transformer.moe.continual_learning_utils import (
     freeze_all_but_partial_old_and_new_shared_router_hybrid_params,
     freeze_all_but_router_params,
     freeze_all_but_shared_router_params,
+    inspect_moe_expansion,
     teacher_student_router_kl,
     load_partial_freeze_mask,
 )
@@ -377,6 +378,11 @@ def test_freeze_all_but_new_moe_params_masks_existing_router_rows_by_default():
 
     assert torch.count_nonzero(grad[:2]) == 0
     assert torch.all(grad[2:] == 1)
+    assert getattr(
+        model.router.weight,
+        "_exclude_from_weight_decay_for_frozen_rows",
+        False,
+    )
 
 
 def test_freeze_all_but_new_moe_params_can_train_all_router_rows():
@@ -392,7 +398,35 @@ def test_freeze_all_but_new_moe_params_can_train_all_router_rows():
     grad = _backward_router_weight_sum(model)
 
     assert torch.all(grad == 1)
+    assert not getattr(
+        model.router.weight,
+        "_exclude_from_weight_decay_for_frozen_rows",
+        False,
+    )
     assert not model.dense.weight.requires_grad
+
+
+def test_new_expert_lr_ramp_tags_experts_but_not_all_router_rows():
+    model = RouterLoraAndGroupedExpertsModel()
+
+    freeze_all_but_new_moe_params(
+        model,
+        num_existing_experts=2,
+        freeze_existing_experts=True,
+        freeze_existing_router=False,
+        train_dense_attention_lora=False,
+    )
+
+    model.zero_grad(set_to_none=True)
+    _trainable_expert_and_router_loss(model).backward()
+
+    assert getattr(model.ffn_experts.weight1, "_new_expert_lr_ramp", False)
+    assert getattr(model.ffn_experts.weight2, "_new_expert_lr_ramp", False)
+    assert not getattr(model.router.weight, "_new_expert_lr_ramp", False)
+    assert torch.all(model.router.weight.grad == 1)
+    _assert_grouped_mlp_experts_masked(
+        model.ffn_experts, {0, 1}, num_experts=4
+    )
 
 
 def test_freeze_all_but_new_moe_params_masks_old_ffn_attention_and_router_rows():
@@ -413,6 +447,16 @@ def test_freeze_all_but_new_moe_params_masks_old_ffn_attention_and_router_rows()
     _assert_grouped_mlp_experts_masked(model.ffn_experts, {0, 1}, num_experts=4)
     _assert_attention_expert_rows_masked(
         model.attn_lora_experts, {0, 1}, num_experts=4
+    )
+    partial_row_params = (
+        model.router.weight,
+        model.ffn_experts.weight1,
+        model.ffn_experts.weight2,
+        *model.attn_lora_experts.parameters(),
+    )
+    assert all(
+        getattr(param, "_exclude_from_weight_decay_for_frozen_rows", False)
+        for param in partial_row_params
     )
     assert not model.q_full_rank_lora.weight.requires_grad
     assert not model.dense.weight.requires_grad
@@ -459,6 +503,39 @@ def test_shared_router_expansion_copies_old_attention_experts_and_keeps_new_init
     ):
         assert torch.equal(target_param[:2], source_param)
         assert torch.all(target_param[2:] == -1.0)
+
+    audit = inspect_moe_expansion(target, source, num_existing_experts=2)
+    attention_records = [
+        record
+        for record in audit["expert_modules"]
+        if record["type"] == "SharedFullRankLoraExperts"
+    ]
+    assert len(attention_records) == 1
+    attention_record = attention_records[0]
+    assert attention_record["all_copied_params_match"]
+    assert attention_record["copied_params_max_abs_diff"] == 0.0
+    assert set(attention_record["parameters"]) == {
+        "qkv_lora_a",
+        "qkv_lora_b",
+        "proj_lora_a",
+        "proj_lora_b",
+    }
+    assert all(
+        parameter_record["copied_rows_match"]
+        for parameter_record in attention_record["parameters"].values()
+    )
+
+    with torch.no_grad():
+        target.attn_lora_experts.qkv_lora_b[0, 0, 0].add_(1.0)
+    corrupted_audit = inspect_moe_expansion(target, source, num_existing_experts=2)
+    corrupted_record = next(
+        record
+        for record in corrupted_audit["expert_modules"]
+        if record["type"] == "SharedFullRankLoraExperts"
+    )
+    assert not corrupted_record["all_copied_params_match"]
+    assert not corrupted_record["parameters"]["qkv_lora_b"]["copied_rows_match"]
+    assert corrupted_record["parameters"]["qkv_lora_b"]["copied_rows_max_abs_diff"] == 1.0
 
 
 def test_freeze_all_but_new_moe_params_can_train_all_experts_and_router_rows():

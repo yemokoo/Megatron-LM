@@ -465,6 +465,17 @@ def get_batch_on_this_tp_rank(data_iterator):
            'attention_mask': None if "attention_mask" not in data else data["attention_mask"].cuda(non_blocking = True),
            'position_ids': data["position_ids"].cuda(non_blocking = True)
        }
+       if args.moe_lpr_loss_coeff > 0.0:
+           # Probe/validation datasets may be unblended and therefore have no
+           # dataset_id. They never execute LPR; -1 is only a broadcast placeholder.
+           if "dataset_id" in data:
+               batch['dataset_id'] = data["dataset_id"].to(
+                   device=torch.cuda.current_device(), dtype=torch.int64, non_blocking=True
+               )
+           else:
+               batch['dataset_id'] = torch.full(
+                   (args.micro_batch_size,), -1, dtype=torch.int64, device=torch.cuda.current_device()
+               )
 
        if args.pipeline_model_parallel_size == 1:
            _broadcast(batch['tokens'])
@@ -472,6 +483,8 @@ def get_batch_on_this_tp_rank(data_iterator):
            _broadcast(batch['loss_mask'])
            _broadcast(batch['attention_mask'])
            _broadcast(batch['position_ids'])
+           if args.moe_lpr_loss_coeff > 0.0:
+               _broadcast(batch['dataset_id'])
 
        elif mpu.is_pipeline_first_stage():
            _broadcast(batch['tokens'])
@@ -495,6 +508,8 @@ def get_batch_on_this_tp_rank(data_iterator):
        else:
            attention_mask=None
        position_ids=torch.empty((args.micro_batch_size,args.seq_length), dtype = torch.int64 , device = torch.cuda.current_device())
+       if args.moe_lpr_loss_coeff > 0.0:
+           dataset_id=torch.empty((args.micro_batch_size,), dtype=torch.int64, device=torch.cuda.current_device())
 
        if args.pipeline_model_parallel_size == 1:
            _broadcast(tokens)
@@ -502,6 +517,8 @@ def get_batch_on_this_tp_rank(data_iterator):
            _broadcast(loss_mask)
            _broadcast(attention_mask)
            _broadcast(position_ids)
+           if args.moe_lpr_loss_coeff > 0.0:
+               _broadcast(dataset_id)
 
        elif mpu.is_pipeline_first_stage():
            labels=None
@@ -526,6 +543,8 @@ def get_batch_on_this_tp_rank(data_iterator):
            'attention_mask': attention_mask,
            'position_ids': position_ids
        }
+       if args.moe_lpr_loss_coeff > 0.0:
+           batch['dataset_id'] = dataset_id
 
     return batch
 

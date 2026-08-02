@@ -19,6 +19,18 @@ from megatron.core.transformer.shared_router_hybrid import (
 
 _EXPERT_SUFFIX_RE = re.compile(r"(?:weight|bias)(\d+)$")
 _ALLOW_EXISTING_ROUTER_GRADS = False
+_SHARED_FULL_RANK_LORA_PARAMETER_NAMES = (
+    "qkv_lora_a",
+    "qkv_lora_b",
+    "q_lora_a",
+    "q_lora_b",
+    "k_lora_a",
+    "k_lora_b",
+    "v_lora_a",
+    "v_lora_b",
+    "proj_lora_a",
+    "proj_lora_b",
+)
 
 
 @contextmanager
@@ -154,18 +166,7 @@ def _copy_shared_qv_lora_experts(dst_experts, src_experts, num_existing_experts)
 
 def _copy_shared_full_rank_lora_experts(dst_experts, src_experts, num_existing_experts):
     with torch.no_grad():
-        for attr_name in (
-            "qkv_lora_a",
-            "qkv_lora_b",
-            "q_lora_a",
-            "q_lora_b",
-            "k_lora_a",
-            "k_lora_b",
-            "v_lora_a",
-            "v_lora_b",
-            "proj_lora_a",
-            "proj_lora_b",
-        ):
+        for attr_name in _SHARED_FULL_RANK_LORA_PARAMETER_NAMES:
             dst_param = getattr(dst_experts, attr_name, None)
             src_param = getattr(src_experts, attr_name, None)
             if dst_param is not None and src_param is not None:
@@ -202,6 +203,7 @@ def expand_moe_model(target_model, source_model, num_existing_experts):
 def _freeze_router(module, num_existing_experts):
     marker = getattr(module, "_continual_frozen_router_rows", None)
     if marker == num_existing_experts:
+        module.weight._exclude_from_weight_decay_for_frozen_rows = True
         return
     if marker is not None:
         raise RuntimeError(
@@ -216,6 +218,7 @@ def _freeze_router(module, num_existing_experts):
         return grad
 
     module.weight.register_hook(_zero_existing_router_grads)
+    module.weight._exclude_from_weight_decay_for_frozen_rows = True
     module._continual_frozen_router_rows = num_existing_experts
 
 
@@ -232,6 +235,7 @@ def _zero_grad_rows(param, frozen_indices: Set[int], *, allow_router_grads: bool
         return grad.index_fill(0, row_idx, 0)
 
     param.register_hook(_zero_rows)
+    param._exclude_from_weight_decay_for_frozen_rows = True
 
 
 def _zero_grouped_mlp_expert_grads(module, frozen_indices: Set[int]):
@@ -257,6 +261,8 @@ def _zero_grouped_mlp_expert_grads(module, frozen_indices: Set[int]):
 
     module.weight1.register_hook(_zero_weight1_rows)
     module.weight2.register_hook(_zero_weight2_rows)
+    module.weight1._exclude_from_weight_decay_for_frozen_rows = True
+    module.weight2._exclude_from_weight_decay_for_frozen_rows = True
 
 
 def _freeze_grouped_experts(module, num_existing_experts):
@@ -275,6 +281,8 @@ def _freeze_grouped_experts(module, num_existing_experts):
 
     module.weight1.register_hook(_zero_existing_weight1_grads)
     module.weight2.register_hook(_zero_existing_weight2_grads)
+    module.weight1._exclude_from_weight_decay_for_frozen_rows = True
+    module.weight2._exclude_from_weight_decay_for_frozen_rows = True
 
 
 def _freeze_qv_lora_experts(module, num_existing_experts):
@@ -287,9 +295,15 @@ def _freeze_qv_lora_experts(module, num_existing_experts):
     module.q_lora_b.register_hook(_zero_existing_expert_grads)
     module.v_lora_a.register_hook(_zero_existing_expert_grads)
     module.v_lora_b.register_hook(_zero_existing_expert_grads)
+    module.q_lora_a._exclude_from_weight_decay_for_frozen_rows = True
+    module.q_lora_b._exclude_from_weight_decay_for_frozen_rows = True
+    module.v_lora_a._exclude_from_weight_decay_for_frozen_rows = True
+    module.v_lora_b._exclude_from_weight_decay_for_frozen_rows = True
     if getattr(module, "o_lora_a", None) is not None:
         module.o_lora_a.register_hook(_zero_existing_expert_grads)
         module.o_lora_b.register_hook(_zero_existing_expert_grads)
+        module.o_lora_a._exclude_from_weight_decay_for_frozen_rows = True
+        module.o_lora_b._exclude_from_weight_decay_for_frozen_rows = True
 
 
 def _freeze_shared_full_rank_lora_experts(module, num_existing_experts):
@@ -313,6 +327,7 @@ def _freeze_shared_full_rank_lora_experts(module, num_existing_experts):
         param = getattr(module, attr_name, None)
         if param is not None:
             param.register_hook(_zero_existing_expert_grads)
+            param._exclude_from_weight_decay_for_frozen_rows = True
 
 
 def _zero_shared_full_rank_lora_expert_grads(module, frozen_indices: Set[int]):
@@ -340,6 +355,7 @@ def _freeze_qv_lora_router(module, num_existing_experts):
         return grad
 
     module.router_weight.register_hook(_zero_existing_router_grads)
+    module.router_weight._exclude_from_weight_decay_for_frozen_rows = True
 
 
 def _freeze_te_grouped_experts(module, num_existing_experts):
@@ -406,11 +422,15 @@ def freeze_all_but_new_moe_params(
                 trainable = expert_idx >= num_existing_experts if freeze_existing_experts else True
                 for param in expert.parameters():
                     param.requires_grad = trainable
+                    if trainable:
+                        param._new_expert_lr_ramp = True
             continue
 
         if isinstance(module, GroupedMLP):
             module.weight1.requires_grad = True
             module.weight2.requires_grad = True
+            module.weight1._new_expert_lr_ramp = True
+            module.weight2._new_expert_lr_ramp = True
             if freeze_existing_experts:
                 _freeze_grouped_experts(module, num_existing_experts)
             continue
@@ -422,6 +442,8 @@ def freeze_all_but_new_moe_params(
                     continue
                 expert_idx = int(match.group(1))
                 param.requires_grad = expert_idx >= num_existing_experts if freeze_existing_experts else True
+                if param.requires_grad:
+                    param._new_expert_lr_ramp = True
             continue
 
         if isinstance(module, QVLoraExpertRouter):
@@ -430,9 +452,13 @@ def freeze_all_but_new_moe_params(
             module.q_lora_b.requires_grad = True
             module.v_lora_a.requires_grad = True
             module.v_lora_b.requires_grad = True
+            for param in (module.q_lora_a, module.q_lora_b, module.v_lora_a, module.v_lora_b):
+                param._new_expert_lr_ramp = True
             if getattr(module, "o_lora_a", None) is not None:
                 module.o_lora_a.requires_grad = True
                 module.o_lora_b.requires_grad = True
+                module.o_lora_a._new_expert_lr_ramp = True
+                module.o_lora_b._new_expert_lr_ramp = True
             if freeze_existing_router:
                 _freeze_qv_lora_router(module, num_existing_experts)
             if freeze_existing_experts:
@@ -444,9 +470,13 @@ def freeze_all_but_new_moe_params(
             module.q_lora_b.requires_grad = True
             module.v_lora_a.requires_grad = True
             module.v_lora_b.requires_grad = True
+            for param in (module.q_lora_a, module.q_lora_b, module.v_lora_a, module.v_lora_b):
+                param._new_expert_lr_ramp = True
             if getattr(module, "o_lora_a", None) is not None:
                 module.o_lora_a.requires_grad = True
                 module.o_lora_b.requires_grad = True
+                module.o_lora_a._new_expert_lr_ramp = True
+                module.o_lora_b._new_expert_lr_ramp = True
             if freeze_existing_experts:
                 _freeze_qv_lora_experts(module, num_existing_experts)
             continue
@@ -467,6 +497,7 @@ def freeze_all_but_new_moe_params(
                 param = getattr(module, attr_name, None)
                 if param is not None:
                     param.requires_grad = True
+                    param._new_expert_lr_ramp = True
             if freeze_existing_experts:
                 _freeze_shared_full_rank_lora_experts(module, num_existing_experts)
             continue
@@ -941,6 +972,63 @@ def _audit_shared_qv_lora_experts(module_name, target_experts, source_experts, n
     return record
 
 
+def _audit_shared_full_rank_lora_experts(
+    module_name, target_experts, source_experts, num_existing_experts
+):
+    """Audit every copied Q/K/V/O adapter tensor in shared full-rank LoRA experts."""
+    record = {
+        "module": module_name,
+        "type": "SharedFullRankLoraExperts",
+        "copied_rows": num_existing_experts,
+        "num_target_experts": int(target_experts.num_experts),
+        "num_source_experts": int(source_experts.num_experts),
+        "parameters": {},
+    }
+    all_copied_params_match = True
+    copied_params_max_abs_diff = 0.0
+
+    for attr_name in _SHARED_FULL_RANK_LORA_PARAMETER_NAMES:
+        target_param = getattr(target_experts, attr_name, None)
+        source_param = getattr(source_experts, attr_name, None)
+        if target_param is None and source_param is None:
+            continue
+
+        param_record = {
+            "target_present": target_param is not None,
+            "source_present": source_param is not None,
+        }
+        copied_rows_match = target_param is not None and source_param is not None
+        max_abs_diff = None
+        if copied_rows_match:
+            target_rows = target_param[:num_existing_experts]
+            source_rows = source_param[:num_existing_experts]
+            param_record["target"] = _tensor_summary(target_param)
+            param_record["source"] = _tensor_summary(source_param)
+            param_record["source_copied_rows_l2_norm"] = float(
+                source_rows.detach().float().norm().item()
+            )
+            param_record["target_copied_rows_l2_norm"] = float(
+                target_rows.detach().float().norm().item()
+            )
+            copied_rows_match = bool(
+                target_rows.shape == source_rows.shape
+                and torch.equal(target_rows.detach(), source_rows.detach())
+            )
+            if target_rows.shape == source_rows.shape:
+                max_abs_diff = _max_abs_diff(target_rows, source_rows)
+
+        param_record["copied_rows_match"] = copied_rows_match
+        param_record["copied_rows_max_abs_diff"] = max_abs_diff
+        record["parameters"][attr_name] = param_record
+        all_copied_params_match = all_copied_params_match and copied_rows_match
+        if max_abs_diff is not None:
+            copied_params_max_abs_diff = max(copied_params_max_abs_diff, max_abs_diff)
+
+    record["all_copied_params_match"] = all_copied_params_match
+    record["copied_params_max_abs_diff"] = copied_params_max_abs_diff
+    return record
+
+
 def inspect_moe_expansion(target_model, source_model, num_existing_experts):
     audit: Dict[str, Any] = {
         "num_existing_experts": num_existing_experts,
@@ -975,6 +1063,14 @@ def inspect_moe_expansion(target_model, source_model, num_existing_experts):
         ):
             audit["expert_modules"].append(
                 _audit_shared_qv_lora_experts(
+                    module_name, target_module, source_module, num_existing_experts
+                )
+            )
+        elif isinstance(target_module, SharedFullRankLoraExperts) and isinstance(
+            source_module, SharedFullRankLoraExperts
+        ):
+            audit["expert_modules"].append(
+                _audit_shared_full_rank_lora_experts(
                     module_name, target_module, source_module, num_existing_experts
                 )
             )

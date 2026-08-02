@@ -54,21 +54,45 @@ logger = getLogger(__name__)
 _NON_PERSISTENT_CKPT_SUBDIR = 'non_persistent'
 
 
-def _should_skip_attn_full_rank_lora_load(value):
+def _should_skip_attn_full_rank_lora_load(value, checkpoint_tensor_keys=None):
     key = getattr(value, 'key', None)
-    return isinstance(key, str) and 'full_rank_lora' in key
+    return (
+        isinstance(key, str)
+        and 'full_rank_lora' in key
+        and (checkpoint_tensor_keys is None or key not in checkpoint_tensor_keys)
+    )
 
 
-def _strip_attn_full_rank_lora_from_sharded_state_dict(state_dict):
+def _strip_missing_attn_full_rank_lora_from_sharded_state_dict(
+    state_dict, checkpoint_tensor_keys=None
+):
+    """Drop only full-rank LoRA tensors that are absent from the checkpoint.
+
+    Legacy finetune sources may predate full-rank LoRA and therefore have no
+    matching tensors. Checkpoints produced by an attention-expert model must
+    retain their existing tensors; stripping all of them silently resets every
+    LoRA A/B matrix during KD teacher and phase-transition loads.
+
+    A checkpoint_tensor_keys value of None preserves the legacy blanket-filter
+    behavior for checkpoint backends that cannot expose tensor metadata.
+    """
+    stripped_keys = set()
+
+    def should_skip(value):
+        skip = _should_skip_attn_full_rank_lora_load(value, checkpoint_tensor_keys)
+        if skip:
+            stripped_keys.add(value.key)
+        return skip
+
     for model_key in list(state_dict.keys()):
         if not model_key.startswith('model'):
             continue
         _matched, remainder = extract_matching_values(
             state_dict[model_key],
-            _should_skip_attn_full_rank_lora_load,
+            should_skip,
         )
         state_dict[model_key] = remainder
-    return state_dict
+    return state_dict, sorted(stripped_keys)
 
 def set_checkpoint_version(value):
     global _CHECKPOINT_VERSION
@@ -1233,9 +1257,27 @@ def load_checkpoint(model, optimizer, opt_param_scheduler, load_arg='load', stri
                     use_dist_ckpt=True, optim_sd_kwargs=optim_sd_kwargs, rerun_state=gen_sd_rerun_state
                 )
                 if args.finetune and getattr(args, 'attn_full_rank_lora_rank', 0) > 0:
-                    load_kwargs['sharded_state_dict'] = _strip_attn_full_rank_lora_from_sharded_state_dict(
-                        load_kwargs['sharded_state_dict']
+                    checkpoint_tensor_keys = None
+                    if ckpt_type == CheckpointType.GLOBAL:
+                        checkpoint_tensor_keys = set(
+                            dist_checkpointing.load_tensors_metadata(checkpoint_name)
+                        )
+                    checkpoint_args = state_dict.get('args') if isinstance(state_dict, dict) else None
+                    checkpoint_has_full_rank_lora = (
+                        getattr(checkpoint_args, 'attn_full_rank_lora_rank', 0) > 0
                     )
+                    if checkpoint_tensor_keys is not None or not checkpoint_has_full_rank_lora:
+                        (
+                            load_kwargs['sharded_state_dict'],
+                            stripped_full_rank_lora_keys,
+                        ) = _strip_missing_attn_full_rank_lora_from_sharded_state_dict(
+                            load_kwargs['sharded_state_dict'], checkpoint_tensor_keys
+                        )
+                        print_rank_0(
+                            'Finetune full-rank LoRA checkpoint filter: '
+                            f'stripped {len(stripped_full_rank_lora_keys)} missing tensor(s); '
+                            'checkpoint-backed tensors will be loaded.'
+                        )
 
             # When "--fp8-param-gather" is disabled, this function doesn't modify anything.
             fix_fp8_params_lose_precision_when_loading_dist_ckpt(load_kwargs['sharded_state_dict'])

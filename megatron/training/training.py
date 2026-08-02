@@ -1024,19 +1024,40 @@ def _restore_joint_replay_non_router_grads(snapshot):
             grad.copy_(saved_grad)
 
 
+def _resolve_joint_replay_existing_experts(args):
+    """Resolve the frozen expert boundary for standard or shared-router MoE resume."""
+    moe_boundary = getattr(args, 'moe_resume_from_num_experts', None)
+    shared_boundary = getattr(args, 'shared_router_hybrid_resume_from_num_experts', None)
+    if moe_boundary is not None and shared_boundary is not None and moe_boundary != shared_boundary:
+        raise ValueError(
+            'joint replay received conflicting standard-MoE and shared-router '
+            f'expert boundaries: {moe_boundary} != {shared_boundary}'
+        )
+    boundary = moe_boundary if moe_boundary is not None else shared_boundary
+    if boundary is None:
+        raise ValueError(
+            'joint replay requires --moe-resume-from-num-experts or '
+            '--shared-router-hybrid-resume-from-num-experts'
+        )
+    return int(boundary)
+
+
 def _activate_moe_joint_replay_optimizer(model):
     args=get_args()
-    if args.moe_resume_from_num_experts is None: raise ValueError('joint replay requires resume expert boundary')
+    num_existing_experts = _resolve_joint_replay_existing_experts(args)
     if _moe_interleave_enabled(args): raise ValueError('joint replay conflicts with interleave')
     if not args.moe_joint_replay_data_path: raise ValueError('joint replay data required')
     for shard in unwrap_model(model):
-        freeze_all_but_new_moe_params(shard,args.moe_resume_from_num_experts,
+        freeze_all_but_new_moe_params(shard,num_existing_experts,
             freeze_existing_experts=True,freeze_existing_router=False,train_dense_attention_lora=False)
     kw={f.name:getattr(args,f.name) for f in dataclasses.fields(OptimizerConfig) if hasattr(args,f.name)}
     cfg=OptimizerConfig(**kw);cfg.timers=get_timers()
     opt=get_megatron_optimizer(cfg,model,None,None,1.0,use_gloo_process_groups=args.enable_gloo_process_groups)
     sched=get_optimizer_param_scheduler(opt)
-    print_rank_0('[JOINT-REPLAY] optimizer contains new experts and all router rows')
+    print_rank_0(
+        '[JOINT-REPLAY] optimizer contains new experts and all router rows '
+        f'(existing expert boundary={num_existing_experts})'
+    )
     return opt,sched
 
 
@@ -1879,7 +1900,14 @@ def _debug_param_kind(name):
         return 'ffn_expert_weight1'
     if 'ffn_experts.weight2' in name or 'mlp.experts.weight2' in name:
         return 'ffn_expert_weight2'
-    if 'attn_lora_experts' in name:
+    if any(
+        token in name
+        for token in (
+            'attn_lora_experts',
+            'shared_qv_lora_experts',
+            'shared_full_rank_lora_experts',
+        )
+    ):
         return 'attention_expert'
     return 'other'
 
@@ -2165,6 +2193,7 @@ def setup_model_and_optimizer(model_provider_func,
                                        scale_lr_cond, lr_mult,
                                        use_gloo_process_groups=args.enable_gloo_process_groups)
     opt_param_scheduler = get_optimizer_param_scheduler(optimizer)
+    rebuild_optimizer_for_frozen_rows = False
 
     if args.moe_use_upcycling:
         torch.distributed.barrier()
@@ -2484,8 +2513,7 @@ def setup_model_and_optimizer(model_provider_func,
         if not (router_memory_requested_for_setup and args.router_memory_teacher_student_kl):
             set_shared_router_memory_full_teacher(None)
         args.iteration = 0 if args.finetune else 1
-        if (args.fp16 or args.bf16) and optimizer is not None:
-            optimizer.reload_model_params()
+        rebuild_optimizer_for_frozen_rows = True
         print_rank_0(
             "Expanded shared-router hybrid checkpoint from "
             f"{args.shared_router_hybrid_expand_from_num_experts} to {args.num_experts} experts."
@@ -2736,6 +2764,14 @@ def setup_model_and_optimizer(model_provider_func,
                 'Resumed expanded shared-router hybrid checkpoint at iteration '
                 f'{args.iteration} with continual-learning freeze reapplied.'
             )
+            if not args.no_load_optim:
+                raise RuntimeError(
+                    "Shared-router partial-row freezing cannot safely reuse optimizer "
+                    "parameter groups created before the freeze markers were applied. "
+                    "Resume with --no-load-optim so the optimizer can be rebuilt without "
+                    "silently applying weight decay to frozen old expert rows."
+                )
+            rebuild_optimizer_for_frozen_rows = True
         if (
             args.moe_resume_from_num_experts is None
             and args.attn_lora_resume_from_num_experts is None
@@ -2769,6 +2805,29 @@ def setup_model_and_optimizer(model_provider_func,
         unwrapped_model[0].init_state_dict_from_bert()
         if args.fp16:
             optimizer.reload_model_params()
+
+    if rebuild_optimizer_for_frozen_rows and optimizer is not None:
+        # The initial optimizer is necessarily constructed before expansion or
+        # resume freeze hooks are installed. Rebuild it now so partially frozen
+        # expert/router tensors are assigned to their no-weight-decay groups.
+        optimizer = None
+        opt_param_scheduler = None
+        gc.collect()
+        torch.cuda.empty_cache()
+        torch.distributed.barrier()
+        optimizer = get_megatron_optimizer(
+            config,
+            model,
+            no_wd_decay_cond,
+            scale_lr_cond,
+            lr_mult,
+            use_gloo_process_groups=args.enable_gloo_process_groups,
+        )
+        opt_param_scheduler = get_optimizer_param_scheduler(optimizer)
+        print_rank_0(
+            "Rebuilt optimizer after shared-router row freezing; frozen old rows "
+            "are excluded from weight decay."
+        )
 
     # Convert checkpoint format.
     if args.ckpt_convert_format is not None:
@@ -3118,6 +3177,34 @@ def train_step(
     # Update parameters.
 
     timers('optimizer', log_level=1).start(barrier=args.barrier_with_L1_time)
+    new_expert_lr_multiplier = None
+    new_expert_lr = None
+    if args.moe_new_expert_lr_ramp_steps > 0:
+        if args.moe_new_expert_lr_ramp_steps == 1:
+            new_expert_lr_multiplier = 1.0
+        else:
+            # curr_iteration is zero-based: update 1 receives 0x LR and update
+            # ramp_steps receives 1x LR.
+            new_expert_lr_multiplier = min(
+                max(
+                    float(args.curr_iteration)
+                    / float(args.moe_new_expert_lr_ramp_steps - 1),
+                    0.0,
+                ),
+                1.0,
+            )
+        expert_group_count = 0
+        for param_group in optimizer.param_groups:
+            if not param_group.get('is_new_expert_lr_ramp', False):
+                continue
+            param_group['lr'] *= new_expert_lr_multiplier
+            new_expert_lr = param_group['lr']
+            expert_group_count += 1
+        if expert_group_count == 0:
+            raise RuntimeError(
+                '--moe-new-expert-lr-ramp-steps was enabled, but the optimizer '
+                'contains no parameter group tagged as a new expert.'
+            )
     update_successful, grad_norm, num_zeros_in_grad = optimizer.step()
     timers('optimizer').stop()
 
@@ -3171,6 +3258,13 @@ def train_step(
         loss_reduced.update(router_memory_loss_dict)
         loss_reduced.update(joint_replay_loss_dict)
         loss_reduced.update(train_router_usage_metrics)
+        if new_expert_lr_multiplier is not None:
+            loss_reduced['new_expert_lr/ramp_multiplier'] = torch.tensor(
+                new_expert_lr_multiplier, dtype=torch.float, device='cuda'
+            )
+            loss_reduced['new_expert_lr/effective_lr'] = torch.tensor(
+                new_expert_lr, dtype=torch.float, device='cuda'
+            )
         lm_loss = loss_reduced.get('lm loss')
         router_kl = loss_reduced.get('router_memory_teacher_student/kl')
         scaled_router_kl = loss_reduced.get('router_memory_teacher_student/scaled_kl')
