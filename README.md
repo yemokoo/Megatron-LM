@@ -202,6 +202,9 @@ Representative output folders:
 
 FLAME/Megatron and TRACE/SLoRA use separate runtimes. The complete migration
 contract and exact commands are in [environments/README_KO.md](./environments/README_KO.md).
+For a copy-paste Codex handoff covering GitHub/HF/W&B authentication, datasets,
+final checkpoints, grouped-gemm builds, and smoke checks, use
+[docs/new_server_codex_bootstrap_prompt_ko.md](./docs/new_server_codex_bootstrap_prompt_ko.md).
 
 For FLAME/G2 Megatron, use the dedicated Conda environment:
 
