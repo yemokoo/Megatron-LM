@@ -1,0 +1,19 @@
+# Requirements for ZERO-SHOT eval of the 8 TRACE benchmarks via vLLM
+# (NOT the original repo's training stack -- deepspeed/flash-attn/etc. are NOT needed).
+#
+# torch is intentionally NOT listed: `vllm` pulls the matching torch itself.
+# Do not pin torch by hand.
+
+# --- generation backend ---
+vllm>=0.8.5          # >=0.8.5 => Qwen3 support => brings torch>=2.6 automatically
+                     # (Qwen2.5 / Llama3 work on any recent vllm)
+
+# --- scoring (repo metrics.py + evaluations/*.py) ---
+rouge==1.0.1         # `from rouge import Rouge` (NOT rouge-score); repo-pinned
+nltk>=3.5            # sentence_bleu
+fuzzywuzzy           # Py150 similarity
+
+# --- optional: only if you pass --with_sari (20Minuten SARI; needs network) ---
+# datasets           # any version now OK (load_metric patched to lazy import)
+# evaluate           # used automatically when datasets>=3
+# sacrebleu          # SARI backend

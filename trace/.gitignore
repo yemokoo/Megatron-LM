@@ -1,0 +1,19 @@
+# Server-local runtime and large artifacts
+/.venv-runtime/
+/.bootstrap-tools/
+/.wheel-cache/
+/.hf-cli/
+/data/
+/models/
+/cache/
+/results/
+/logs/
+
+# Generated audit outputs
+/manifests/preflight.json
+
+# Python and editor noise
+**/__pycache__/
+*.py[cod]
+*.log
+.DS_Store

@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "backbones": {
+    "llama31": {
+      "hf_id": "meta-llama/Llama-3.1-8B-Instruct",
+      "path": "models/Llama-3.1-8B-Instruct"
+    },
+    "qwen25_7b": {
+      "hf_id": "Qwen/Qwen2.5-7B-Instruct",
+      "path": "models/Qwen2.5-7B-Instruct"
+    }
+  },
+  "methods": {
+    "seq_lora": {
+      "family": "slora",
+      "classification": "unified_framework_control",
+      "implementation": "implementations/SLoRA-repro",
+      "launcher": "scripts/run_experiment.sh all seq_lora <model>"
+    },
+    "slora_pre": {
+      "family": "slora",
+      "classification": "paper_method_corrected_integration",
+      "implementation": "implementations/SLoRA-repro",
+      "launcher": "scripts/run_experiment.sh all slora_pre <model>"
+    },
+    "slora_post": {
+      "family": "slora",
+      "classification": "paper_method_corrected_integration",
+      "implementation": "implementations/SLoRA-repro",
+      "launcher": "scripts/run_experiment.sh all slora_post <model>"
+    },
+    "ewc": {
+      "family": "trace",
+      "classification": "official_trace_model_port",
+      "implementation": "implementations/TRACE-repro",
+      "launcher": "scripts/run_experiment.sh all ewc <model>"
+    },
+    "lwf": {
+      "family": "trace",
+      "classification": "official_trace_model_port",
+      "implementation": "implementations/TRACE-repro",
+      "launcher": "scripts/run_experiment.sh all lwf <model>"
+    },
+    "gem_upstream": {
+      "family": "trace",
+      "classification": "official_trace_model_port_known_qp_bug",
+      "implementation": "implementations/TRACE-repro",
+      "launcher": "scripts/run_experiment.sh all gem_upstream <model>"
+    },
+    "gem_corrected": {
+      "family": "trace",
+      "classification": "corrected_qp_translation",
+      "implementation": "implementations/TRACE-repro",
+      "launcher": "scripts/run_experiment.sh all gem_corrected <model>"
+    },
+    "olora_upstream": {
+      "family": "trace",
+      "classification": "trace_port_public_A_L1_penalty",
+      "implementation": "implementations/TRACE-repro",
+      "launcher": "scripts/run_experiment.sh all olora_upstream <model>",
+      "warning": "The SLoRA authors' unified-framework O-LoRA runner is not public."
+    },
+    "olora_corrected": {
+      "family": "trace",
+      "classification": "trace_port_paper_mapped_B_squared_frobenius",
+      "implementation": "implementations/TRACE-repro",
+      "launcher": "scripts/run_experiment.sh all olora_corrected <model>",
+      "warning": "A controlled corrected port, not an exact released SLoRA-paper runner."
+    }
+  },
+  "unavailable_public_runners": {
+    "SD-LoRA": "Reported by the paper but no runnable implementation is present in the public SLoRA repository.",
+    "RCL": "Reported by the paper but no runnable implementation is present in the public SLoRA repository.",
+    "unified_O-LoRA": "Reported in the unified framework, but that runner is absent from the public SLoRA repository."
+  }
+}

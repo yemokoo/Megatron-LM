@@ -1,0 +1,24 @@
+From: local reproducibility audit
+Subject: [PATCH] implement the paper's squared update-column overlap
+Applies-to: O-LoRA 07117e1fc4a5f5ad9308a815a42cee8f46502dc8
+
+In PEFT, delta_W = lora_B @ lora_A. The paper's d-by-r A matrix is
+therefore PEFT's lora_B, and Equation (8) sums squared overlaps. The public
+code instead applies an L1 overlap to PEFT lora_A.
+
+diff --git a/src/uie_trainer_lora.py b/src/uie_trainer_lora.py
+--- a/src/uie_trainer_lora.py
++++ b/src/uie_trainer_lora.py
+@@ -90,8 +90,9 @@ class UIETrainer(Seq2SeqTrainer):
+         ########################### Regularization ##########################
+         orthogonal_loss = 0.
+         for name, param in self.model.named_parameters():
+-            if "lora_A" in name:
++            if "lora_B" in name and "loranew_B" not in name:
+                 for name_, param_ in self.model.named_parameters():
+-                    if "loranew_A" in name_ and name.split("lora_A")[0] == name_.split("loranew_A")[0]:
+-                        orthogonal_loss += torch.abs(torch.mm(param, param_.T)).sum() # [r * dim] * [dim * r]
++                    if "loranew_B" in name_ and name.split("lora_B")[0] == name_.split("loranew_B")[0]:
++                        overlap = torch.mm(param.T, param_)
++                        orthogonal_loss += overlap.square().sum()
+                         break # target modules have been matched

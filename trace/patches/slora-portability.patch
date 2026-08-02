@@ -1,0 +1,21 @@
+From: local reproducibility audit
+Subject: [PATCH] fix public evaluation variable and missing script path
+Applies-to: SLoRA 0faf15fd6562ed3e146e8733205f59ef9742ba0f
+
+The my_run wrappers additionally reference
+scripts/rebuttal/my_slurm/eval_cl.sh, which does not exist. Replace that path
+with scripts/eval/my_slurm/eval_cl.sh. Supply model, log, data and GPU paths
+through the launch configuration rather than the checked-in machine paths.
+
+diff --git a/scripts/eval/my_slurm/eval_cl.sh b/scripts/eval/my_slurm/eval_cl.sh
+--- a/scripts/eval/my_slurm/eval_cl.sh
++++ b/scripts/eval/my_slurm/eval_cl.sh
+@@ -21,7 +21,7 @@ mkdir -p "${OUT_DIR}"
+ echo "[INFO] CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
+ echo "[INFO] Task path=${TASK_PATH}"
+ echo "[INFO] Model base=${MODEL_BASE}"
+ echo "[INFO] Model path=${MODEL_PATH}"
+ echo "[INFO] Dataset=${DATASET}"
+-echo "[INFO] CONV_MODE=${CONV_MODE}, DENOISED_MODE=${DROP_MODE}, TEST_ORDER=${TEST_ORDER}"
++echo "[INFO] CONV_MODE=${CONV_MODE}, DENOISED_MODE=${DENOISED_MODE}, TEST_ORDER=${TEST_ORDER}"
+ echo "[INFO] Logs -> ${OUT_DIR}"

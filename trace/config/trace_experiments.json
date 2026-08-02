@@ -1,0 +1,82 @@
+{
+  "paper": {
+    "title": "SLoRA: Balancing Plasticity and Forgetting in Large Language Models for Continual Learning",
+    "url": "https://aclanthology.org/2026.acl-long.247.pdf",
+    "reported_hardware": "4 x NVIDIA A100",
+    "train_samples_per_trace_task": 5000,
+    "task_order": [
+      "C-STANCE",
+      "FOMC",
+      "MeetingBank",
+      "Py150",
+      "ScienceQA",
+      "NumGLUE-cm",
+      "NumGLUE-ds",
+      "20Minuten"
+    ],
+    "epochs": [5, 3, 7, 5, 3, 5, 5, 7],
+    "lora": {
+      "rank": 64,
+      "alpha": 128,
+      "target_modules": [
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        "o_proj",
+        "up_proj",
+        "gate_proj",
+        "down_proj"
+      ]
+    },
+    "optimizer": {
+      "name": "AdamW",
+      "learning_rate": 0.0002,
+      "warmup_ratio": 0.03,
+      "scheduler": "cosine",
+      "weight_decay": 0.0
+    }
+  },
+  "paths": {
+    "paper_trace_data": "data/trace",
+    "llmcl_benchmark": "implementations/llmcl_benchmark",
+    "slora_repro": "implementations/SLoRA-repro",
+    "trace_repro": "implementations/TRACE-repro",
+    "clean_slora": "upstream/SLoRA",
+    "clean_trace": "upstream/TRACE",
+    "clean_olora": "upstream/O-LoRA"
+  },
+  "batch_profiles": {
+    "public_slora_pre": {
+      "status": "official_public_code",
+      "micro_batch_per_device": 2,
+      "world_size": 1,
+      "gradient_accumulation": 8
+    },
+    "public_slora_post": {
+      "status": "official_public_code",
+      "micro_batch_per_device": 2,
+      "world_size": 2,
+      "gradient_accumulation": 8
+    },
+    "harmonized_4gpu": {
+      "status": "comparison_profile_not_proven_by_paper",
+      "micro_batch_per_device": 2,
+      "world_size": 4,
+      "gradient_accumulation": 8
+    },
+    "optimized_slora_4gpu": {
+      "status": "measured_runtime_profile_preserves_effective_batch_64",
+      "micro_batch_per_device": 8,
+      "world_size": 4,
+      "gradient_accumulation": 2
+    },
+    "official_olora_standard_cl": {
+      "status": "official_public_code",
+      "micro_batch_per_device": 1,
+      "world_size": 8,
+      "gradient_accumulation": 8,
+      "epochs": 1,
+      "logging_steps": 10
+    }
+  }
+}

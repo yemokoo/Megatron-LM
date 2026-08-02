@@ -1,0 +1,134 @@
+diff --git a/src/model/builder.py b/src/model/builder.py
+index edde2f9..0000000 100644
+--- a/src/model/builder.py
++++ b/src/model/builder.py
+@@ -42,6 +42,21 @@ def load_denoised_lora(model, delta_weight, lora_config):
+     return model
+ 
+ 
++REFERENCE_TARGETS = (
++    "q_proj.weight", "k_proj.weight", "v_proj.weight", "o_proj.weight",
++    "up_proj.weight", "gate_proj.weight", "down_proj.weight",
++)
++
++
++def snapshot_reference_weights(model):
++    """Keep an immutable CPU copy of the paper's fixed pretrained anchor theta_0."""
++    return {
++        name: parameter.detach().to("cpu").clone()
++        for name, parameter in model.named_parameters()
++        if name.endswith(REFERENCE_TARGETS)
++    }
++
++
+ def to_safetensors_format(state_dict):
+     safe_dict = {}
+     for k, v in state_dict.items():
+@@ -124,7 +139,9 @@ def perform_similarity_search(delta_W_tensor, base_U_r, rank, mode):
+     return new_lora_A, new_lora_B
+ 
+ def denoising(base_model, delta_weights, mode='max'):
+-    if base_model is not None:
++    if isinstance(base_model, dict):
++        base_weights = base_model
++    elif base_model is not None:
+         with torch.no_grad():
+             base_weights = dict(base_model.named_parameters())
+ 
+@@ -147,7 +164,10 @@ def denoising(base_model, delta_weights, mode='max'):
+                 continue
+ 
+             base_W_tensor = base_weights[base_weight_name].detach()
+-            base_U, _, _ = torch.linalg.svd(base_W_tensor.to(torch.float32), full_matrices=False)
++            base_W_tensor = base_W_tensor.to(
++                device=lora_A.device, dtype=torch.float32
++            )
++            base_U, _, _ = torch.linalg.svd(base_W_tensor, full_matrices=False)
+             base_U_r = base_U[:, :rank]
+ 
+         delta_W_tensor = torch.mm(lora_B, lora_A)
+@@ -215,5 +235,10 @@ def load_continual_pretrained_model(model_path, model_base, model_name, denoised
+         model = AutoModelForCausalLM.from_pretrained(model_base, low_cpu_mem_usage=True, trust_remote_code=True, local_files_only=True, **kwargs)
+         base_model = model
++        reference_weights = (
++            snapshot_reference_weights(base_model)
++            if denoised_mode == "slora_post"
++            else None
++        )
+         print(f"Loading LoRA weights from {model_path}")
+         # task_num = len(os.listdir(model_path))
+         task_paths = resolve_task_paths(model_path)
+@@ -251,7 +276,7 @@ def load_continual_pretrained_model(model_path, model_base, model_name, denoised
+                     state_dict = load_file(os.path.join(item_path, "adapter_model.safetensors"))
+                     state_dict = {key: value.to(base_model.device) for key, value in state_dict.items()}
+ 
+-                    new_state_dict = denoising(base_model, state_dict)
++                    new_state_dict = denoising(reference_weights, state_dict)
+ 
+                     # Save the optimized model
+                     save_file(new_state_dict, denoised_lora_path)
+diff --git a/src/train/cl_train_slora.py b/src/train/cl_train_slora.py
+index 9a7a236..0000000 100644
+--- a/src/train/cl_train_slora.py
++++ b/src/train/cl_train_slora.py
+@@ -27,5 +27,20 @@ def rank0_print(*args):
+         print(*args)
+ 
++REFERENCE_TARGETS = (
++    "q_proj.weight", "k_proj.weight", "v_proj.weight", "o_proj.weight",
++    "up_proj.weight", "gate_proj.weight", "down_proj.weight",
++)
++
++
++def snapshot_reference_weights(model):
++    """Keep an immutable CPU copy of the paper's fixed pretrained anchor theta_0."""
++    return {
++        name: parameter.detach().to("cpu").clone()
++        for name, parameter in model.named_parameters()
++        if name.endswith(REFERENCE_TARGETS)
++    }
++
++
+ @dataclass
+ class ScriptArguments(ScriptArguments):
+     dataset_name: str = field(metadata={"help": "Dataset name."}, default=None)
+@@ -113,7 +128,9 @@ def perform_similarity_search(delta_W_tensor, base_U_r, rank, mode):
+     return new_lora_A, new_lora_B
+ 
+ def denoising(base_model, delta_weights, mode='max'):
+-    if base_model is not None:
++    if isinstance(base_model, dict):
++        base_weights = base_model
++    elif base_model is not None:
+         with torch.no_grad():
+             base_weights = dict(base_model.named_parameters())
+ 
+@@ -150,7 +165,10 @@ def denoising(base_model, delta_weights, mode='max'):
+                 print(f"Warning: {base_weight_name}  or {base_weight_name_1} not found in base weights. Skipping this parameter.", flush=True)
+                 
+                 continue
+-            base_U, _, _ = torch.linalg.svd(base_W_tensor.to(torch.float32), full_matrices=False)
++            base_W_tensor = base_W_tensor.to(
++                device=lora_A.device, dtype=torch.float32
++            )
++            base_U, _, _ = torch.linalg.svd(base_W_tensor, full_matrices=False)
+             base_U_r = base_U[:, :rank]
+ 
+ 
+@@ -184,6 +202,10 @@ def train_continual_learning():
+         model_config.model_name_or_path, config=config,
+         local_files_only=True, torch_dtype=torch.bfloat16,
+     )
++    reference_weights = (
++        snapshot_reference_weights(base_model)
++        if training_args.local_rank in (-1, 0) else None
++    )
+ 
+     model = base_model
+     model.config.use_cache = False
+@@ -260,4 +282,4 @@ def train_continual_learning():
+         state_dict = load_file(os.path.join(training_args.output_dir, "adapter_model.safetensors"))
+         state_dict = {key: value.to(base_model.device) for key, value in state_dict.items()}
+-        denoised_state_dict = denoising(base_model, state_dict, script_args.mode)
++        denoised_state_dict = denoising(reference_weights, state_dict, script_args.mode)
+         save_file(denoised_state_dict, os.path.join(training_args.output_dir, f"{script_args.mode}.safetensors"))

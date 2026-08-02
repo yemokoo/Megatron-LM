@@ -1,0 +1,23 @@
+# Runtime packages shared by SLoRA-repro and TRACE-repro.
+# Torch is installed separately from the official CUDA 12.4 wheel index.
+transformers==4.51.3
+peft==0.12.0
+trl==0.16.1
+datasets==3.2.0
+accelerate==1.2.1
+safetensors==0.4.3
+deepspeed==0.16.9
+numpy==1.26.4
+scipy==1.13.1
+scikit-learn==1.5.1
+evaluate==0.4.3
+rouge==1.0.1
+fuzzywuzzy==0.18.0
+python-Levenshtein==0.25.1
+nltk==3.9.1
+qpth==0.0.18
+quadprog==0.1.13
+sentencepiece==0.2.0
+sacrebleu==2.5.1
+sacremoses==0.1.1
+protobuf==5.29.3

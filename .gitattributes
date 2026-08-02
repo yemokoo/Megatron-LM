@@ -1,0 +1,5 @@
+# Preserve vendored upstream formatting byte-for-byte. These snapshots contain
+# historical trailing whitespace that is not part of the local refactor.
+trace/implementations/** whitespace=-trailing-space
+trace/upstream/** whitespace=-trailing-space
+trace/patches/** whitespace=-trailing-space

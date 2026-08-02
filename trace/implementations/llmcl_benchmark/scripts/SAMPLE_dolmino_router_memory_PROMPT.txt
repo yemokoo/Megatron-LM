@@ -1,0 +1,138 @@
+================================================================================
+TASK PROMPT — Sample a ~2B-token "router-memory" pool from dolmino-mix-1124
+(run this on a machine WITH working HuggingFace network; the target training box
+cannot reach allenai's CDN. Then upload the result to the user's HF so it can be
+pulled on the training box, exactly like YeMoKoo/flamedata2 was.)
+================================================================================
+
+## WHY (context — keep in mind)
+This data is used ONLY to CALIBRATE / PRESERVE the ROUTER of a growing-expert MoE
+continual-learning model (backbone = allenai/OLMoE-1B-7B-0125, `main`). It is NOT
+used to train experts — the original 64 experts stay frozen. We only need the
+router to keep sending "original-distribution" tokens to the original experts
+after we add new task experts. On the training box we will sub-sample just ~3-10M
+tokens from this pool per phase-2 router retune (ablation), so this 2B pool is a
+generous reservoir we draw ratios from.
+
+## WHICH DATA + WHY dolmino
+Use `allenai/dolmino-mix-1124` (the STAGE-2 / annealing mix). OLMoE-1B-7B-0125's
+`main` checkpoint was annealed for +100B tokens on this mix, so it matches the
+router's FINAL calibration. Sample at the official **100B-mixture ratios** (this is
+the exact recipe used for the 100B anneal):
+
+    domain          mix %      target tokens (of 2B)
+    dclm            50.2 %       1,004,000,000
+    math            17.5 %         350,000,000     # dataset domain dir: "math" (Stage-2 Math)
+    flan            16.7 %         334,000,000
+    pes2o            9.52%         190,400,000
+    wiki             3.57%          71,400,000
+    stackexchange    2.47%          49,400,000
+    ------------------------------------------------
+    TOTAL           100  %       ~2,000,000,000
+
+(TARGET_TOKENS is a knob — set smaller, e.g. 200_000_000, if you want a lighter
+upload; ~2B raw text ≈ ~8 GB / ~3 GB gzip. Keep the SAME per-domain ratios.)
+
+## TOKENIZER
+Count tokens with `allenai/OLMoE-1B-7B-0125` tokenizer (the training box tokenizes
+again at train time, so we save RAW TEXT; token counts are only for hitting the
+per-domain targets).
+
+## PROCEDURE
+1. List files per domain from the repo (path prefix `data/<domain>/`).
+2. Shuffle file order per domain with seed=42 (reproducible).
+3. For each domain: stream files one by one (handle BOTH `.json.gz` [gzip] and
+   `.json.zst` [zstandard]); each line is a JSON doc with a "text" field.
+   Tokenize `text`, accumulate tokens, and KEEP the raw doc until the domain's
+   token target is reached; then move to the next domain.
+4. Save one JSONL per domain: `out/<domain>.jsonl`, each line
+   {"text": <str>, "domain": <str>, "n_tokens": <int>}. Also write
+   `out/metadata.json` = {domain: {docs, tokens}, "tokenizer": "...", "seed": 42,
+   "mixture": "dolmino-100B", "target_tokens": TARGET_TOKENS}.
+5. Robustness: retry each file a few times on network errors; skip a file only
+   after retries and log it; the run should be resumable (re-running continues
+   from whichever domains haven't hit target — e.g. skip a domain whose jsonl
+   already meets target).
+6. UPLOAD to the user's HF (so the training box can `hf_hub_download` it fast):
+       huggingface-cli upload YeMoKoo/olmoe-router-mem-dolmino-2b out/ --repo-type dataset
+   (or via huggingface_hub.HfApi().upload_folder). Pick any repo name; tell the
+   user the final name.
+
+## REFERENCE IMPLEMENTATION (adapt as needed)
+--------------------------------------------------------------------------------
+import os, io, json, gzip, time, random, requests
+import zstandard as zstd                     # pip install zstandard
+from transformers import AutoTokenizer
+from huggingface_hub import HfApi, hf_hub_url
+
+REPO = "allenai/dolmino-mix-1124"
+TARGET_TOKENS = 2_000_000_000
+MIX = {"dclm":0.502, "math":0.175, "flan":0.167,
+       "pes2o":0.0952, "wiki":0.0357, "stackexchange":0.0247}
+OUT = "out"; os.makedirs(OUT, exist_ok=True)
+random.seed(42)
+
+tok = AutoTokenizer.from_pretrained("allenai/OLMoE-1B-7B-0125")
+api = HfApi()
+info = api.dataset_info(REPO, files_metadata=True)
+allf = [s.rfilename for s in info.siblings if s.rfilename.startswith("data/")]
+
+def files_for(domain):
+    fs = [f for f in allf if f.startswith(f"data/{domain}/")]
+    random.shuffle(fs)
+    return fs
+
+def stream_lines(path):
+    url = hf_hub_url(REPO, path, repo_type="dataset")
+    for attempt in range(5):
+        try:
+            r = requests.get(url, stream=True, timeout=120); r.raise_for_status()
+            raw = r.raw
+            if path.endswith(".zst"):
+                dctx = zstd.ZstdDecompressor(); reader = dctx.stream_reader(raw)
+                buf = io.BufferedReader(reader)
+            else:                                   # .json.gz
+                buf = gzip.GzipFile(fileobj=raw)
+            for line in buf:
+                yield line
+            r.close(); return
+        except Exception as e:
+            print("  retry", type(e).__name__, path); time.sleep(3)
+    print("  SKIP (failed):", path)
+
+meta = {}
+for domain, ratio in MIX.items():
+    target = int(TARGET_TOKENS * ratio)
+    outp = os.path.join(OUT, f"{domain}.jsonl")
+    got = 0; docs = 0
+    with open(outp, "w") as w:
+        for path in files_for(domain):
+            if got >= target: break
+            for line in stream_lines(path):
+                try: d = json.loads(line)
+                except Exception: continue
+                text = d.get("text") or d.get("content") or ""
+                if not text: continue
+                n = len(tok(text, add_special_tokens=False).input_ids)
+                w.write(json.dumps({"text": text, "domain": domain, "n_tokens": n}) + "\n")
+                got += n; docs += 1
+                if got >= target: break
+            print(f"[{domain}] {got:,}/{target:,} tokens ({docs} docs)")
+    meta[domain] = {"docs": docs, "tokens": got}
+
+meta.update({"tokenizer": "allenai/OLMoE-1B-7B-0125", "seed": 42,
+             "mixture": "dolmino-100B", "target_tokens": TARGET_TOKENS})
+json.dump(meta, open(os.path.join(OUT, "metadata.json"), "w"), indent=2)
+print("DONE", meta)
+
+# then: HfApi().upload_folder(folder_path=OUT,
+#           repo_id="YeMoKoo/olmoe-router-mem-dolmino-2b", repo_type="dataset")
+--------------------------------------------------------------------------------
+
+## WHAT TO HAND BACK
+- The HF dataset repo id you uploaded to (e.g. YeMoKoo/olmoe-router-mem-dolmino-2b).
+- out/metadata.json (per-domain doc/token counts) so we can verify the ratios.
+Then on the training box we pull it (hf_hub_download, works for the user's repos),
+tokenize with the OLMoE tokenizer, and mix ~3-10M tokens/phase-2 into Track-2's
+router retune (knob: --router_preserve_tokens).
+================================================================================

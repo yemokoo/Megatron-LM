@@ -1,0 +1,83 @@
+{
+  "profiles": {
+    "seq_lora_trace": {
+      "classification": "paper_faithful_candidate",
+      "code": "upstream/SLoRA",
+      "entrypoint": "src/train/cl_train.py",
+      "model_registry_key": "llama3_8b_instruct",
+      "data_variant": 5000,
+      "patches": ["slora-portability.patch"]
+    },
+    "slora_pre_trace": {
+      "classification": "paper_faithful_candidate",
+      "code": "upstream/SLoRA",
+      "entrypoint": "src/train/cl_train_slora.py",
+      "model_registry_key": "llama3_8b_instruct",
+      "data_variant": 5000,
+      "patches": ["slora-portability.patch", "slora-candidate-rank.patch"]
+    },
+    "slora_post_trace": {
+      "classification": "paper_faithful_candidate",
+      "code": "upstream/SLoRA",
+      "entrypoint": "src/train/cl_train.py",
+      "model_registry_key": "llama3_8b_instruct",
+      "data_variant": 5000,
+      "patches": ["slora-portability.patch", "slora-candidate-rank.patch"]
+    },
+    "trace_gem_official": {
+      "classification": "official_baseline",
+      "code": "upstream/TRACE",
+      "entrypoint": "training/main.py",
+      "model_registry_key": "llama3_8b_instruct",
+      "data_variant": 5000,
+      "patches": []
+    },
+    "trace_gem_corrected": {
+      "classification": "corrected_baseline",
+      "code": "upstream/TRACE",
+      "entrypoint": "training/main.py",
+      "model_registry_key": "llama3_8b_instruct",
+      "data_variant": 5000,
+      "patches": ["trace-gem-qpth-sign.patch"]
+    },
+    "trace_ewc_official": {
+      "classification": "official_baseline",
+      "code": "upstream/TRACE",
+      "entrypoint": "training/main.py",
+      "trace_method": "EWC",
+      "model_registry_key": "llama3_8b_instruct",
+      "data_variant": 5000,
+      "patches": []
+    },
+    "trace_lwf_official": {
+      "classification": "official_baseline",
+      "code": "upstream/TRACE",
+      "entrypoint": "training/main.py",
+      "trace_method": "LwF",
+      "model_registry_key": "llama3_8b_instruct",
+      "data_variant": 5000,
+      "patches": []
+    },
+    "olora_official": {
+      "classification": "official_baseline_standard_cl_not_trace",
+      "code": "upstream/O-LoRA",
+      "entrypoint": "src/run_uie_lora.py",
+      "model_registry_key": "legacy_llama2_7b",
+      "patches": []
+    },
+    "olora_corrected": {
+      "classification": "corrected_baseline_standard_cl_not_trace",
+      "code": "upstream/O-LoRA",
+      "entrypoint": "src/run_uie_lora.py",
+      "model_registry_key": "legacy_llama2_7b",
+      "patches": ["olora-paper-orthogonality.patch"]
+    },
+    "offline_smoke": {
+      "classification": "smoke_only_not_a_paper_result",
+      "code": "scripts",
+      "entrypoint": "smoke.sh",
+      "model_registry_key": null,
+      "patches": []
+    }
+  }
+}

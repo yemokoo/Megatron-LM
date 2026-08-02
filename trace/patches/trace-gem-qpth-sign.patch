@@ -1,0 +1,32 @@
+From: local reproducibility audit
+Subject: [PATCH] translate GEM dual constraints correctly for qpth
+Applies-to: TRACE 462e39f616134f4f819efeb3baea8638c03c7db4
+
+qpth minimizes 1/2 v'Pv + q'v subject to Gv <= h. For GEM's
+g' = g + M'v and v >= margin, q is M g, G is -I, and h is
+-margin. The upstream translation negates q and instead constrains v <= margin.
+
+diff --git a/model/Regular/GEM.py b/model/Regular/GEM.py
+--- a/model/Regular/GEM.py
++++ b/model/Regular/GEM.py
+@@ -89,14 +89,15 @@
+             t = memories_cuda.shape[0]
+             # print("memories_cuda.shape:", memories_cuda.shape, " gradient_cuda.shape", gradient_cuda.shape, " t:", t)
+             P = torch.matmul(memories_cuda, memories_cuda.t())
+-            P = 0.5 * (P + P.t()) + torch.eye(t).cuda() * eps
+-            q = torch.matmul(memories_cuda, gradient_cuda) * -1
++            device = gradient_cuda.device
++            P = 0.5 * (P + P.t()) + torch.eye(t, device=device) * eps
++            q = torch.matmul(memories_cuda, gradient_cuda)
+             
+             P = P.to(torch.float32)
+             q = q.to(torch.float32)
+-            G = torch.eye(t).cuda()
+-            h = torch.zeros(t).cuda() + margin
+-            e = torch.Tensor().cuda()
++            G = -torch.eye(t, device=device)
++            h = -torch.full((t,), margin, device=device)
++            e = torch.empty(0, device=device)
+             # print("P.type():", P.type(), " q.type():", q.type(), " G.type():", G.type(), " h.type():", h.type)
+             v = QPFunction(verbose=False)(P, q, G, h, e, e)[0]
+             v = v.to(torch.bfloat16)

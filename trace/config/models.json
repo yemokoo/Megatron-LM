@@ -1,0 +1,45 @@
+{
+  "download_policy": "structure_only_no_downloads",
+  "models": {
+    "llama3_8b_instruct": {
+      "hf_id": "meta-llama/Meta-Llama-3-8B-Instruct",
+      "planned_path": "models/Meta-Llama-3-8B-Instruct",
+      "paper_scope": ["TRACE", "standard_cl", "long_sequence"],
+      "access": "gated; Meta license acceptance and Hugging Face access required"
+    },
+    "llama31_8b_instruct": {
+      "hf_id": "meta-llama/Llama-3.1-8B-Instruct",
+      "planned_path": "models/Llama-3.1-8B-Instruct",
+      "paper_scope": ["TRACE"],
+      "access": "gated; Meta license acceptance and Hugging Face access required"
+    },
+    "qwen25_7b_instruct": {
+      "hf_id": "Qwen/Qwen2.5-7B-Instruct",
+      "planned_path": "models/Qwen2.5-7B-Instruct",
+      "paper_scope": ["TRACE", "rank_sensitivity"],
+      "access": "verify the current Hugging Face model license before download"
+    },
+    "qwen25_14b_instruct": {
+      "hf_id": "Qwen/Qwen2.5-14B-Instruct",
+      "planned_path": "models/Qwen2.5-14B-Instruct",
+      "paper_scope": ["TRACE"],
+      "access": "verify the current Hugging Face model license before download"
+    },
+    "qwen25_32b_instruct": {
+      "hf_id": "Qwen/Qwen2.5-32B-Instruct",
+      "planned_path": "models/Qwen2.5-32B-Instruct",
+      "paper_scope": ["TRACE"],
+      "access": "verify the current Hugging Face model license before download"
+    },
+    "legacy_llama2_7b": {
+      "hf_id": "meta-llama/Llama-2-7b-hf",
+      "planned_path": "models/Llama-2-7b-hf",
+      "paper_scope": ["legacy_olora_only"],
+      "access": "gated; not a paper-faithful SLoRA backbone"
+    }
+  },
+  "later_download_template": [
+    "hf auth login",
+    "hf download <HF_ID> --local-dir <PLANNED_PATH>"
+  ]
+}

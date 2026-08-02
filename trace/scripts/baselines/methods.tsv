@@ -1,0 +1,18 @@
+method	family	status	implementation	note
+seq_lora	SLoRA	runnable	implementations/SLoRA-repro	SLoRA와 동일 trainer의 순차 LoRA 대조군
+slora_pre_released	SLoRA	runnable	implementations/SLoRA-upstream-port	저자 공개 코드 동작을 보존한 pre 경로
+slora_pre	SLoRA	runnable	implementations/SLoRA-repro	수식 기준으로 감사·수정한 pre 경로
+slora_post	SLoRA	runnable	implementations/SLoRA-repro	Seq-LoRA checkpoint를 평가 시 denoise
+ewc	TRACE	runnable	implementations/TRACE-repro	공개 TRACE EWC 현대 백본 포트
+lwf	TRACE	runnable	implementations/TRACE-repro	공개 TRACE LwF 현대 백본 포트
+gem_upstream	TRACE	runnable-audit	implementations/TRACE-repro	공개 qpth 부호를 보존한 결함 비교군
+gem_corrected	TRACE	runnable	implementations/TRACE-repro	감사된 GEM 제약·부호 수정본
+olora_upstream	TRACE	runnable-audit	implementations/TRACE-repro	TRACE A/L1 penalty 포트
+olora_corrected	TRACE	runnable	implementations/TRACE-repro	B/Frobenius-squared 수정본
+ours_lora_moe_v1	Ours-LoRAMoE	runnable	implementations/llmcl_benchmark	naive 2-phase: 신규 expert+router 학습 후 별도 router replay
+ours_lora_moe_v2	Ours-LoRAMoE	runnable	implementations/llmcl_benchmark	KD-init + 매 step new(new expert+router)/past(router-only) joint gradient
+ours_lora_moe_v2_5	Ours-LoRAMoE	runnable	implementations/llmcl_benchmark	v2와 동일, router aux loss와 z-loss만 제거
+loramoe	LoRAMoE	runnable-port	implementations/llmcl_benchmark	SLoRA 설정에 맞춘 로컬 FFN LoRA-MoE 호환 포트
+sd_lora	SLoRA	unavailable	-	공개 SLoRA 저장소에 실행 코드 없음
+rcl	SLoRA	unavailable	-	공개 SLoRA 저장소에 실행 코드 없음
+unified_olora	SLoRA	unavailable	-	SLoRA 저자의 unified O-LoRA runner가 공개되지 않음

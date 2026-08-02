@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "run_id": "synthetic-smoke-only",
+  "provenance": {
+    "classification": "smoke_only_not_a_paper_result",
+    "code_sha": "synthetic",
+    "data_manifest": "synthetic",
+    "model": "none",
+    "config": "synthetic"
+  },
+  "tasks": ["task_a", "task_b", "task_c"],
+  "metric": "synthetic_score",
+  "score_matrix": [
+    [0.8, null, null],
+    [0.7, 0.9, null],
+    [0.6, 0.8, 1.0]
+  ]
+}

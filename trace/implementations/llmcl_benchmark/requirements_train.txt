@@ -1,0 +1,25 @@
+# TRAINING venv: LoRA fine-tuning on a FROZEN Qwen3 base with the TRACE
+# deepspeed trainer (--CL_method lora, which uses the real `peft` lib).
+# Keep this env SEPARATE from the vLLM inference env; both share torch 2.6.
+#
+# Install torch first (cu124 build; driver 575 handles it), then the rest.
+#   pip install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+#   pip install -r requirements_train.txt
+
+transformers==4.51.3     # >=4.51 REQUIRED for Qwen3 (repo's 4.31 pin is dropped)
+peft>=0.14.0             # real peft (LoRA); Qwen3-aware; NOT the repo's vendored my_peft
+deepspeed>=0.15,<0.17    # compatible with torch 2.6
+accelerate>=1.0.0
+datasets>=2.14           # load_dataset('json') for the TRACE data
+sentencepiece>=0.1.99
+protobuf
+numpy<2.0               # keep <2 to avoid deepspeed/transformers ABI surprises
+
+# scoring deps (shared with eval; harmless here)
+rouge==1.0.1
+nltk>=3.5
+fuzzywuzzy
+
+# OPTIONAL: flash-attention (repo can also run with sdpa/eager). Build must match
+# torch 2.6 / cu12; if the prebuilt wheel fails, just omit it and use attn_implementation="sdpa".
+# flash-attn>=2.7.0

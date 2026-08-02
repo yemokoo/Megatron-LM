@@ -9,6 +9,11 @@ The current codebase is centered around:
 - new dense-plus-attention-LoRA experiments on mixed `wiki + code` data
 - routing, masking, interpolation, and probe-curve evaluation suites
 
+The repository also contains a unified TRACE/SLoRA project under
+[`trace/`](./trace). It includes the latest local `llmcl_benchmark` training code,
+SLoRA/TRACE/O-LoRA reproduction ports, portable launchers, and new-server setup
+instructions in [`trace/docs/PORTABILITY_KO.md`](./trace/docs/PORTABILITY_KO.md).
+
 ## Current Focus
 
 We currently keep two experiment families side by side under [scripts/experiment](./scripts/experiment):

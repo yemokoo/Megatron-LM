@@ -1,0 +1,34 @@
+{
+  "snapshot_date_utc": "2026-08-02",
+  "policy": "Source code is vendored without nested Git metadata; runtime artifacts and datasets are excluded.",
+  "sources": [
+    {
+      "destination": "implementations/llmcl_benchmark",
+      "source_repository": "https://github.com/yemokoo/llmcl_benchmark.git",
+      "source_commit": "030ddf570f4d74834b836099bf3d622c4f9a2702",
+      "snapshot_state": "local working tree including uncommitted experiment changes",
+      "role": "LoRAMoE and Ours LoRA-MoE v1/v2/v2.5 training and evaluation"
+    },
+    {
+      "destination": "implementations/TRACE-repro",
+      "source_repository": "https://github.com/BeyonderXX/TRACE.git",
+      "source_commit": "462e39f616134f4f819efeb3baea8638c03c7db4",
+      "snapshot_state": "local reproduction worktree including uncommitted fixes",
+      "role": "TRACE baseline training and evaluation"
+    },
+    {
+      "destination": "implementations/SLoRA-repro",
+      "source_repository": "https://github.com/alina1031/SLoRA.git",
+      "source_commit": "0faf15fd6562ed3e146e8733205f59ef9742ba0f",
+      "snapshot_state": "local audited reproduction port",
+      "role": "SLoRA reproduction"
+    },
+    {
+      "destination": "implementations/O-LoRA-repro",
+      "source_repository": "https://github.com/cmnfriend/O-LoRA.git",
+      "source_commit": "07117e1fc4a5f5ad9308a815a42cee8f46502dc8",
+      "snapshot_state": "local reproduction port",
+      "role": "O-LoRA reference implementation"
+    }
+  ]
+}

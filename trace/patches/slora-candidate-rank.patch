@@ -1,0 +1,78 @@
+From: local reproducibility audit
+Subject: [PATCH] compare candidate-rank subspaces at their actual rank
+Applies-to: SLoRA 0faf15fd6562ed3e146e8733205f59ef9742ba0f
+
+The paper's Equation (3) compares top-c bases. The public code recomputes a
+full SVD of a rank-c reconstruction and slices top-rank, introducing arbitrary
+null-space columns when c < rank. Both duplicate implementations are fixed.
+
+diff --git a/src/model/builder.py b/src/model/builder.py
+--- a/src/model/builder.py
++++ b/src/model/builder.py
+@@ -99,13 +99,11 @@
+             Sigma_c = Sigma[:c]
+             V_c = Vt[:c, :]
+ 
+-        delta_W_c = torch.mm(torch.mm(U_c, torch.diag(Sigma_c)), V_c)
+-        U_c, _, _ = torch.linalg.svd(delta_W_c, full_matrices=False)
+-        U_c_r = U_c[:, :rank]
+-
+         total_similarity = 0
+         if base_U_r is not None:
+-            similarity_base = calculate_similarity(U_c_r, base_U_r, mode, rank)
++            similarity_base = calculate_similarity(
++                U_c, base_U_r[:, :c], mode, c
++            )
+             total_similarity += similarity_base
+ 
+         if mode == 'min':
+@@ -113,13 +111,13 @@
+                 min_similarity = total_similarity
+                 best_c = c
+                 new_lora_A = V_c
+-                new_lora_B = torch.mm(U, torch.diag(Sigma_c))           
++                new_lora_B = torch.mm(U_c, torch.diag(Sigma_c))
+         else:
+             if total_similarity > max_similarity:
+                 max_similarity = total_similarity
+                 best_c = c
+                 new_lora_A = V_c
+-                new_lora_B = torch.mm(U, torch.diag(Sigma_c))
++                new_lora_B = torch.mm(U_c, torch.diag(Sigma_c))
+         print(f"Best c determined by Sim-Search: {best_c}", flush=True)
+         print(f"Max similarity: {max_similarity}", flush=True)
+     return new_lora_A, new_lora_B
+diff --git a/src/train/cl_train_slora.py b/src/train/cl_train_slora.py
+--- a/src/train/cl_train_slora.py
++++ b/src/train/cl_train_slora.py
+@@ -108,13 +108,9 @@
+             Sigma_c = Sigma[:c]
+             V_c = Vt[:c, :]
+ 
+-        delta_W_c = torch.mm(torch.mm(U_c, torch.diag(Sigma_c)), V_c)
+-        U_c, _, _ = torch.linalg.svd(delta_W_c, full_matrices=False)
+-        U_c_r = U_c[:, :rank]
+-
+         total_similarity = 0
+         if base_U_r is not None:
+-            similarity_base = calculate_similarity(U_c_r, base_U_r, mode)
++            similarity_base = calculate_similarity(U_c, base_U_r[:, :c], mode)
+             total_similarity += similarity_base
+ 
+         if mode == 'min':
+@@ -122,13 +118,13 @@
+                 min_similarity = total_similarity
+                 best_c = c
+                 new_lora_A = V_c
+-                new_lora_B = torch.mm(U, torch.diag(Sigma_c))           
++                new_lora_B = torch.mm(U_c, torch.diag(Sigma_c))
+         else:
+             if total_similarity > max_similarity:
+                 max_similarity = total_similarity
+                 best_c = c
+                 new_lora_A = V_c
+-                new_lora_B = torch.mm(U, torch.diag(Sigma_c))
++                new_lora_B = torch.mm(U_c, torch.diag(Sigma_c))
+         print(f"Best c determined by Sim-Search: {best_c}", flush=True)
+     return new_lora_A, new_lora_B
+ 

@@ -15,6 +15,17 @@ artifacts/
 *.log
 *.orig
 
+# TRACE/SLoRA unified subproject runtime artifacts
+/trace/.venv-runtime/
+/trace/.bootstrap-tools/
+/trace/.wheel-cache/
+/trace/.hf-cli/
+/trace/data/
+/trace/models/
+/trace/cache/
+/trace/results/
+/trace/logs/
+
 # Secrets and local env files
 /scripts/secret.sh
 .env
