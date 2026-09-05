@@ -1,0 +1,166 @@
+#!/usr/bin/env bash
+# Self-generated-replay continual learning over the 8 TRACE tasks.
+#
+#   round t:  [t>0] KD-init on G_{<t}  ->  1-phase train task t (real) + G_{<t} replay
+#             [t<7] regenerate tasks 0..t from model_t  ->  G_{<=t}
+#
+# Everything except the replay SOURCE is the `lm` baseline (AA 63.51 / FM 0.74):
+# same epochs, batch, lr, KD stream, expert schedule.  Replay/KD data comes from
+# generated records instead of real train indices, via the one-method patch in
+# scripts/selfgen/train_selfgen.py.
+# Resumable: a round whose checkpoint exists is skipped, likewise a finished generation.
+set -uo pipefail
+TRACE=/home/seonghyeonnoh/yemokoo/30_flame_agent/LLM-continual-learning/trace
+cd "$TRACE"
+PY=$TRACE/.venv-runtime/bin/python
+IMPL=$TRACE/implementations/llmcl_benchmark
+BASE=/data2/seonghyeonnoh/LLM-continual-learning-models/Llama-3.1-8B-Instruct
+DATA=/data2/seonghyeonnoh/LLM-continual-learning-data/flamedata2.data2-verified-backup/trace
+SG=/data2/seonghyeonnoh/LLM-continual-learning-runs/trace/selfgen_v3_20260829
+RUN=${RUN:-/data2/seonghyeonnoh/LLM-continual-learning-runs/trace/selfgen_cl_20260831}
+OUT=$RUN/model; GEN=$RUN/gen; LOG=$RUN/logs
+mkdir -p "$OUT" "$GEN" "$LOG"
+export OMP_NUM_THREADS=6 MKL_NUM_THREADS=6 TOKENIZERS_PARALLELISM=false
+TASKS=(C-STANCE FOMC MeetingBank Py150 ScienceQA NumGLUE-cm NumGLUE-ds 20Minuten)
+# token budget per task = that task's real replay memory size (measured)
+declare -A TOKBUD=( [C-STANCE]=68406 [FOMC]=37673 [MeetingBank]=1707833 [Py150]=429180
+                    [ScienceQA]=138357 [NumGLUE-cm]=24000 [NumGLUE-ds]=19345 [20Minuten]=370914 )
+declare -A CAP=( [C-STANCE]=256 [FOMC]=256 [MeetingBank]=1024 [Py150]=1024
+                 [ScienceQA]=512 [NumGLUE-cm]=256 [NumGLUE-ds]=256 [20Minuten]=1024 )
+declare -A BS=(  [C-STANCE]=256 [FOMC]=256 [MeetingBank]=128 [Py150]=128
+                 [ScienceQA]=256 [NumGLUE-cm]=256 [NumGLUE-ds]=256 [20Minuten]=128 )
+# Measured seconds to generate GEN_SEQS records on ONE card, used to spread a round
+# over the GPUs.  The token cap alone is a poor proxy: NumGLUE-cm draws from a
+# 128-word anchor histogram, so its batches are tiny and it costs far more than its
+# 256-token cap suggests, while NumGLUE-ds (7 anchors) is the cheapest task there is.
+declare -A COST=( [C-STANCE]=110 [FOMC]=90 [MeetingBank]=840 [Py150]=1064
+                  [ScienceQA]=137 [NumGLUE-cm]=1054 [NumGLUE-ds]=101 [20Minuten]=700 )
+# The trainer keeps an exact v2_new_persistent_samples_per_task (500) memory per task,
+# so only the first 500 generated records are ever used.  Generating to the task's full
+# token budget produced up to 4x more than that (MeetingBank ~2100 records for 500 used),
+# which is pure wall time.  Generate a small margin over the contract instead.
+GEN_SEQS=${GEN_SEQS:-640}
+say() { printf '[CL %s] %s\n' "$(date '+%F %T')" "$*"; }
+
+train_round() {   # t
+  local t=$1
+  local task=${TASKS[$t]}
+  [ -f "$OUT/$t/lora_moe_meta.json" ] && { say "round $t ($task): skip, checkpoint exists"; return 0; }
+  local -a resume=()
+  [ "$t" -gt 0 ] && resume=(--resume_checkpoint "$OUT/$((t-1))")
+  say "round $t ($task): train  replay<-$GEN/round_$t"
+  SELFGEN_ROOT="$GEN/round_$t" SELFGEN_CURRENT_TASK="$task" $PY -m torch.distributed.run --nproc_per_node=8 --master_port=29781 \
+    "$TRACE/scripts/selfgen/train_selfgen.py" \
+    --training_version v3_new_replay1to1 --model_name_or_path "$BASE" --data_path "$DATA" \
+    --dataset_name all --data_output_path "$RUN/data_cache" --output_dir "$OUT" \
+    --num_train_epochs 5,3,7,5,3,5,5,7 --per_device_train_batch_size 8 --gradient_accumulation_steps 1 \
+    --per_device_eval_batch_size 4 --max_prompt_len 1024 --max_ans_len 512 --max_train_len 1024 \
+    --learning_rate 2e-4 --weight_decay 0 --adam_beta1 0.9 --adam_beta2 0.999 --adam_epsilon 1e-8 \
+    --train_format slora_chat_full --lr_scheduler_type cosine --num_warmup_steps 0 --warmup_ratio 0.03 \
+    --gradient_checkpointing --experts_per_task 1 --lora_moe_rank 64 --lora_moe_alpha 128 \
+    --lora_moe_dropout 0.05 --top_k 1 --routing_weight_mode straight_through_topk \
+    --moe_aux_loss_coeff 0.01 --moe_z_loss_coeff 0.001 --seed 2025 \
+    --replay_subset_ratio 0.1 --replay_distribution equal_task --replay_recency_power 1.0 \
+    --replay_subset_seed 2025 --replay_selection_mode random \
+    --router_replay_exposure_samples 5000 --router_retune_epochs 0 \
+    --v2_memory_batch_size 0 --v2_replay_forward_batch_size 8 --v2_kd_memory_batch_size 8 \
+    --v2_max_replay_batches_per_step 0 --v2_joint_replay_loss_coeff 1.0 --v2_joint_replay_objective lm \
+    --v2_hidden_mse_loss_coeff 1.0 --v2_joint_new_to_replay_ratio 1 --v2_kd_loss_coeff 1.0 \
+    --v2_kd_pass_multiplier 1 --v2_kd_temperature 1.0 --v2_kd_learning_rate 0 \
+    --v2_kd_chunk_tokens 256 --v2_kd_token_scope nonpad --v2_new_active_memory_cap 5000 \
+    --v2_new_persistent_samples_per_task 500 --v3_epoch_probe_samples 64 \
+    --tokenized_train_cache_dir /data2/seonghyeonnoh/LLM-continual-learning-caches/llama31_8b_instruct/slora_chat_full_len1024 \
+    --disable_training_flop_counter --stop_after_task "$task" \
+    "${resume[@]}" > "$LOG/train_r$t.log" 2>&1
+  local rc=$?
+  [ -f "$OUT/$t/lora_moe_meta.json" ] || { say "round $t TRAIN FAILED rc=$rc (see $LOG/train_r$t.log)"; return 1; }
+  say "round $t ($task): train done"
+}
+
+gen_for_round() {   # produce G for the NEXT round: tasks 0..t generated from model_t
+  # NOTE: separate `local` lines -- bash expands every word on one `local` line before any
+  # assignment happens, so "$next" inside the same line is unbound under `set -u`.
+  local t=$1
+  local next=$((t+1))
+  local dest="$GEN/round_$next"
+  mkdir -p "$dest"
+  local ckpt="$OUT/$t"
+
+  # Split every task across the cards it was allotted: one task per GPU left most of
+  # them idle (a 3-task round used 3 of 8, and the tail was MeetingBank alone).
+  local -a plan=()
+  local spec=()
+  for i in $(seq 0 "$t"); do
+    local task=${TASKS[$i]}
+    [ -f "$dest/$task/records.jsonl" ] && continue
+    spec+=("$task:${COST[$task]}")
+  done
+  if [ ${#spec[@]} -eq 0 ]; then say "gen for round $next: all tasks already generated"; return 0; fi
+  mapfile -t plan < <($PY "$TRACE/scripts/selfgen/plan_gen_gpus.py" 8 "${spec[@]}")
+
+  local -a pids=()
+  for line in "${plan[@]}"; do
+    local task=${line%%$'\t'*}
+    local gpus=${line##*$'\t'}
+    local i
+    for i in $(seq 0 "$t"); do [ "${TASKS[$i]}" = "$task" ] && break; done
+    IFS=',' read -r -a G <<< "$gpus"
+    local nsh=${#G[@]}
+    local per=$(( (GEN_SEQS + nsh - 1) / nsh ))
+    say "gen $task for round $next: $nsh shard(s) on GPU $gpus, $per seqs each"
+    local k
+    for k in "${!G[@]}"; do
+      ( set -uo pipefail
+        local g=${G[$k]}
+        local sd="$dest/$task/stageA.shard$k"
+        local part="$dest/$task/records.part$k.jsonl"
+        [ -s "$part" ] && exit 0
+        if [ ! -f "$sd/stats.json" ]; then
+          local a; a=$($PY -c "import json;print(json.load(open('$SG/anchors.json'))['$i']['anchor'])")
+          local -a extra=(--prefix-text "$a")
+          case "$task" in
+            NumGLUE-cm) extra=(--prefix-text "Solve the following math problem.
+Question:
+" --prefix-histogram "$SG/anchor_hist_cm.json") ;;
+            NumGLUE-ds) extra=(--prefix-text "Solve the following math problem.
+Question:
+" --prefix-histogram "$SG/anchor_hist_ds.json") ;;
+          esac
+          CUDA_VISIBLE_DEVICES=$g $PY scripts/analysis/bos_sample_v3.py --checkpoint "$ckpt" --mode anchor \
+            "${extra[@]}" --num-seqs "$per" --max-seqs 200000 \
+            --max-new-tokens "${CAP[$task]}" --batch "${BS[$task]}" --no-routing-probe \
+            --seed $((200 + i * 17 + k)) \
+            --out-dir "$sd" --label "r${next}_${task}_s$k" > "$LOG/genA_r${next}_${task}_s$k.log" 2>&1 || exit 1
+        fi
+        CUDA_VISIBLE_DEVICES=$g $PY scripts/analysis/answer_pass_v3.py --checkpoint "$ckpt" \
+          --stage-a "$sd" --out "$part" \
+          --max-answer-tokens "${CAP[$task]}" --batch 64 > "$LOG/genB_r${next}_${task}_s$k.log" 2>&1 || exit 1
+      ) &
+      pids+=($!)
+    done
+  done
+  local rc=0
+  for p in "${pids[@]}"; do wait "$p" || rc=1; done
+  [ "$rc" = 0 ] || { say "GEN FAILED (round $next)"; return 1; }
+
+  for i in $(seq 0 "$t"); do
+    local task=${TASKS[$i]}
+    [ -f "$dest/$task/records.jsonl" ] && continue
+    cat "$dest/$task"/records.part*.jsonl > "$dest/$task/records.jsonl" 2>/dev/null
+    local n; n=$(wc -l < "$dest/$task/records.jsonl")
+    if [ "$n" -lt 500 ]; then
+      say "GEN FAILED: $task produced $n records, the trainer needs 500"; return 1
+    fi
+    say "gen round $next / $task: $n records"
+  done
+}
+
+mkdir -p "$GEN/round_0"          # round 0 has no replay
+say "START run=$RUN"
+for t in 0 1 2 3 4 5 6 7; do
+  train_round "$t" || { say "stopping at round $t"; exit 1; }
+  if [ "$t" -lt 7 ]; then
+    gen_for_round "$t" || { say "stopping: generation for round $((t+1)) failed"; exit 1; }
+  fi
+done
+say "ALL ROUNDS DONE -> $OUT"

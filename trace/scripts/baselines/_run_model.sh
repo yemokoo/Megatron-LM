@@ -114,8 +114,13 @@ case "${COMMAND}" in
       olora_upstream
       olora_corrected
       ours_lora_moe_v1
+      ours_lora_moe_v1_expert_first
       ours_lora_moe_v2
+      ours_lora_moe_v2_new
+      ours_lora_moe_v2_new_top4
       ours_lora_moe_v2_5
+      ours_lora_moe_v3
+      ours_lora_moe_v3_new_top4
       loramoe
     )
     for method in "${METHODS[@]}"; do

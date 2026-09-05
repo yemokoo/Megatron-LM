@@ -5,7 +5,7 @@
 
 | 스택 | 권장 격리 | Python / PyTorch | 핵심 이유 |
 |---|---|---|---|
-| FLAME/G2 Megatron | Conda `flame-megatron-a100` | 3.10 / 2.4.1+cu124 | Apex, TransformerEngine, grouped-gemm, flash-attn을 같은 CUDA ABI로 빌드 |
+| FLAME/G2 Megatron | Conda `flame-megatron-a100` 또는 `flame-megatron-h100` | 3.10 / 2.4.1+cu124 | Apex, TransformerEngine, grouped-gemm, flash-attn을 같은 CUDA ABI로 빌드 |
 | `trace/` SLoRA/TRACE | `trace/.venv-runtime` | 3.10 / 2.4.1+cu124 | PEFT/TRL/Transformers/DeepSpeed 버전을 FLAME과 분리 |
 
 두 환경에서 공통으로 `PYTHONNOUSERSITE=1`을 사용한다. `pip install --user`를 쓰거나
@@ -13,7 +13,7 @@
 
 ## 호스트 전제
 
-- Linux x86_64, NVIDIA A100
+- Linux x86_64, NVIDIA A100 또는 별도 검증된 H100
 - NVIDIA driver가 CUDA 12.4 런타임을 지원할 것
 - FLAME CUDA 확장 빌드용 CUDA toolkit 12.4 또는 12.5와 `nvcc`
 - GCC/G++ 11 권장
@@ -33,6 +33,16 @@ bash scripts/miscellaneous/install_a100_env.sh
 conda activate flame-megatron-a100
 source scripts/miscellaneous/activate_flame_env.sh
 python scripts/miscellaneous/verify_flame_env.py --require-gpu
+```
+
+H100에서는 환경과 CUDA extension을 A100 빌드와 분리한다. 시스템에 `nvcc`가 없으면
+설치 스크립트가 CUDA toolkit 12.4.1을 해당 Conda 환경 안에만 설치한다.
+
+```bash
+TARGET_GPU=h100 MAX_JOBS=8 bash scripts/miscellaneous/install_a100_env.sh
+conda activate flame-megatron-h100
+source scripts/miscellaneous/activate_flame_env.sh
+python scripts/miscellaneous/verify_flame_env.py --require-gpu --expected-gpu h100
 ```
 
 설치 스크립트는 다음을 한 묶음으로 구성한다.

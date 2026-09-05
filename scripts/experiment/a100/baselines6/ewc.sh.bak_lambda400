@@ -1,0 +1,14 @@
+#!/bin/bash
+set -euo pipefail
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$DIR/train_stage.sh"
+bash "$DIR/train_dense_wiki.sh"
+
+WIKI="$BASELINES6_OUTPUT_ROOT/common_dense/wiki"
+CODE="$BASELINES6_OUTPUT_ROOT/ewc/code"
+CONV="$BASELINES6_OUTPUT_ROOT/ewc/conversation"
+MB="$(method_micro_batch ewc)"
+run_baselines6_stage ewc code "$CODE" "$WIKI" "$(state_dir "$WIKI" ewc)" "$MB" 29711 \
+    --continual-ewc-lambda "${EWC_LAMBDA:-400}"
+run_baselines6_stage ewc conversation "$CONV" "$CODE" "$(state_dir "$CODE" ewc)" "$MB" 29712 \
+    --continual-ewc-lambda "${EWC_LAMBDA:-400}"

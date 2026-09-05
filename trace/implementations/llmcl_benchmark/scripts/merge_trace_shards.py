@@ -6,6 +6,11 @@ import json
 import os
 import sys
 
+# rouge's summary-level LCS reconstruction is recursive.  Shard workers raise
+# this limit before scoring, so the independent merge/scoring process must use
+# the same protection for long max_new=1024 continuations.
+sys.setrecursionlimit(max(sys.getrecursionlimit(), 10000))
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from vllm_eval import TRACE_SCORING_PROTOCOL, normalize_predictions, score
@@ -17,6 +22,7 @@ def parse_args():
     parser.add_argument("--task", required=True)
     parser.add_argument("--num_shards", type=int, required=True)
     parser.add_argument("--with_sari", action="store_true")
+    parser.add_argument("--summary_filename", default="summary.json")
     return parser.parse_args()
 
 
@@ -72,7 +78,7 @@ def main():
     with open(output_path, "w", encoding="utf-8") as handle:
         json.dump(output, handle, ensure_ascii=False)
 
-    summary_path = os.path.join(args.input_dir, "summary.json")
+    summary_path = os.path.join(args.input_dir, args.summary_filename)
     summary = {}
     if os.path.isfile(summary_path):
         with open(summary_path, "r", encoding="utf-8") as handle:

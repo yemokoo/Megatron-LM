@@ -5,8 +5,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 OURS_ROOT="${OURS_LORAMOE_ROOT:-${ROOT}/implementations/llmcl_benchmark}"
 PYTHON_BIN="${OURS_LORAMOE_PYTHON:-${TRACE_PYTHON:-${ROOT}/.venv-runtime/bin/python}}"
 DATA_ROOT="${TRACE_DATA_ROOT:-${ROOT}/data/trace}"
-MODEL_PATH="${SLORA_LLAMA31_PATH:-${ROOT}/models/Llama-3.1-8B-Instruct}"
-CACHE_ROOT="${OURS_LLAMA31_TOKEN_CACHE:-${ROOT}/cache/tokenized/llama31_8b/slora_chat_full_len1024}"
+MODEL_PATH="${SLORA_LLAMA31_PATH:?export SLORA_LLAMA31_PATH (Llama-3.1-8B-Instruct)}"
+CACHE_ROOT="${OURS_LLAMA31_TOKEN_CACHE:-${ROOT}/cache/tokenized/llama31_8b_base/slora_chat_full_len1024}"
 REPLAY_MANIFEST="${OURS_REPLAY_MANIFEST:-${ROOT}/manifests/replay/trace_seed2025_random50_per_task.json}"
 
 export HF_HUB_OFFLINE=1

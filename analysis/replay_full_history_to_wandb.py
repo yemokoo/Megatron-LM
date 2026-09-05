@@ -82,14 +82,51 @@ def history_to_step_payloads(
     return dict(sorted(payloads.items()))
 
 
-def parse_probe_history(log_file: Path) -> dict[int, dict[str, float]]:
+def iteration_axis_history(
+    history: dict[str, list[tuple[int, float, float]]],
+) -> dict[str, list[tuple[int, float, float]]]:
+    """Keep TensorBoard series whose event step is the train iteration.
+
+    Megatron writes a duplicate ``"... vs samples"`` series at
+    ``consumed_train_samples``.  Replaying both axes into one W&B run advances
+    W&B's monotonic internal step to millions and makes the next iteration-
+    axis stage (for example step 1801) get discarded as out of order.
+    """
+    return {
+        tag: events
+        for tag, events in history.items()
+        if not tag.endswith(" vs samples")
+    }
+
+
+def without_metric_keys(
+    history: dict[str, list[tuple[int, float, float]]],
+    keys: set[str],
+) -> dict[str, list[tuple[int, float, float]]]:
+    """Remove series that will be rebuilt from an authoritative text log."""
+    return {tag: events for tag, events in history.items() if tag not in keys}
+
+
+def payload_metric_keys(payloads: dict[int, dict[str, float]]) -> set[str]:
+    return {
+        key
+        for payload in payloads.values()
+        for key in payload
+    }
+
+
+def parse_probe_history(
+    log_file: Path,
+    *,
+    step_source: str = "logged",
+) -> dict[int, dict[str, float]]:
     payloads = defaultdict(dict)
     with log_file.open("r", encoding="utf-8", errors="replace") as handle:
         for raw_line in handle:
             match = PROBE_LINE_RE.search(raw_line)
             if match is None:
                 continue
-            step = int(match.group("step"))
+            step = int(match.group("local_step" if step_source == "local" else "step"))
             probe_name = match.group("name")
             payloads[step][f"{probe_name}/next_token_accuracy"] = float(match.group("acc"))
             payloads[step][f"{probe_name}/ppl"] = float(match.group("ppl"))
@@ -168,6 +205,20 @@ def main():
     parser.add_argument("--save-dir", type=Path)
     parser.add_argument("--mode", default="online", choices=["online", "offline"])
     parser.add_argument("--baseline-step", type=int, help="Step at which source baseline values should be inserted.")
+    parser.add_argument(
+        "--probe-step-source",
+        default="logged",
+        choices=["logged", "local"],
+        help="Use the printed offset step or local_iteration when replaying probe metrics.",
+    )
+    parser.add_argument(
+        "--iteration-axis-only",
+        action="store_true",
+        help=(
+            "Drop TensorBoard '* vs samples' series so W&B's monotonic step "
+            "remains on the train-iteration axis."
+        ),
+    )
     args = parser.parse_args()
 
     standalone_mode = args.run_dir is not None
@@ -191,15 +242,33 @@ def main():
         init_kwargs["dir"] = str(args.save_dir)
 
     if standalone_mode:
-        payloads = history_to_step_payloads(load_scalar_history(args.run_dir))
+        history = load_scalar_history(args.run_dir)
+        if args.iteration_axis_only:
+            history = iteration_axis_history(history)
         if args.continual_log is not None:
-            payloads = merge_payloads(payloads, parse_probe_history(args.continual_log))
+            probe_payloads = parse_probe_history(
+                args.continual_log, step_source=args.probe_step_source
+            )
+            # TensorBoard probe series can use the source checkpoint's global
+            # iteration while the parsed log explicitly provides the desired
+            # local/stitched step.  Keep only the authoritative copy.
+            history = without_metric_keys(
+                history, payload_metric_keys(probe_payloads)
+            )
+        payloads = history_to_step_payloads(history)
+        if args.continual_log is not None:
+            payloads = merge_payloads(
+                payloads,
+                probe_payloads,
+            )
     else:
         source_history = load_scalar_history(args.source_run_dir)
         continual_history = load_scalar_history(args.continual_run_dir)
         payloads = {args.baseline_step: payload_at_or_before_step(source_history, args.baseline_step)}
         if args.source_log is not None:
-            source_probe_history = parse_probe_history(args.source_log)
+            source_probe_history = parse_probe_history(
+                args.source_log, step_source=args.probe_step_source
+            )
             payloads[args.baseline_step].update(
                 collapse_probe_payload_at_or_before_step(source_probe_history, args.baseline_step)
             )
@@ -211,7 +280,9 @@ def main():
         payloads = merge_payloads(payloads, continual_payloads)
         if args.continual_log is not None:
             continual_probe_payloads = filter_payloads_at_or_after_step(
-                parse_probe_history(args.continual_log),
+                parse_probe_history(
+                    args.continual_log, step_source=args.probe_step_source
+                ),
                 args.baseline_step,
             )
             payloads = merge_payloads_preserve_existing_keys(

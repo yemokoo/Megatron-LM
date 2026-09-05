@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 from tqdm import tqdm
 
@@ -20,6 +21,8 @@ from trl import (
 
 from src.model.builder import load_denoised_lora
 from src.trace_data import to_sft_messages
+from src.train.joint_replay_trainer import JointReplaySFTTrainer
+from src.train.replay_memory import build_replay_dataset
 
 local_rank = None
 
@@ -34,6 +37,13 @@ class ScriptArguments(ScriptArguments):
     val_data_path: str = field(metadata={"help": "Path to the validation data."}, default=None)
     task_id: int = field(default=0)
     mode: str = field(default='max', metadata={"help": "Mode for denoising."})
+    # Replay control.  Absent these, training is the released SLoRA-Pre run.
+    replay_v3_run_dir: str = field(default=None, metadata={"help":
+        "v3 run directory holding fixed_replay_memory/ and replay_plans/; "
+        "enables joint replay when set."})
+    replay_data_root: str = field(default=None, metadata={"help":
+        "TRACE data root the stored replay indices point into."})
+    replay_loss_coeff: float = field(default=1.0)
 
 @dataclass
 class ModelArguments(ModelConfig):
@@ -291,13 +301,43 @@ def train_continual_learning():
     ################
     # Training
     ################
-    trainer = SFTTrainer(
+    ################
+    # Replay (optional): the same stored records a v3 run replayed at this
+    # round, but its gradient reaches the whole new LoRA instead of routers.
+    ################
+    replay_data = None
+    if script_args.replay_v3_run_dir and task_id > 1:
+        if not script_args.replay_data_root:
+            raise ValueError(
+                "--replay_data_root is required with --replay_v3_run_dir")
+        replay_data, replay_manifest = build_replay_dataset(
+            script_args.replay_v3_run_dir, script_args.replay_data_root,
+            task_id, num_proc=training_args.dataset_num_proc)
+        rank0_print(f"[replay] {json.dumps(replay_manifest)}")
+        if local_rank == 0:
+            # SFTTrainer creates output_dir later; the manifest is written here
+            # so a failed run still records what it was fed.
+            os.makedirs(training_args.output_dir, exist_ok=True)
+            with open(os.path.join(
+                    training_args.output_dir, "replay_manifest.json"),
+                    "w") as handle:
+                json.dump(replay_manifest, handle, indent=2)
+    elif script_args.replay_v3_run_dir:
+        rank0_print("[replay] task 1 has no past tasks; primary only")
+
+    trainer_class = SFTTrainer if replay_data is None else JointReplaySFTTrainer
+    trainer_kwargs = {} if replay_data is None else {
+        "replay_dataset": replay_data,
+        "replay_coeff": script_args.replay_loss_coeff,
+    }
+    trainer = trainer_class(
         model=model,
         args=training_args,
         train_dataset=train_data,
         eval_dataset=eval_data,
         processing_class=tokenizer,
         peft_config=get_peft_config(model_config),
+        **trainer_kwargs,
     )
 
     trainer.train()
@@ -309,6 +349,11 @@ def train_continual_learning():
     ################
     # After Training - Denoising
     ################
+    if os.environ.get("SLORA_SKIP_DENOISE") == "1":
+        # Smoke tests train a handful of steps; the randomized SVD over 224
+        # modules afterwards is the slow part and proves nothing about replay.
+        rank0_print("[smoke] SLORA_SKIP_DENOISE=1; skipping denoising")
+        return
     if training_args.local_rank == 0:
         rank0_print(f"Pruning LoRA weights after task {task_id}...")
     distributed_denoising(

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import os
 import subprocess
 import sys
 from importlib import metadata
@@ -14,8 +15,12 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 MODEL_PATHS = {
-    "llama31": ROOT / "models" / "Llama-3.1-8B-Instruct",
-    "qwen25_7b": ROOT / "models" / "Qwen2.5-7B-Instruct",
+    "llama31": Path(
+        os.environ.get("SLORA_LLAMA31_PATH", ROOT / "models" / "Llama-3.1-8B-Instruct")
+    ),
+    "qwen25_7b": Path(
+        os.environ.get("SLORA_QWEN25_7B_PATH", ROOT / "models" / "Qwen2.5-7B-Instruct")
+    ),
 }
 EXPECTED = {
     "torch": "2.4.1",

@@ -10,8 +10,13 @@ gem_corrected	TRACE	runnable	implementations/TRACE-repro	감사된 GEM 제약·�
 olora_upstream	TRACE	runnable-audit	implementations/TRACE-repro	TRACE A/L1 penalty 포트
 olora_corrected	TRACE	runnable	implementations/TRACE-repro	B/Frobenius-squared 수정본
 ours_lora_moe_v1	Ours-LoRAMoE	runnable	implementations/llmcl_benchmark	naive 2-phase: 신규 expert+router 학습 후 별도 router replay
+ours_lora_moe_v1_expert_first	Ours-LoRAMoE	runnable	implementations/llmcl_benchmark	V2-new KD-init 후 신규 expert full-token 단독 학습, 이후 seen-memory router-only FT
 ours_lora_moe_v2	Ours-LoRAMoE	runnable	implementations/llmcl_benchmark	KD-init + 매 step new(new expert+router)/past(router-only) joint gradient
+ours_lora_moe_v2_new	Ours-LoRAMoE	runnable	implementations/llmcl_benchmark	V2 + task당 deterministic 500 저장, nested active-1000을 KD/replay에 primary epoch마다 1회 사용
+ours_lora_moe_v2_new_top4	Ours-LoRAMoE	runnable	implementations/llmcl_benchmark	V2-new memory/KD/1-phase + task당 rank-16 FFN expert 4개 성장 및 normalized top-4 routing
 ours_lora_moe_v2_5	Ours-LoRAMoE	runnable	implementations/llmcl_benchmark	v2와 동일, router aux loss와 z-loss만 제거
+ours_lora_moe_v3	Ours-LoRAMoE	runnable	implementations/llmcl_benchmark	v2 KD/replay + attention 직전 shared router로 동일-rank QKVO/FFN expert 공동 routing
+ours_lora_moe_v3_new_top4	Ours-LoRAMoE	runnable	implementations/llmcl_benchmark	V3-new shared QKVO/FFN routing + task당 rank-16 expert 4개 성장, normalized top-4, KD pass multiplier 2
 loramoe	LoRAMoE	runnable-port	implementations/llmcl_benchmark	SLoRA 설정에 맞춘 로컬 FFN LoRA-MoE 호환 포트
 sd_lora	SLoRA	unavailable	-	공개 SLoRA 저장소에 실행 코드 없음
 rcl	SLoRA	unavailable	-	공개 SLoRA 저장소에 실행 코드 없음

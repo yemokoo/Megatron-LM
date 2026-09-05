@@ -15,7 +15,9 @@ export LOCAL_BASE="${LOCAL_BASE:-$PROJECT_ROOT/.local}"
 export LOCAL_DATASET="${LOCAL_DATASET:-$LOCAL_BASE/dataset}"
 export LOCAL_WEIGHTS="${LOCAL_WEIGHTS:-$LOCAL_BASE/weights}"
 export LOCAL_SSD_ROOT="${LOCAL_SSD_ROOT:-/tmp/flame-moe}"
-export DIRECT_LOCAL_SAVE="${DIRECT_LOCAL_SAVE:-0}"
+export STAGE_INPUTS_TO_SCRATCH="${STAGE_INPUTS_TO_SCRATCH:-0}"
+export DIRECT_LOCAL_SAVE="${DIRECT_LOCAL_SAVE:-1}"
+export STORAGE_PLAN_ONLY="${STORAGE_PLAN_ONLY:-0}"
 
 export SSD_MOUNT="${LOCAL_SSD_ROOT}/${RUN_ID}"
 export SSD_TRAIN_DATASET="${SSD_MOUNT}/dataset/train"
@@ -84,11 +86,25 @@ export STAGE_NAME="${STAGE_NAME:-$TASK_LABEL}"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
 export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=true
 
-if [ "$DIRECT_LOCAL_SAVE" = "1" ]; then
+case "$STAGE_INPUTS_TO_SCRATCH" in 0|1) ;; *) echo "ERROR: STAGE_INPUTS_TO_SCRATCH must be 0 or 1" >&2; exit 1 ;; esac
+case "$DIRECT_LOCAL_SAVE" in 0|1) ;; *) echo "ERROR: DIRECT_LOCAL_SAVE must be 0 or 1" >&2; exit 1 ;; esac
+
+if [ "$STAGE_INPUTS_TO_SCRATCH" = "0" ]; then
+    # The persistent inputs already live on /data2. Read them in place instead
+    # of making another copy on the same filesystem.
+    export SSD_TRAIN_DATASET="$TRAIN_DATASET"
+    export SSD_WEIGHTS="$TRAIN_WEIGHTS"
+elif [ "$DIRECT_LOCAL_SAVE" = "1" ]; then
     export SSD_WEIGHTS="$TRAIN_WEIGHTS"
 fi
 
+[[ -d "$TRAIN_DATASET" ]] || { echo "ERROR: training dataset missing: $TRAIN_DATASET" >&2; exit 1; }
 mkdir -p "$SSD_TRAIN_DATASET" "$SSD_WEIGHTS" "$TRAIN_WEIGHTS" "$LOG_DIR"
+if [ "$STORAGE_PLAN_ONLY" = "1" ]; then
+    printf 'STAGE_INPUTS_TO_SCRATCH=%s\nDATASET=%s\nSAVE=%s\n' \
+        "$STAGE_INPUTS_TO_SCRATCH" "$SSD_TRAIN_DATASET" "$SSD_WEIGHTS"
+    exit 0
+fi
 
 GPU_LOG_PID=""
 SYNC_DONE=0
@@ -171,7 +187,11 @@ for line in sys.stdin:
 echo "a100 bf16 run log: $RUN_LOG"
 echo "a100 bf16 gpu log: $GPU_LOG"
 echo "a100 bf16 metadata: $RUN_METADATA"
-rsync -rlptD --info=progress2 "$TRAIN_DATASET/" "$SSD_TRAIN_DATASET/"
+if [ "$STAGE_INPUTS_TO_SCRATCH" = "1" ]; then
+    rsync -rlptD --info=progress2 "$TRAIN_DATASET/" "$SSD_TRAIN_DATASET/"
+else
+    echo "a100 bf16 input staging: disabled (dataset=$TRAIN_DATASET)"
+fi
 
 write_base_metadata
 source "$MODEL_CONFIG_SCRIPT"

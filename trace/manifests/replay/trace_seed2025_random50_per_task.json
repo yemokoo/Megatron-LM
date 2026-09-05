@@ -16,7 +16,7 @@
   "tasks": {
     "C-STANCE": {
       "task_index": 0,
-      "source_path": "data/trace/C-STANCE/train.json",
+      "source_path": "/data3/seonghyeonnoh/LLM-continual-learning-data/flamedata2/trace/C-STANCE/train.json",
       "source_sha256": "a67441f42a1c6e346868c969c05ffb7969425e0e89c36e4e3c5f757489437d46",
       "source_samples": 5000,
       "seed": 2025,
@@ -76,7 +76,7 @@
     },
     "FOMC": {
       "task_index": 1,
-      "source_path": "data/trace/FOMC/train.json",
+      "source_path": "/data3/seonghyeonnoh/LLM-continual-learning-data/flamedata2/trace/FOMC/train.json",
       "source_sha256": "0b27cfac6d0f209a5758e88ead315e4734b95f6e926d78903ae299aea3185a0e",
       "source_samples": 5000,
       "seed": 3034,
@@ -136,7 +136,7 @@
     },
     "MeetingBank": {
       "task_index": 2,
-      "source_path": "data/trace/MeetingBank/train.json",
+      "source_path": "/data3/seonghyeonnoh/LLM-continual-learning-data/flamedata2/trace/MeetingBank/train.json",
       "source_sha256": "1157e590ba5f2dfb845a993fb7ee7b87adfb6fcad8eaedb67a8259cfd28d1134",
       "source_samples": 5000,
       "seed": 4043,
@@ -196,7 +196,7 @@
     },
     "Py150": {
       "task_index": 3,
-      "source_path": "data/trace/Py150/train.json",
+      "source_path": "/data3/seonghyeonnoh/LLM-continual-learning-data/flamedata2/trace/Py150/train.json",
       "source_sha256": "315b14e628ae95ffbfda3e778e77004bdcab2c79c2e462700dffaa42bf0ebdbf",
       "source_samples": 5000,
       "seed": 5052,
@@ -256,7 +256,7 @@
     },
     "ScienceQA": {
       "task_index": 4,
-      "source_path": "data/trace/ScienceQA/train.json",
+      "source_path": "/data3/seonghyeonnoh/LLM-continual-learning-data/flamedata2/trace/ScienceQA/train.json",
       "source_sha256": "6f74c8433ec1c3d83f97e45a76f8d1ff59006d7e2f8112523a21d97d90400dcf",
       "source_samples": 5000,
       "seed": 6061,
@@ -316,7 +316,7 @@
     },
     "NumGLUE-cm": {
       "task_index": 5,
-      "source_path": "data/trace/NumGLUE-cm/train.json",
+      "source_path": "/data3/seonghyeonnoh/LLM-continual-learning-data/flamedata2/trace/NumGLUE-cm/train.json",
       "source_sha256": "cc14f25cd7b768efe0697e42ceafd24d8b1c8770f4aac5f8bc32abbafa977f49",
       "source_samples": 5000,
       "seed": 7070,
@@ -376,7 +376,7 @@
     },
     "NumGLUE-ds": {
       "task_index": 6,
-      "source_path": "data/trace/NumGLUE-ds/train.json",
+      "source_path": "/data3/seonghyeonnoh/LLM-continual-learning-data/flamedata2/trace/NumGLUE-ds/train.json",
       "source_sha256": "1d3fe0a38267fa3c3c9fdd42653dbedb90ddbf7fe05e9b78f9f3c0d6d6dc3654",
       "source_samples": 5000,
       "seed": 8079,
@@ -436,7 +436,7 @@
     },
     "20Minuten": {
       "task_index": 7,
-      "source_path": "data/trace/20Minuten/train.json",
+      "source_path": "/data3/seonghyeonnoh/LLM-continual-learning-data/flamedata2/trace/20Minuten/train.json",
       "source_sha256": "605ae27c447168c91f7f4fa071be06975b1b12e2a910ed7320ea7b274ae1ef18",
       "source_samples": 5000,
       "seed": 9088,

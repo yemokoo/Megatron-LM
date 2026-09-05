@@ -1,8 +1,11 @@
-# Llama-3.1-8B-Instruct 베이스라인
+# Llama-3.1-8B 베이스라인
 
-이 폴더의 모든 실행 파일은 다음 모델로 고정된다.
+Ours LoRA-MoE V1/V2/V2-new/V2-new-top4/V2.5/V3는 모두 다음 base 모델로 고정된다.
 
-`trace/models/Llama-3.1-8B-Instruct`
+`trace/models/Llama-3.1-8B`
+
+Instruct 모델을 사용하지 않는다. 다른 upstream baseline launcher의 모델
+경로는 각 구현의 재현 설정에서 별도로 관리한다.
 
 ```bash
 cd LLM-continual-learning/trace
@@ -14,6 +17,7 @@ cd LLM-continual-learning/trace
 ./scripts/baselines/llama31/loramoe.sh train
 ./scripts/baselines/llama31/ours_lora_moe_v1.sh validate
 ./scripts/baselines/llama31/ours_lora_moe_v2.sh train
+./scripts/baselines/llama31/ours_lora_moe_v2_new_top4.sh train
 ./scripts/baselines/llama31/suite.sh validate
 ```
 

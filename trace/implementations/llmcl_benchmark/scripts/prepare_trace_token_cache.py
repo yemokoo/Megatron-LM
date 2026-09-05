@@ -17,6 +17,10 @@ from transformers import AutoTokenizer
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+from utils.chat_templates import (  # noqa: E402
+    ensure_llama31_chat_template,
+    update_fingerprint_for_chat_template,
+)
 from utils.data.data_collator import (  # noqa: E402
     PreTokenizedSLoRATraceDataCollator,
     SLoRATraceDataCollator,
@@ -64,6 +68,10 @@ def tokenizer_source_fingerprint(model_path):
                     digest.update(chunk)
     if not found:
         raise FileNotFoundError(f"no tokenizer assets found under {model_path}")
+    tokenizer_config_path = os.path.join(model_path, "tokenizer_config.json")
+    if os.path.isfile(tokenizer_config_path):
+        with open(tokenizer_config_path, encoding="utf-8") as handle:
+            update_fingerprint_for_chat_template(digest, json.load(handle))
     return digest.hexdigest()
 
 
@@ -207,6 +215,8 @@ def main():
             raise ValueError("missing non-Llama pad token")
         tokenizer.pad_token = "<|finetune_right_pad_id|>"
         tokenizer.pad_token_id = 128004
+    chat_template_source = ensure_llama31_chat_template(
+        tokenizer, args.model_path)
     tokenizer.padding_side = "right"
     tokenizer.truncation_side = "right"
 
@@ -217,6 +227,7 @@ def main():
         "padding": "dynamic_right",
         "max_length": args.max_length,
         "system_prompt": SYSTEM_PROMPT,
+        "chat_template_source": chat_template_source,
         "model_path": str(Path(args.model_path).resolve()),
         "tokenizer_fingerprint": tokenizer_source_fingerprint(args.model_path),
         "replay_manifest": str(Path(args.replay_manifest).resolve()),

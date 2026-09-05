@@ -65,6 +65,9 @@ export MASTER_PORT="${MASTER_PORT:-29570}"
 export LOCAL_BASE="${LOCAL_BASE:-$PROJECT_ROOT/.local}"
 export LOCAL_WEIGHTS="${LOCAL_WEIGHTS:-$LOCAL_BASE/weights}"
 export LOCAL_SSD_ROOT="${LOCAL_SSD_ROOT:-/tmp/flame-moe}"
+export STAGE_INPUTS_TO_SCRATCH="${STAGE_INPUTS_TO_SCRATCH:-0}"
+export DIRECT_LOCAL_SAVE="${DIRECT_LOCAL_SAVE:-1}"
+export STORAGE_PLAN_ONLY="${STORAGE_PLAN_ONLY:-0}"
 
 export SSD_MOUNT="${LOCAL_SSD_ROOT}/${RUN_ID}"
 export SSD_DATA_ROOT="${SSD_MOUNT}/dataset"
@@ -150,7 +153,17 @@ export WANDB_SAVE_DIR="${WANDB_SAVE_DIR:-$TRAIN_WEIGHTS/wandb}"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
 export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=true
 
-mkdir -p "$SSD_DATA_ROOT" "$SSD_WEIGHTS" "$TRAIN_WEIGHTS" "$LOG_DIR"
+case "$STAGE_INPUTS_TO_SCRATCH" in 0|1) ;; *) echo "ERROR: STAGE_INPUTS_TO_SCRATCH must be 0 or 1" >&2; exit 1 ;; esac
+case "$DIRECT_LOCAL_SAVE" in 0|1) ;; *) echo "ERROR: DIRECT_LOCAL_SAVE must be 0 or 1" >&2; exit 1 ;; esac
+if [ "$STAGE_INPUTS_TO_SCRATCH" = "0" ] || [ "$DIRECT_LOCAL_SAVE" = "1" ]; then
+    export SSD_WEIGHTS="$TRAIN_WEIGHTS"
+fi
+if [ "$STAGE_INPUTS_TO_SCRATCH" = "0" ]; then
+    export SSD_SOURCE_WEIGHTS="$STAGE_SOURCE_WEIGHTS"
+else
+    mkdir -p "$SSD_DATA_ROOT"
+fi
+mkdir -p "$SSD_WEIGHTS" "$TRAIN_WEIGHTS" "$LOG_DIR"
 exec > >(tee -a "$RUN_LOG") 2>&1
 
 echo "mixed nway run log: $RUN_LOG"
@@ -158,14 +171,19 @@ echo "mixed nway metadata: $RUN_METADATA"
 echo "mixed nway datasets: $MIXED_TRAIN_DATASETS"
 echo "mixed nway source ckpt: ${STAGE_SOURCE_WEIGHTS:-<from scratch>}"
 
-# --- stage the (variable-length) list of train datasets onto local SSD ---
+# --- resolve the variable-length list of train datasets ---
 SSD_TRAIN_DIRS=()
 i=0
 for src in $MIXED_TRAIN_DATASETS; do
-    dst="$SSD_DATA_ROOT/ds${i}"
-    mkdir -p "$dst"
-    rsync -rlptD --info=progress2 "$src/" "$dst/"
-    SSD_TRAIN_DIRS+=("$dst")
+    [[ -d "$src" ]] || { echo "ERROR: mixed training dataset missing: $src" >&2; exit 1; }
+    if [ "$STAGE_INPUTS_TO_SCRATCH" = "1" ]; then
+        dst="$SSD_DATA_ROOT/ds${i}"
+        mkdir -p "$dst"
+        rsync -rlptD --info=progress2 "$src/" "$dst/"
+        SSD_TRAIN_DIRS+=("$dst")
+    else
+        SSD_TRAIN_DIRS+=("$src")
+    fi
     i=$((i + 1))
 done
 
@@ -176,13 +194,15 @@ done
 RESUME_OWN_PROGRESS=0
 if [ -f "$TRAIN_WEIGHTS/latest_checkpointed_iteration.txt" ]; then
     echo "mixed nway: found own in-progress checkpoint at $TRAIN_WEIGHTS, resuming from it (not restarting this stage from source)"
-    mkdir -p "$SSD_WEIGHTS"
-    rsync -rlptD \
-        --exclude 'logs/' \
-        --exclude 'wandb/' \
-        --exclude 'events.out.tfevents*' \
-        --exclude 'progress.txt' \
-        "$TRAIN_WEIGHTS/" "$SSD_WEIGHTS/"
+    if [ "$SSD_WEIGHTS" != "$TRAIN_WEIGHTS" ]; then
+        mkdir -p "$SSD_WEIGHTS"
+        rsync -rlptD \
+            --exclude 'logs/' \
+            --exclude 'wandb/' \
+            --exclude 'events.out.tfevents*' \
+            --exclude 'progress.txt' \
+            "$TRAIN_WEIGHTS/" "$SSD_WEIGHTS/"
+    fi
     RESUME_OWN_PROGRESS=1
 fi
 
@@ -193,13 +213,15 @@ if [ "$RESUME_OWN_PROGRESS" = "1" ]; then
     LOAD_ARGS=(--load "$SSD_WEIGHTS")
 elif [ -n "$STAGE_SOURCE_WEIGHTS" ]; then
     echo "continuing from source checkpoint: $STAGE_SOURCE_WEIGHTS"
-    mkdir -p "$SSD_SOURCE_WEIGHTS"
-    rsync -rlptD \
-        --exclude 'logs/' \
-        --exclude 'wandb/' \
-        --exclude 'events.out.tfevents*' \
-        --exclude 'progress.txt' \
-        "$STAGE_SOURCE_WEIGHTS/" "$SSD_SOURCE_WEIGHTS/"
+    if [ "$STAGE_INPUTS_TO_SCRATCH" = "1" ]; then
+        mkdir -p "$SSD_SOURCE_WEIGHTS"
+        rsync -rlptD \
+            --exclude 'logs/' \
+            --exclude 'wandb/' \
+            --exclude 'events.out.tfevents*' \
+            --exclude 'progress.txt' \
+            "$STAGE_SOURCE_WEIGHTS/" "$SSD_SOURCE_WEIGHTS/"
+    fi
     # finetune: load model weights only, reset iteration to 0, fresh WSD + optimizer.
     LOAD_ARGS=(
         --load "$SSD_SOURCE_WEIGHTS"
@@ -210,6 +232,12 @@ elif [ -n "$STAGE_SOURCE_WEIGHTS" ]; then
 else
     # from scratch, no prior progress.
     LOAD_ARGS=(--load "$SSD_WEIGHTS")
+fi
+
+if [ "$STORAGE_PLAN_ONLY" = "1" ]; then
+    printf 'STAGE_INPUTS_TO_SCRATCH=%s\nDATASETS=%s\nSOURCE=%s\nSAVE=%s\n' \
+        "$STAGE_INPUTS_TO_SCRATCH" "${SSD_TRAIN_DIRS[*]}" "${SSD_SOURCE_WEIGHTS:-}" "$SSD_WEIGHTS"
+    exit 0
 fi
 
 "$PYTHON_BIN" - "${SSD_TRAIN_DIRS[@]}" <<'PY'
@@ -344,12 +372,14 @@ GPU_LOG_PID=$!
     "${DATA_ARGS[@]}" "${SAVE_ARGS[@]}" "${PROBE_ARGS[@]}" "${WANDB_ARGS[@]}" &
 TORCHRUN_PID=$!
 
-(
-    while kill -0 "$TORCHRUN_PID" 2>/dev/null; do
-        rsync -rlptD "$SSD_WEIGHTS/" "$TRAIN_WEIGHTS/"
-        sleep 15m
-    done
-) &
+if [ "$SSD_WEIGHTS" != "$TRAIN_WEIGHTS" ]; then
+    (
+        while kill -0 "$TORCHRUN_PID" 2>/dev/null; do
+            rsync -rlptD "$SSD_WEIGHTS/" "$TRAIN_WEIGHTS/"
+            sleep 15m
+        done
+    ) &
+fi
 
 set +e
 wait "$TORCHRUN_PID"
@@ -359,7 +389,9 @@ kill "$GPU_LOG_PID" 2>/dev/null || true
 # Always flush to persistent storage, even on crash (e.g. OOM), so a rerun can
 # resume from the latest checkpoint instead of losing progress since the last
 # periodic (15-minute) rsync.
-rsync -rlptD "$SSD_WEIGHTS/" "$TRAIN_WEIGHTS/"
+if [ "$SSD_WEIGHTS" != "$TRAIN_WEIGHTS" ]; then
+    rsync -rlptD "$SSD_WEIGHTS/" "$TRAIN_WEIGHTS/"
+fi
 
 if [ "$TORCHRUN_EXIT" -ne 0 ]; then
     echo "[FAIL] mixed nway pretrain exited with code $TORCHRUN_EXIT; checkpoint flushed to $TRAIN_WEIGHTS for resume"

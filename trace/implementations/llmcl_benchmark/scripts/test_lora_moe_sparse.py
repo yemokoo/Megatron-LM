@@ -31,8 +31,17 @@ def dense_reference(module, value):
     up = module.base_mlp.up_proj(value)
     logits = module.router(value).reshape(-1, module.num_experts)
     topk_value, topk_index = logits.topk(module.top_k, dim=-1)
-    if module.routing_weight_mode == "full_softmax":
-        topk_weight = F.softmax(logits, dim=-1).gather(-1, topk_index)
+    if module.routing_weight_mode in {
+            "full_softmax", "straight_through_topk"}:
+        selected_probs = F.softmax(
+            logits, dim=-1).gather(-1, topk_index)
+        if module.routing_weight_mode == "straight_through_topk":
+            normalized = F.softmax(topk_value, dim=-1)
+            topk_weight = (
+                normalized.detach() + selected_probs
+                - selected_probs.detach())
+        else:
+            topk_weight = selected_probs
     else:
         topk_weight = F.softmax(topk_value, dim=-1)
 
@@ -167,22 +176,28 @@ def padding_mask_audit():
 
 
 def main():
-    for mode in ("topk_softmax", "full_softmax"):
+    for mode in (
+            "topk_softmax", "full_softmax", "straight_through_topk"):
         run_case(top_k=1, routing_weight_mode=mode)
         run_case(top_k=2, routing_weight_mode=mode)
     print("LORA_MOE_SPARSE_EQUIVALENCE=PASS")
     legacy_top1 = lm_router_gradient_norm(1, "topk_softmax")
     full_top1 = lm_router_gradient_norm(1, "full_softmax")
     full_top2 = lm_router_gradient_norm(2, "full_softmax")
-    if legacy_top1 != 0.0 or full_top1 <= 0.0 or full_top2 <= 0.0:
+    st_top1 = lm_router_gradient_norm(1, "straight_through_topk")
+    st_top2 = lm_router_gradient_norm(2, "straight_through_topk")
+    if (legacy_top1 != 0.0 or full_top1 <= 0.0 or full_top2 <= 0.0
+            or st_top1 <= 0.0 or st_top2 <= 0.0):
         raise AssertionError(
             "unexpected LM-only router gradients: "
             f"legacy_top1={legacy_top1}, full_top1={full_top1}, "
-            f"full_top2={full_top2}")
+            f"full_top2={full_top2}, st_top1={st_top1}, "
+            f"st_top2={st_top2}")
     print(
         "LORA_ROUTER_LM_GRAD_AUDIT=PASS "
         f"legacy_top1={legacy_top1:.3g} full_top1={full_top1:.3g} "
-        f"full_top2={full_top2:.3g}")
+        f"full_top2={full_top2:.3g} st_top1={st_top1:.3g} "
+        f"st_top2={st_top2:.3g}")
     padding_mask_audit()
     print("LORA_ROUTER_PADDING_MASK=PASS")
 

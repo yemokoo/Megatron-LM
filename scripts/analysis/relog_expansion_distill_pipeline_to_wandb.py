@@ -35,6 +35,25 @@ METRIC_PATTERNS = {
     "kd loss": re.compile(r"\bkd loss\s*:?\s*([0-9.eE+-]+)"),
     "hidden mse loss": re.compile(r"\bhidden mse loss\s*:?\s*([0-9.eE+-]+)"),
     "router prob kl loss": re.compile(r"\brouter prob kl loss\s*:?\s*([0-9.eE+-]+)"),
+    "joint_replay/weighted_loss": re.compile(
+        r"\bjoint_replay/lm loss\s*:?\s*([0-9.eE+-]+)"
+    ),
+    "joint_replay/raw_hidden_kl_loss": re.compile(
+        r"\bjoint_replay/hidden kl loss\s*:?\s*([0-9.eE+-]+)"
+    ),
+    "new_expert_lr/ramp_multiplier": re.compile(
+        r"\bnew_expert_lr/ramp_multiplier\s*:?\s*([0-9.eE+-]+)"
+    ),
+    "new_expert_lr/effective_lr": re.compile(
+        r"\bnew_expert_lr/effective_lr\s*:?\s*([0-9.eE+-]+)"
+    ),
+    "load_balancing_loss": re.compile(
+        r"\bload_balancing_loss\s*:?\s*([0-9.eE+-]+)"
+    ),
+    "z_loss": re.compile(r"\bz_loss\s*:?\s*([0-9.eE+-]+)"),
+    "throughput/tflops_per_gpu": re.compile(
+        r"\bthroughput per GPU \(TFLOP/s/GPU\)\s*:?\s*([0-9.eE+-]+)"
+    ),
     "learning rate": re.compile(r"\blearning rate\s*:?\s*([0-9.eE+-]+)"),
     "grad norm": re.compile(r"\bgrad norm\s*:?\s*([0-9.eE+-]+)"),
     "loss scale": re.compile(r"\bloss scale\s*:?\s*([0-9.eE+-]+)"),
@@ -69,14 +88,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--distill-dir", required=True, type=nonempty_path)
     parser.add_argument("--code-dir", required=True, type=nonempty_path)
     parser.add_argument("--retune-dir", required=True, type=nonempty_path)
+    parser.add_argument("--final-dir", type=nonempty_path)
     parser.add_argument("--teacher-log", type=nonempty_path)
     parser.add_argument("--distill-log", type=nonempty_path)
     parser.add_argument("--code-log", type=nonempty_path)
     parser.add_argument("--retune-log", type=nonempty_path)
+    parser.add_argument("--final-log", type=nonempty_path)
     parser.add_argument("--teacher-step", type=int, default=1800)
     parser.add_argument("--distill-iters", type=int, default=1800)
     parser.add_argument("--code-iters", type=int, default=1800)
     parser.add_argument("--retune-iters", type=int, default=1800)
+    parser.add_argument("--final-iters", type=int)
     parser.add_argument(
         "--display-step-scale",
         type=int,
@@ -92,6 +114,13 @@ def parse_args() -> argparse.Namespace:
         "--only-stage",
         choices=["distill", "code", "retune"],
         help="Upload only one stage as an independent W&B run.",
+    )
+    parser.add_argument(
+        "--stage-labels",
+        nargs="+",
+        metavar="STAGE",
+        default=("distill_init", "code_train", "router_retune"),
+        help="Semantic labels for the three, or optional four, stitched stages.",
     )
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--run-name", required=True)
@@ -337,7 +366,12 @@ def main() -> None:
     distill_dir = Path(args.distill_dir)
     code_dir = Path(args.code_dir)
     retune_dir = Path(args.retune_dir)
+    final_dir = Path(args.final_dir) if args.final_dir else None
+    if (final_dir is None) != (args.final_iters is None):
+        raise ValueError("--final-dir and --final-iters must be provided together")
     all_dirs = [teacher_dir, distill_dir, code_dir, retune_dir]
+    if final_dir is not None:
+        all_dirs.append(final_dir)
     for run_dir in all_dirs:
         if not run_dir.is_dir():
             raise FileNotFoundError(f"Missing run directory: {run_dir}")
@@ -348,16 +382,29 @@ def main() -> None:
         "code": infer_log(code_dir, args.code_log, "code"),
         "retune": infer_log(retune_dir, args.retune_log, "retune"),
     }
-    trackers = {name: tracker_step(path) for name, path in zip(
-        ("teacher", "distill", "code", "retune"), all_dirs
-    )}
+    if final_dir is not None:
+        logs["final"] = infer_log(final_dir, args.final_log, "final")
+    stage_source_names = ["teacher", "distill", "code", "retune"]
+    if final_dir is not None:
+        stage_source_names.append("final")
+    trackers = {
+        name: tracker_step(path) for name, path in zip(stage_source_names, all_dirs)
+    }
 
     distill_base = args.teacher_step
     code_base = distill_base + args.distill_iters * args.display_step_scale
     retune_base = code_base + args.code_iters * args.display_step_scale
+    expected_label_count = 4 if final_dir is not None else 3
+    if len(args.stage_labels) != expected_label_count:
+        raise ValueError(
+            f"--stage-labels requires {expected_label_count} values for this timeline"
+        )
+    if len(set(args.stage_labels)) != expected_label_count:
+        raise ValueError("--stage-labels values must be unique")
+    stage1_label, stage2_label, stage3_label = args.stage_labels[:3]
     stages = [
         Stage(
-            "distill_init",
+            stage1_label,
             distill_dir,
             logs["distill"],
             distill_base,
@@ -367,7 +414,7 @@ def main() -> None:
             args.display_step_scale,
         ),
         Stage(
-            "code_train",
+            stage2_label,
             code_dir,
             logs["code"],
             code_base,
@@ -377,7 +424,7 @@ def main() -> None:
             args.display_step_scale,
         ),
         Stage(
-            "router_retune",
+            stage3_label,
             retune_dir,
             logs["retune"],
             retune_base,
@@ -387,6 +434,20 @@ def main() -> None:
             args.display_step_scale,
         ),
     ]
+    if final_dir is not None:
+        final_base = retune_base + args.retune_iters * args.display_step_scale
+        stages.append(
+            Stage(
+                args.stage_labels[3],
+                final_dir,
+                logs["final"],
+                final_base,
+                args.final_iters,
+                trackers["retune"] or args.retune_iters,
+                False,
+                args.display_step_scale,
+            )
+        )
 
     points: dict[int, dict[str, float]] = defaultdict(dict)
     if args.only_stage:
@@ -427,7 +488,7 @@ def main() -> None:
         raise RuntimeError("No metrics were parsed.")
 
     print("=== checkpoint trackers ===")
-    for name, run_dir in zip(("teacher", "distill", "code", "retune"), all_dirs):
+    for name, run_dir in zip(stage_source_names, all_dirs):
         print(f"{name:8s}: tracker={trackers[name]} dir={run_dir}")
     print("=== selected logs ===")
     for name, path in logs.items():
@@ -457,8 +518,10 @@ def main() -> None:
         "distill_iters": args.distill_iters,
         "code_iters": args.code_iters,
         "retune_iters_requested": args.retune_iters,
+        "final_iters_requested": args.final_iters,
         "display_step_scale": args.display_step_scale,
         "display_base_step_override": args.display_base_step,
+        "stage_labels": list(args.stage_labels),
         "display_mapping": {
             "teacher_final": args.teacher_step,
             **{
@@ -470,14 +533,13 @@ def main() -> None:
             },
         },
         "checkpoint_trackers": trackers,
-        "run_dirs": {name: str(path) for name, path in zip(
-            ("teacher", "distill", "code", "retune"), all_dirs
-        )},
+        "run_dirs": {
+            name: str(path) for name, path in zip(stage_source_names, all_dirs)
+        },
         "logs": {name: str(path) for name, path in logs.items()},
         "stage_metadata": {
-            "distill": load_metadata(distill_dir),
-            "code": load_metadata(code_dir),
-            "retune": load_metadata(retune_dir),
+            name: load_metadata(path)
+            for name, path in zip(stage_source_names[1:], all_dirs[1:])
         },
     }
     init_kwargs = {

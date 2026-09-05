@@ -23,7 +23,8 @@ EXPECTED = {
     "datasets": "2.20.0",
     "accelerate": "0.33.0",
     "wandb": "0.28.1",
-    "tensorboard": "2.9.0",
+    "tensorboard": "2.18.0",
+    "protobuf": "5.29.5",
     "numpy": "1.26.4",
     "scipy": "1.13.1",
     "sentencepiece": "0.1.96",
@@ -34,6 +35,7 @@ EXPECTED = {
     "transformer-engine": "1.11.0",
 }
 IMPORT_NAMES = {
+    "protobuf": "google.protobuf",
     "grouped-gemm": "grouped_gemm",
     "flash-attn": "flash_attn",
     "transformer-engine": "transformer_engine.pytorch",
@@ -56,6 +58,11 @@ def command_version(command: list[str]) -> str | None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--require-gpu", action="store_true")
+    parser.add_argument(
+        "--expected-gpu",
+        choices=("a100", "h100"),
+        help="Require the selected GPU family and its expected compute capability.",
+    )
     parser.add_argument(
         "--allow-system-python",
         action="store_true",
@@ -126,6 +133,21 @@ def main() -> int:
         if torch.cuda.is_available():
             gpu["device_0"] = torch.cuda.get_device_name(0)
             gpu["capability_0"] = list(torch.cuda.get_device_capability(0))
+            if args.expected_gpu:
+                expected_name = args.expected_gpu.upper()
+                expected_capability = {"a100": (8, 0), "h100": (9, 0)}[args.expected_gpu]
+                actual_name = str(gpu["device_0"])
+                actual_capability = tuple(gpu["capability_0"])
+                if expected_name not in actual_name.upper():
+                    errors.append(
+                        f"expected {expected_name} GPU, got {actual_name}"
+                    )
+                if actual_capability != expected_capability:
+                    errors.append(
+                        "expected compute capability "
+                        f"{expected_capability[0]}.{expected_capability[1]}, got "
+                        f"{actual_capability[0]}.{actual_capability[1]}"
+                    )
         elif args.require_gpu:
             errors.append("CUDA GPU is not available to PyTorch")
     except Exception as exc:

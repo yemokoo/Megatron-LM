@@ -1,0 +1,27 @@
+{
+ "run": "v3_new_replay1to1_st_top1",
+ "task": "FOMC",
+ "n": 400,
+ "kl_decision": 0.2274024784564972,
+ "argmax_flip": 0.1574999988079071,
+ "acc_k": 0.6975,
+ "acc_7": 0.67,
+ "label_logit_shift": {
+  "A": -3.426,
+  "B": -4.105,
+  "C": -4.073
+ },
+ "pred_dist_k": {
+  "A": 103,
+  "B": 102,
+  "C": 195
+ },
+ "pred_dist_7": {
+  "A": 92,
+  "B": 101,
+  "C": 207
+ },
+ "hidden_shift_on_label_subspace": 5.99240779876709,
+ "hidden_shift_orthogonal": 93.94680786132812,
+ "hidden_norm": 133.1662139892578
+}

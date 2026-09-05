@@ -682,3 +682,46 @@ Run B:
 - step 5400 baseline을 여러 W&B calls로 분리
 - `LOAD_EXPANDED_SOURCE=1` runner에 unexpanded checkpoint 전달
 - invalid W&B run을 유효 대조군으로 사용
+
+## 14. Planned 4-Stage Old-Data KD Chain (H100)
+
+실험 카드:
+
+- 목적: 1-phase에서 raw old-data LM replay를 teacher-logits KD로 바꾸면 기존 task
+  보존과 새 task 적응의 trade-off가 개선되는지 확인한다.
+- 대조군: 동일한 KD initialization, expert expansion, freeze mask, all-router update,
+  GBS 2304, new-expert LR ramp 900, old/new sample 노출을 쓰는 joint-LM replay chain.
+- 바꾸는 변수: 1-phase의 old-data branch loss만 `LM -> output-logits KD`로 바꾼다.
+- 고정 변수: FFN-only G2, `8 -> 16 -> 24` experts, top-k 4,
+  `moe_ffn_hidden_size=352`, 기존 experts와 dense/attention trunk freeze, 새 experts와
+  all router rows 학습, optimizer update당 primary/replay gradient aggregation 1회.
+- gradient 범위: new experts는 new-task LM gradient만 받고, old-data KD branch의
+  non-router gradient는 복원하여 all router rows에만 KD gradient를 누적한다.
+- 해석 가능 범위: joint-LM replay 대비 차이는 old-data target을 hard next-token
+  label에서 frozen teacher distribution으로 바꾼 효과로 해석한다.
+
+4-stage 설정:
+
+```text
+Wiki 8E -> Code expansion KD       600 steps, MB48
+Code LM + Wiki old-data KD        1800 steps, MB96
+16E -> Conversation expansion KD   600 steps, MB36
+Conversation LM + Wiki/Code KD    1800 steps, MB96
+```
+
+구현:
+
+- Core flag: `--moe-joint-replay-old-data-kd`
+- Code runner: `scripts/experiment/a100/run_g2_ffn_only_code_wiki_joint_old_data_kd_allrouter_mha.sh`
+- Conversation runner: `scripts/experiment/a100/run_g2_ffn_only_conversation_wikicode_joint_old_data_kd_allrouter_mha.sh`
+- Chain/plan: `scripts/experiment/a100/run_g2_ffn_only_4stage_old_data_kd_chain_mha.sh`
+
+안전 조건:
+
+- expanded student source와 pre-expansion frozen teacher checkpoint 경로를 분리한다.
+- primary branch에서는 teacher forward/KD를 끄고 LM loss만 사용한다.
+- replay branch에서는 LM coefficient를 0으로 바꾸고 teacher-logits KD만 사용한다.
+- 두 backward를 한 optimizer step 전에 aggregate한다.
+
+상태 (2026-08-02): 구현, shell/Python syntax, plan-only, H100 단위 테스트 16개 통과.
+체크포인트가 아직 없으므로 model-forward smoke와 실제 학습은 시작하지 않았다.

@@ -122,6 +122,7 @@ def audit_models(registry: dict) -> list[dict]:
     for key, value in registry["models"].items():
         common_overrides = {
             "llama31_8b_instruct": "SLORA_LLAMA31_PATH",
+            "llama31_8b": "SLORA_LLAMA31_PATH",
             "qwen25_7b_instruct": "SLORA_QWEN25_7B_PATH",
         }
         configured = os.environ.get(

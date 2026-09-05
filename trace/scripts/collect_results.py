@@ -44,7 +44,12 @@ PAPER_BASELINE_METHOD_DIR = {
     "loramoe": "loramoe",
     "ours_lora_moe_v1": "ours_lora_moe_v1",
     "ours_lora_moe_v2": "ours_lora_moe_v2",
+    "ours_lora_moe_v2_new": "ours_lora_moe_v2_new",
+    "ours_lora_moe_v2_new_top4": "ours_lora_moe_v2_new_top4",
     "ours_lora_moe_v2_5": "ours_lora_moe_v2_5",
+    "ours_lora_moe_v3": "ours_lora_moe_v3",
+    "ours_lora_moe_v3_new": "ours_lora_moe_v3_new",
+    "ours_lora_moe_v3_new_top4": "ours_lora_moe_v3_new_top4",
 }
 
 TRACE_METHOD_DIR = {
@@ -92,7 +97,11 @@ def required_cell(round_index: int, task_index: int, sparse_15: bool) -> bool:
     return task_index < round_index
 
 
-def collect_slora(run_dir: Path, sparse_15: bool = False) -> list[list[float | None]]:
+def collect_slora(
+    run_dir: Path,
+    sparse_15: bool = False,
+    allow_partial: bool = False,
+) -> list[list[float | None]]:
     matrix: list[list[float | None]] = []
     for round_index in range(1, len(TASKS) + 1):
         row: list[float | None] = []
@@ -100,10 +109,15 @@ def collect_slora(run_dir: Path, sparse_15: bool = False) -> list[list[float | N
             if not required_cell(round_index, task_index, sparse_15):
                 row.append(None)
                 continue
-            metrics = parse_slora_log(
-                run_dir / "evaluation" / f"order{round_index}" / task / "eval.log"
-            )
-            row.append(metric_points(task, metrics))
+            try:
+                metrics = parse_slora_log(
+                    run_dir / "evaluation" / f"order{round_index}" / task / "eval.log"
+                )
+                row.append(metric_points(task, metrics))
+            except (OSError, ValueError, KeyError, TypeError, SyntaxError):
+                if not allow_partial:
+                    raise
+                row.append(None)
         matrix.append(row)
     return matrix
 
@@ -125,7 +139,9 @@ def collect_trace(run_dir: Path) -> list[list[float | None]]:
 
 
 def collect_paper_baseline(
-    run_dir: Path, sparse_15: bool = False
+    run_dir: Path,
+    sparse_15: bool = False,
+    allow_partial: bool = False,
 ) -> list[list[float | None]]:
     matrix: list[list[float | None]] = []
     for round_index in range(1, len(TASKS) + 1):
@@ -140,8 +156,13 @@ def collect_paper_baseline(
                 / f"order{round_index}"
                 / f"results-{task}.json"
             )
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            row.append(metric_points(task, payload["eval"]))
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                row.append(metric_points(task, payload["eval"]))
+            except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+                if not allow_partial:
+                    raise
+                row.append(None)
         matrix.append(row)
     return matrix
 
@@ -202,30 +223,60 @@ def main() -> int:
     parser.add_argument("--model", required=True, choices=["llama31", "qwen25_7b"])
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--run-dir", type=Path,
+                        help="Override the method's conventional run directory.")
+    parser.add_argument("--family", choices=["slora", "paper_baseline", "trace"],
+                        help="Override result artifact family with --run-dir.")
     parser.add_argument(
         "--sparse-15",
         action="store_true",
         help="Require only rounds 1-7 diagonal cells and all eight round-8 cells.",
     )
+    parser.add_argument(
+        "--allow-partial",
+        action="store_true",
+        help=("Keep missing required cells as null and write diagnostic partial "
+              "metrics instead of failing."),
+    )
     args = parser.parse_args()
 
     family, run_dir, repo = resolve(args.root, args.method, args.model)
+    if args.run_dir is not None:
+        run_dir = args.run_dir
+    if args.family is not None:
+        family = args.family
     if family == "slora":
-        matrix = collect_slora(run_dir, args.sparse_15)
+        matrix = collect_slora(run_dir, args.sparse_15, args.allow_partial)
     elif family == "paper_baseline":
-        matrix = collect_paper_baseline(run_dir, args.sparse_15)
+        matrix = collect_paper_baseline(
+            run_dir, args.sparse_15, args.allow_partial)
     else:
         matrix = collect_trace(run_dir)
     diagonal = [matrix[index][index] for index in range(len(TASKS) - 1)]
     final_scores = matrix[-1]
-    if any(value is None for value in diagonal + final_scores):
+    missing_cells = [
+        f"order{round_index}.{task}"
+        for round_index in range(1, len(TASKS) + 1)
+        for task_index, task in enumerate(TASKS)
+        if required_cell(round_index, task_index, args.sparse_15)
+        and matrix[round_index - 1][task_index] is None
+    ]
+    if missing_cells and not args.allow_partial:
         raise ValueError("Required diagonal/final score is missing; refusing summary")
-    op = sum(float(value) for value in final_scores) / len(final_scores)
+    final_available = [float(value) for value in final_scores if value is not None]
+    op = (
+        sum(final_available) / len(final_available)
+        if len(final_available) == len(final_scores) else None)
     bwt_terms = [
-        float(final_scores[index]) - float(diagonal[index])
+        (float(final_scores[index]) - float(diagonal[index])
+         if final_scores[index] is not None and diagonal[index] is not None
+         else None)
         for index in range(len(TASKS) - 1)
     ]
-    bwt = sum(bwt_terms) / len(bwt_terms)
+    bwt = (
+        sum(float(value) for value in bwt_terms) / len(bwt_terms)
+        if all(value is not None for value in bwt_terms) else None)
+    available_bwt_terms = [float(value) for value in bwt_terms if value is not None]
     payload = {
         "schema_version": 1,
         "run_id": f"{args.model}-{args.method}",
@@ -256,6 +307,17 @@ def main() -> int:
         "final_average": op,
         "BWT": bwt,
         "BWT_terms": bwt_terms,
+        "complete": not missing_cells,
+        "missing_cells": missing_cells,
+        "available_final_average": (
+            sum(final_available) / len(final_available)
+            if final_available else None),
+        "available_BWT": (
+            sum(available_bwt_terms) / len(available_bwt_terms)
+            if available_bwt_terms else None),
+        "note": (
+            None if not missing_cells else
+            "Partial diagnostic: OP/BWT remain null until every required cell exists."),
         "formulas": {
             "OP": "mean(score_matrix[7][0:8])",
             "BWT": "mean(score_matrix[7][i] - score_matrix[i][i] for i=0..6)",

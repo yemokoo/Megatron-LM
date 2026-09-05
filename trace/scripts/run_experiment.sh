@@ -17,8 +17,8 @@ METHOD="${2:?usage: run_experiment.sh <validate|train|eval|all> <method> <llama3
 MODEL="${3:?usage: run_experiment.sh <validate|train|eval|all> <method> <llama31|qwen25_7b>}"
 
 case "${MODEL}" in
-  llama31) VERIFY_MODEL_PATH="${ROOT}/models/Llama-3.1-8B-Instruct" ;;
-  qwen25_7b) VERIFY_MODEL_PATH="${ROOT}/models/Qwen2.5-7B-Instruct" ;;
+  llama31) VERIFY_MODEL_PATH="${SLORA_LLAMA31_PATH:-${ROOT}/models/Llama-3.1-8B-Instruct}" ;;
+  qwen25_7b) VERIFY_MODEL_PATH="${SLORA_QWEN25_7B_PATH:-${ROOT}/models/Qwen2.5-7B-Instruct}" ;;
   *)
     echo "[ERROR] Unknown model: ${MODEL}" >&2
     exit 2

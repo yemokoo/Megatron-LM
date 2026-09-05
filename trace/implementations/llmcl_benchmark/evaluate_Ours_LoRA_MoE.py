@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""HF-generate evaluation for growing FFN LoRA-MoE continual-learning checkpoints.
+"""HF-generate evaluation for growing LoRA-MoE continual-learning checkpoints.
 
 vllm_eval.py can't load our checkpoints: each FFN is a custom LoRAMoEMLP that
 vLLM / a plain from_pretrained doesn't understand. This script keeps vllm_eval.py's
@@ -17,6 +17,7 @@ Offline note (same as vllm_eval): export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 and 20Minuten's SARI is skipped unless --with_sari (needs the HF 'sari' metric).
 """
 import argparse
+from contextlib import nullcontext
 import json
 import os
 import sys
@@ -25,18 +26,25 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# rouge's summary-level LCS implementation is recursive. Uniform 1024-token
+# generation can produce more segments than Python's default recursion limit.
+sys.setrecursionlimit(max(sys.getrecursionlimit(), 10000))
 
 from utils.utils import load_hf_tokenizer
 from utils.model.model_utils import create_hf_model, resolve_attention_implementation
 from utils.eval_generation import generate_predictions as generate_hf_predictions
-from model.Ours_LoRA_MoE import load_lora_moe_checkpoint
+from model.Ours_LoRA_MoE import (
+    force_lora_moe_expert, load_lora_moe_checkpoint)
+from model.Ours_LoRA_MoE_V3 import (
+    V3_ARCHITECTURE, load_v3_checkpoint)
 from model.continual_lora import (
     PAPER_BASELINE_META, load_paper_baseline_checkpoint)
 from utils.my_peft import PeftModel as OriginalOLoraPeftModel
 # Reuse the benchmark scoring verbatim -- importing vllm_eval does NOT pull vLLM in
 # (its `from vllm import ...` lives inside main(), not at module top level).
 from vllm_eval import (load_task, normalize_predictions, score, ALL_TASKS,
-                       TASK_MAX_NEW_TOKENS, TRACE_SCORING_PROTOCOL)
+                       TASK_MAX_NEW_TOKENS, TRACE_SCORING_PROTOCOL,
+                       TRACE_STOP_MARKERS)
 
 # Single headline scalar per task, used only for the BWT / forgetting matrix.
 # The full metric dict is always kept in the per-task result json regardless.
@@ -116,9 +124,20 @@ def parse_args():
         help="Group similar token lengths into generation batches while restoring "
              "the original prediction order (default: enabled).")
     p.add_argument(
+        "--trace_generation_stops",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Stop each generated row as soon as its TRACE scoring marker is "
+             "emitted. Opt-in and score-preserving: post-hoc normalization, "
+             "EOS/EOT tokens, and max-new-token ceilings remain unchanged.")
+    p.add_argument(
         "--summary_filename", default="summary.json",
         help="Summary filename inside each output directory. Parallel workers can "
-             "use distinct names to avoid concurrent writes.")
+        "use distinct names to avoid concurrent writes.")
+    p.add_argument(
+        "--force_expert_index", type=int, default=None,
+        help="Diagnostic for FFN-only LoRA-MoE: route every token through this "
+             "single expert at weight 1, bypassing learned router selection.")
     return p.parse_args()
 
 
@@ -177,6 +196,11 @@ def generate_predictions(model, tokenizer, prompts, args, device):
             stop_token_ids.append(eot_id)
     elif args.slora_conv_mode == "qwen":
         stop_token_ids = [tokenizer.eos_token_id]
+    stop_strings = None
+    if args.trace_generation_stops:
+        marker = TRACE_STOP_MARKERS.get(task)
+        if marker is not None:
+            stop_strings = [marker]
     return generate_hf_predictions(
         model,
         tokenizer,
@@ -187,6 +211,7 @@ def generate_predictions(model, tokenizer, prompts, args, device):
         max_new_tokens=max_new_tokens,
         temperature=args.temperature,
         eos_token_ids=stop_token_ids,
+        stop_strings=stop_strings,
         length_bucketing=args.length_bucketing,
         description=f"gen[{task},max_new={max_new_tokens}]",
     )
@@ -225,9 +250,14 @@ def evaluate_checkpoint(model, tokenizer, args, tasks, device, out_subdir):
             args.max_ans_len,
             TASK_MAX_NEW_TOKENS.get(task, args.max_ans_len),
         ) if args.task_generation_limits else args.max_ans_len
+        active_marker = (
+            TRACE_STOP_MARKERS.get(task)
+            if args.trace_generation_stops else None
+        )
         print(f"[{task}] evaluating {len(prompts)} samples "
               f"(batch {args.per_device_eval_batch_size}, "
-              f"max_new_tokens {task_max_new})...", flush=True)
+              f"max_new_tokens {task_max_new}, "
+              f"generation_stop={active_marker!r})...", flush=True)
         generation_prompts = [
             format_slora_trace_eval_prompt(prompt, task, args.slora_conv_mode)
             for prompt in prompts
@@ -373,12 +403,24 @@ def main():
             print(f"Loaded {ckpt_dir}: method={meta['method']} "
                   f"r={meta['r']} alpha={meta['alpha']}", flush=True)
         else:
-            model, meta = load_lora_moe_checkpoint(
-                ckpt_dir, tok, base_model_name_or_path=args.base_model_name_or_path,
-                device=device, dtype=dtype, device_map=device_map)
+            meta_path = os.path.join(ckpt_dir, "lora_moe_meta.json")
+            with open(meta_path, encoding="utf-8") as handle:
+                checkpoint_meta = json.load(handle)
+            if checkpoint_meta.get("architecture") == V3_ARCHITECTURE:
+                model, meta = load_v3_checkpoint(
+                    ckpt_dir, tok,
+                    base_model_name_or_path=args.base_model_name_or_path,
+                    device=device, dtype=dtype, device_map=device_map)
+            else:
+                model, meta = load_lora_moe_checkpoint(
+                    ckpt_dir, tok,
+                    base_model_name_or_path=args.base_model_name_or_path,
+                    device=device, dtype=dtype, device_map=device_map)
             print(f"Loaded {ckpt_dir}: num_experts={meta['num_experts']} "
                   f"r={meta['r']} alpha={meta['alpha']} "
-                  f"top_k={meta['top_k']}", flush=True)
+                  f"top_k={meta['top_k']} "
+                  f"architecture={meta.get('architecture', 'ffn_only')}",
+                  flush=True)
         input_device = model.get_input_embeddings().weight.device
         print(f"Model input device={input_device}; device_map="
               f"{getattr(model, 'hf_device_map', None)}", flush=True)
@@ -386,7 +428,16 @@ def main():
 
     if args.checkpoint_dir:
         model, tok, input_device = load(args.checkpoint_dir)
-        evaluate_checkpoint(model, tok, args, tasks, input_device, args.inference_output_path)
+        routing_context = (
+            force_lora_moe_expert(model, args.force_expert_index)
+            if args.force_expert_index is not None else nullcontext())
+        if args.force_expert_index is not None:
+            print(f"Forcing every token to expert {args.force_expert_index} "
+                  "with dispatch weight 1", flush=True)
+        with routing_context:
+            evaluate_checkpoint(
+                model, tok, args, tasks, input_device,
+                args.inference_output_path)
         return
 
     # --all_rounds: evaluate each grown round on all tasks -> CL matrix.

@@ -1,0 +1,27 @@
+{
+ "run": "model",
+ "task": "FOMC",
+ "n": 400,
+ "kl_decision": 0.11504261940717697,
+ "argmax_flip": 0.1550000011920929,
+ "acc_k": 0.7175,
+ "acc_7": 0.7225,
+ "label_logit_shift": {
+  "A": -3.703,
+  "B": -4.017,
+  "C": -3.326
+ },
+ "pred_dist_k": {
+  "A": 110,
+  "B": 103,
+  "C": 187
+ },
+ "pred_dist_7": {
+  "A": 103,
+  "B": 93,
+  "C": 204
+ },
+ "hidden_shift_on_label_subspace": 5.361033916473389,
+ "hidden_shift_orthogonal": 88.5318374633789,
+ "hidden_norm": 128.84767150878906
+}

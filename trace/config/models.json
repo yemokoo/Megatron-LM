@@ -13,6 +13,12 @@
       "paper_scope": ["TRACE"],
       "access": "gated; Meta license acceptance and Hugging Face access required"
     },
+    "llama31_8b": {
+      "hf_id": "meta-llama/Llama-3.1-8B",
+      "planned_path": "models/Llama-3.1-8B",
+      "paper_scope": ["Ours_LoRA_MoE_V1", "Ours_LoRA_MoE_V2", "Ours_LoRA_MoE_V2_New", "Ours_LoRA_MoE_V2_5", "Ours_LoRA_MoE_V3"],
+      "access": "gated; Meta license acceptance and Hugging Face access required"
+    },
     "qwen25_7b_instruct": {
       "hf_id": "Qwen/Qwen2.5-7B-Instruct",
       "planned_path": "models/Qwen2.5-7B-Instruct",

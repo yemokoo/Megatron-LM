@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # Adapted from TRACE (BeyonderXX/TRACE, Apache-2.0) training/main.py.
-# Stripped to the single method this repo implements: growing FFN LoRA-MoE
-# experts per task (see model/Ours_LoRA_MoE.py). All other CL_method branches,
+# Stripped to the local growing LoRA-MoE methods: FFN-only V1/V2 and the V3
+# shared-router QKVO+FFN extension. All other CL_method branches,
 # the llama/bloom flash-attn monkey-patches, and the DeepSpeed hand-rolled
 # LoRA (utils/module/lora.py) from the original are intentionally dropped --
 # Qwen models use transformers' own attention implementation, and our LoRA-MoE
@@ -32,9 +32,23 @@ from utils.data.data_collator import (DataCollator, SLoRATraceDataCollator,
                                       PreTokenizedSLoRATraceDataCollator)
 from utils.utils import print_rank_0, set_random_seed, load_hf_tokenizer
 from utils.model.model_utils import create_hf_model
+import model.Ours_LoRA_MoE as ours_lora_moe_module
 from model.Ours_LoRA_MoE import (Ours_LoRA_MoE, Ours_LoRA_MoE_V2,
+                                 Ours_LoRA_MoE_V2_New,
+                                 Ours_LoRA_MoE_V1_Expert_First,
                                  attach_lora_moe,
                                  add_experts_to_all_layers)
+from model.Ours_LoRA_MoE_V3 import (
+    V3_ARCHITECTURE,
+    Ours_LoRA_MoE_V3,
+    Ours_LoRA_MoE_V3_New,
+    add_v3_experts,
+    attach_shared_qkvo_lora_moe,
+)
+from utils.chat_templates import (
+    ensure_llama31_chat_template,
+    update_fingerprint_for_chat_template,
+)
 
 AllDatasetName = ["C-STANCE", "FOMC", "MeetingBank", "Py150", "ScienceQA",
                   "NumGLUE-cm", "NumGLUE-ds", "20Minuten"]
@@ -46,6 +60,12 @@ def list_of_strings(arg):
 
 def list_of_ints(arg):
     return [int(x) for x in arg.split(',')]
+
+
+def list_of_floats(arg):
+    if not arg:
+        return []
+    return [float(x) for x in arg.split(',')]
 
 
 def tokenizer_source_fingerprint(model_path):
@@ -64,6 +84,10 @@ def tokenizer_source_fingerprint(model_path):
     if not found:
         raise FileNotFoundError(
             f"no tokenizer assets found under {model_path}")
+    tokenizer_config_path = os.path.join(model_path, "tokenizer_config.json")
+    if os.path.isfile(tokenizer_config_path):
+        with open(tokenizer_config_path, encoding="utf-8") as handle:
+            update_fingerprint_for_chat_template(digest, json.load(handle))
     return digest.hexdigest()
 
 
@@ -110,6 +134,30 @@ def parse_args():
              "global batch with its per-device micro-batch.")
     parser.add_argument("--loss_log_interval", type=int, default=10,
                         help='Copy loss to CPU for progress logging every N microsteps.')
+    parser.add_argument('--v3_epoch_probe_samples', type=int, default=64,
+                        help='Fixed distributed validation samples per V3 epoch; '
+                             '64 is one global batch. 0 disables the probe.')
+    parser.add_argument(
+        '--v2_acquisition_diagnostic_interval', type=int, default=0,
+        help='V2/V2-new only: write rank-0-local KD/new-task routing and '
+             'gradient diagnostics every N optimizer updates. 0 disables it.')
+    parser.add_argument(
+        '--v2_new_expert_quota_schedule', type=list_of_floats, default=[],
+        help='Opt-in V2-new top-1 treatment: comma-separated per-primary-epoch '
+             'minimum valid-token shares for the newly-added expert. Positive '
+             'epochs use separate natural router-only and quota expert-only '
+             'new-data branches; zero epochs retain the original V2 path.')
+    parser.add_argument(
+        '--v2_new_expert_aux_mix', type=float, default=0.0,
+        help='Opt-in V2-new top-1 auxiliary acquisition branch. On the same '
+             'new-task batch, interpolate this fraction of the newly-added '
+             'expert into tokens that natural routing assigned elsewhere. '
+             'The ordinary V2-new branch is unchanged and the auxiliary '
+             'branch freezes router parameters. 0 disables it exactly.')
+    parser.add_argument(
+        '--v2_new_expert_aux_loss_coeff', type=float, default=1.0,
+        help='Multiplier for the expert-only auxiliary LM loss. The adapter '
+             'gradient is already scaled by --v2_new_expert_aux_mix.')
     parser.add_argument("--lr_scheduler_type", type=SchedulerType, default="constant_with_warmup")
     parser.add_argument("--num_warmup_steps", type=int, default=0)
     parser.add_argument("--warmup_ratio", type=float, default=0.0,
@@ -119,6 +167,10 @@ def parse_args():
         "--resume_checkpoint", default="",
         help="Completed numeric round checkpoint to resume after. Restores all "
              "grown experts/router and starts at the following TRACE task.")
+    parser.add_argument(
+        "--stop_after_task", default="",
+        help="Optional task name at which continual training exits after saving "
+             "that task checkpoint. Empty runs every remaining task.")
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--local_rank", type=int, default=-1,
                         help='Overridden by the LOCAL_RANK env var when launched via torchrun.')
@@ -137,21 +189,58 @@ def parse_args():
     parser.add_argument('--print_loss', action='store_true')
 
     # --- LoRA-MoE specific ---
-    parser.add_argument('--training_version', choices=['v1', 'v2', 'v2_5'], default='v1',
+    parser.add_argument('--training_version',
+                        choices=['v1', 'v1_expert_first', 'v2', 'v2_new',
+                                 'v2_new_top4', 'v2_5', 'v3', 'v3_new',
+                                 'v3_new_top4', 'v3_new_replay40',
+                                 'v3_new_hidden_mse_full',
+                                 'v3_new_replay1to1',
+                                 'v3_new_hidden_mse_1to1',
+                                 'v3_new_replay1to1_recency',
+                                 'v3_new_replay1to1_p5k',
+                                 'v3_new_hidden_mse_1to1_p5k',
+                                 'v3_new_kd35k',
+                                 'v3_new_recency_kd175k',
+                                 'v3_new_p5k_kd175k',
+                                 'v3_new_r20_kd100',
+                                 'v3_new_kd200',
+                                 'v3_new_recency_p2',
+                                 'v3_new_hmse_kd200'],
+                        default='v1',
                         help='v1: sequential new-task then router retune; v2: '
                              'KD-init plus joint new-task/router-replay updates; '
-                             'v2_5: v2 with router aux/z losses disabled.')
+                             'v2_new: v2 with persistent 10%% task memories, a '
+                             'nested-prefix active-memory cap, and one active '
+                             'memory pass per primary epoch; '
+                             'v2_new_top4: the same V2-new memory/training '
+                             'contract with four rank-16 experts added per '
+                             'task and normalized top-4 dispatch; '
+                             'v1_expert_first: V2-new KD init, then one '
+                             'standalone full-token expert-only phase, then '
+                             'a separate V2-new-memory router-only retune; '
+                             'v2_5: v2 with router aux/z losses disabled; v3: '
+                             'v2 mechanics with one pre-attention router shared '
+                             'by equal-rank QKVO and FFN LoRA experts; v3_new: '
+                             'the same QKVO+FFN architecture with the strict '
+                             'V2-new persistent/active-memory schedule; '
+                             'v3_new_top4: the same V3-new architecture and '
+                             'schedule with four rank-16 experts per task and '
+                             'normalized top-4 dispatch.')
     parser.add_argument('--experts_per_task', type=int, default=4,
-                        help='New FFN LoRA experts added at the start of each task.')
+                        help='New FFN LoRA experts added per task; V3 adds the '
+                             'same number of QKVO experts at the same time.')
     parser.add_argument('--lora_moe_rank', type=int, default=8)
     parser.add_argument('--lora_moe_alpha', type=int, default=32)
     parser.add_argument('--lora_moe_dropout', type=float, default=0.0)
     parser.add_argument('--top_k', type=int, default=2,
                         help='Experts activated per token (fixed for a run; vary across runs for ablation).')
-    parser.add_argument('--routing_weight_mode', type=str, default='full_softmax',
-                        choices=['full_softmax', 'topk_softmax'],
+    parser.add_argument('--routing_weight_mode', type=str, default=None,
+                        choices=['full_softmax', 'topk_softmax',
+                                 'straight_through_topk'],
                         help='full_softmax keeps an LM-loss router gradient even at top-k=1; '
-                             'topk_softmax is the legacy selected-set normalization.')
+                             'topk_softmax is the legacy selected-set normalization. '
+                             'Defaults to straight_through_topk for v2_new and '
+                             'full_softmax for every existing version.')
     parser.add_argument('--moe_aux_loss_coeff', type=float, default=0.01,
                         help='Switch-style load-balancing aux loss coefficient (matches LLM-continual-learning default).')
     parser.add_argument('--moe_z_loss_coeff', type=float, default=0.001,
@@ -164,39 +253,625 @@ def parse_args():
                         help='Deprecated legacy v1 full-data replay option; retained only for old commands.')
 
     # --- shared v1/v2 fixed replay memory ---
-    parser.add_argument('--replay_subset_ratio', type=float, default=0.01,
-                        help='Unique fixed subset stored per 5,000-sample task (0.01=50, 0.1=500).')
-    parser.add_argument('--replay_distribution', choices=['equal_task', 'proportional'],
+    parser.add_argument('--replay_subset_ratio', type=float, default=None,
+                        help='Unique fixed subset stored per 5,000-sample task. '
+                             'Defaults to 0.1 (500) for v2_new and 0.01 (50) '
+                             'for every existing training version.')
+    parser.add_argument('--replay_recency_power', type=float, default=1.0,
+                        help='recency_weighted only: task at recency rank k gets weight '
+                             'k**power. 1.0 is a linear ramp, larger concentrates on '
+                             'the newest task, 0.0 degenerates to equal_task.')
+    parser.add_argument('--replay_distribution',
+                        choices=['equal_task', 'proportional', 'recency_weighted'],
                         default='equal_task')
     parser.add_argument('--replay_subset_seed', type=int, default=-1,
                         help='Fixed per-task subset seed; -1 reuses --seed.')
+    parser.add_argument(
+        '--replay_selection_mode',
+        choices=['random', 'router_gradient'], default='random',
+        help='How the persistent per-task replay subset is selected. '
+             'router_gradient scores examples during the ordinary V3 primary '
+             'backward and keeps the largest mean per-sample router-gradient '
+             'norm; it does not add an extra backward pass.')
 
     # --- v2 fixed-memory KD + exact-budget joint replay ---
     parser.add_argument('--v2_memory_batch_size', type=int, default=0,
-                        help='KD/replay microbatch size per rank; 0 uses one sample per rank.')
+                        help='Legacy replay stream/KD fallback batch size. '
+                             'Exact replay keeps this at 0 or 1; use '
+                             '--v2_replay_forward_batch_size to pack records '
+                             'without changing sample weighting.')
+    parser.add_argument(
+        '--v2_replay_forward_batch_size', type=int, default=8,
+        help='Maximum replay records per rank packed into one backbone '
+             'forward. Each record retains its original batch-size-one '
+             'token-mean CE, so exposure and active-sample-mean gradients '
+             'are unchanged.')
+    parser.add_argument('--v2_kd_memory_batch_size', type=int, default=0,
+                        help='KD-only microbatch size per rank; 0 falls back to '
+                             '--v2_memory_batch_size (and then one sample per rank).')
+    parser.add_argument(
+        '--allow_v2_memory_batch_resume_override', action='store_true',
+        help='Allow changing only operational V2 KD/replay memory '
+             'microbatch fields on resume; exposure, loss, and optimizer '
+             'update contracts remain strict.')
     parser.add_argument('--v2_max_replay_batches_per_step', type=int, default=0,
-                        help='Safety cap per microstep; 0 is unlimited.')
+                        help='Safety cap on global replay samples assigned to '
+                             'one optimizer update; 0 is unlimited.')
     parser.add_argument('--v2_joint_replay_loss_coeff', type=float, default=1.0)
+    parser.add_argument(
+        '--v2_joint_replay_objective', choices=['lm', 'hidden_mse'],
+        default='lm',
+        help='Past-data objective in the joint router-only branch. hidden_mse '
+             'matches every decoder-layer output to an expanded post-KD-init '
+             'frozen teacher while leaving new-task LM unchanged.')
+    parser.add_argument(
+        '--v2_hidden_mse_loss_coeff', type=float, default=1.0,
+        help='Coefficient for sample-mean, layer-mean hidden MSE replay.')
+    parser.add_argument('--v2_joint_new_to_replay_ratio', type=int, default=None,
+                        help='Set replay from a new-task dataset pass at N:1. '
+                             'Legacy v2/v2_5/v3 distribute one fixed pass over '
+                             'the whole phase; v2_new repeats its active stream '
+                             'once per primary epoch. Defaults to 5 for v2_new '
+                             'and 0 for existing versions; 0 uses '
+                             '--router_replay_exposure_samples directly.')
     parser.add_argument('--v2_kd_loss_coeff', type=float, default=1.0)
+    parser.add_argument(
+        '--v2_kd_pass_multiplier', type=int, default=1,
+        help='Repeat the same fixed KD memory stream this many times per '
+             'primary epoch. This changes KD optimization steps only; it '
+             'does not add unique memory records or change joint replay.')
     parser.add_argument('--v2_kd_temperature', type=float, default=1.0)
     parser.add_argument('--v2_kd_learning_rate', type=float, default=0.0,
                         help='0 reuses --learning_rate.')
     parser.add_argument('--v2_kd_chunk_tokens', type=int, default=256)
     parser.add_argument('--v2_kd_token_scope', choices=['nonpad', 'labels'], default='nonpad')
+    parser.add_argument(
+        '--v2_new_active_memory_cap', type=int, default=1000,
+        help='v2_new only: exact aggregate past-memory stream size per primary '
+             'epoch. The stream is drawn from persistent per-task memories by '
+             'equal-task nested prefixes and is reused by KD and joint replay.')
+    parser.add_argument(
+        '--v2_kd_exposure_samples', type=int, default=0,
+        help='v2_new relaxed versions only: memory records consumed per KD-init '
+             'pass. 0 keeps KD tied to --v2_new_active_memory_cap, which is the '
+             'historical behaviour and makes KD grow whenever replay does.')
+    parser.add_argument(
+        '--v2_kd_epochs', type=int, default=0,
+        help='v2_new relaxed versions only: KD-init passes over the memory '
+             'stream. 0 derives it from the primary epoch count (3/5/7).')
+    parser.add_argument(
+        '--v2_new_active_unique_cap', type=int, default=0,
+        help='v2_new relaxed versions only: cap on the number of DISTINCT old '
+             'records joint replay may draw from, decoupled from the exposure '
+             'budget set by --v2_new_active_memory_cap. 0 keeps them tied, '
+             'which is the historical behaviour. KD is unaffected.')
+    parser.add_argument(
+        '--v2_new_persistent_samples_per_task', type=int, default=500,
+        help='v2_new only: exact persistent records selected once per 5,000 '
+             'sample TRACE task. V2-new intentionally fixes this to 500.')
     parser.add_argument('--disable_training_flop_counter', action='store_true',
                         help='Disable operator FLOP counting; samples/tokens/steps/time are still recorded.')
 
     return parser.parse_args()
 
 
+V2_NEW_TRAINING_VERSIONS = frozenset({
+    "v2_new", "v2_new_top4", "v3_new", "v3_new_top4",
+    "v3_new_replay40", "v3_new_hidden_mse_full", "v3_new_replay1to1",
+    "v3_new_hidden_mse_1to1", "v3_new_replay1to1_recency",
+    "v3_new_replay1to1_p5k", "v3_new_hidden_mse_1to1_p5k",
+    "v3_new_kd35k", "v3_new_recency_kd175k", "v3_new_p5k_kd175k", "v3_new_r20_kd100",
+    "v3_new_kd200", "v3_new_recency_p2", "v3_new_hmse_kd200",
+})
+# v3_new with a larger router-replay budget.  Architecture, persistent memory,
+# KD and objectives are identical to v3_new; only the active memory stream
+# consumed per primary epoch grows, which is what moves the new:replay
+# exposure ratio away from 5:1.  It is deliberately excluded from
+# V2_NEW_FIXED_CONTRACT_VERSIONS so the 1000-sample / 5:1 assertions that pin
+# the published v3_new runs remain in force for those runs.
+V2_NEW_FIXED_CONTRACT_VERSIONS = frozenset({
+    "v2_new", "v2_new_top4", "v3_new", "v3_new_top4", "v1_expert_first",
+})
+
+
+def uses_fixed_v2_new_contract(training_version):
+    """Whether the hard 1000-sample / 5:1 TRACE contract is enforced."""
+    return training_version in V2_NEW_FIXED_CONTRACT_VERSIONS
+V2_NEW_MEMORY_TRAINING_VERSIONS = frozenset({
+    "v2_new", "v2_new_top4", "v3_new", "v3_new_top4",
+    "v1_expert_first", "v3_new_replay40", "v3_new_hidden_mse_full",
+    "v3_new_replay1to1", "v3_new_hidden_mse_1to1",
+    "v3_new_replay1to1_recency",
+})
+
+V3_TRAINING_VERSIONS = frozenset({
+    "v3", "v3_new", "v3_new_top4", "v3_new_replay40",
+    "v3_new_hidden_mse_full", "v3_new_replay1to1",
+    "v3_new_hidden_mse_1to1", "v3_new_replay1to1_recency",
+    "v3_new_replay1to1_p5k", "v3_new_hidden_mse_1to1_p5k",
+    "v3_new_kd35k", "v3_new_recency_kd175k", "v3_new_p5k_kd175k", "v3_new_r20_kd100",
+    "v3_new_kd200", "v3_new_recency_p2", "v3_new_hmse_kd200",
+})
+
+
+def is_v2_new_training_version(training_version):
+    """Return whether a profile uses the strict V2-new memory contract."""
+    return training_version in V2_NEW_TRAINING_VERSIONS
+
+
+def uses_v2_new_memory(training_version):
+    """Return whether a profile uses V2-new persistent memory and KD data."""
+    return training_version in V2_NEW_MEMORY_TRAINING_VERSIONS
+
+
+def resolve_training_version_defaults(args):
+    """Resolve version-dependent CLI defaults without changing legacy runs."""
+    is_v2_new = is_v2_new_training_version(args.training_version)
+    uses_v2_new = uses_v2_new_memory(args.training_version)
+    if args.replay_subset_ratio is None:
+        args.replay_subset_ratio = 0.1 if uses_v2_new else 0.01
+    if args.v2_joint_new_to_replay_ratio is None:
+        args.v2_joint_new_to_replay_ratio = 5 if is_v2_new else 0
+    if args.routing_weight_mode is None:
+        args.routing_weight_mode = (
+            'straight_through_topk'
+            if uses_v2_new else 'full_softmax')
+    # Resolve the sentinel for reproducible selection and auditable metadata.
+    # On resume, already-saved per-task indices+SHA256 are authoritative; a
+    # scalar command-seed change alone does not replace or reject those files.
+    if uses_v2_new and args.replay_subset_seed < 0:
+        args.replay_subset_seed = args.seed
+    return args
+
+
+def v2_new_metadata_contract(args):
+    """Immutable V2-new mechanics required on resume.
+
+    The checkpoint also records the original scalar seed for audit, but the
+    saved per-task index file and its SHA256—not the current command seed—own
+    replay identity after selection.
+    """
+    contract = {
+        "persistent_subset_policy":
+            "validated_output_dir_json_else_deterministic_random",
+        "persistent_samples_per_task":
+            args.v2_new_persistent_samples_per_task,
+        "persistent_memory_integrity":
+            "source_count_unique_range_sha256",
+        "persistent_memory_resume_source":
+            "output_dir/fixed_replay_memory",
+        "selection_mode": args.replay_selection_mode,
+        "active_memory_cap_unique": args.v2_new_active_memory_cap,
+        "active_memory_distribution": "equal_task",
+        "active_memory_selection": "stable_nested_task_prefix",
+        "active_stream_samples_per_pass": args.v2_new_active_memory_cap,
+        "active_stream_identity_order": "shared_between_kd_and_replay",
+        "active_stream_seed_phase": "v2_new_shared_active_memory",
+        "kd_stream_passes": "match_primary_epochs",
+        "joint_replay_stream_passes": "match_primary_epochs",
+    }
+    kd_pass_multiplier = int(getattr(args, "v2_kd_pass_multiplier", 1))
+    if kd_pass_multiplier != 1:
+        contract["kd_stream_passes"] = "primary_epochs_times_multiplier"
+        contract["kd_stream_pass_multiplier"] = kd_pass_multiplier
+    return contract
+
+
+def v2_new_replay_memory_contract(args):
+    """Immutable replay-memory mechanics required on V2-new resume."""
+    return {
+        "persistent_samples_per_task":
+            args.v2_new_persistent_samples_per_task,
+        "persistent_selection_mode": args.replay_selection_mode,
+        "active_stream_samples_per_primary_epoch":
+            args.v2_new_active_memory_cap,
+        "distribution": "equal_task",
+        "v1_router_retune_enabled": False,
+    }
+
+
+def v1_expert_first_replay_memory_contract(args):
+    """Persistent V2-new identities with a separate V1 router phase."""
+    return {
+        "persistent_samples_per_task":
+            args.v2_new_persistent_samples_per_task,
+        "persistent_selection_mode": args.replay_selection_mode,
+        "active_stream_samples_per_primary_epoch":
+            args.v2_new_active_memory_cap,
+        "distribution": "equal_task",
+        "v1_router_retune_enabled": args.router_retune_epochs > 0,
+    }
+
+
+def v2_new_v2_metadata_contract(args):
+    """V2 phase metadata that is mandatory for V2-new resumes."""
+    memory_batch_size = args.v2_memory_batch_size
+    kd_memory_batch_size = args.v2_kd_memory_batch_size
+    active_stream_samples = args.v2_new_active_memory_cap
+    contract = {
+        "memory_batch_size": memory_batch_size,
+        "kd_memory_batch_size": kd_memory_batch_size,
+        "effective_kd_memory_batch_size": (
+            kd_memory_batch_size or memory_batch_size or 1),
+        "effective_replay_memory_batch_size": memory_batch_size or 1,
+        "replay_forward_batch_size": args.v2_replay_forward_batch_size,
+        "kd_loss_coeff": args.v2_kd_loss_coeff,
+        "kd_temperature": args.v2_kd_temperature,
+        "kd_learning_rate": args.v2_kd_learning_rate,
+        "kd_chunk_tokens": args.v2_kd_chunk_tokens,
+        "kd_token_scope": args.v2_kd_token_scope,
+        "joint_replay_loss_coeff": args.v2_joint_replay_loss_coeff,
+        "joint_new_to_replay_sample_ratio":
+            args.v2_joint_new_to_replay_ratio,
+        "joint_replay_schedule":
+            "every_optimizer_update_active_stream_per_primary_epoch",
+        "joint_replay_reduction": "active_sample_mean",
+        "joint_replay_forward_reduction":
+            "packed_per_sample_token_mean_then_sum",
+        "max_replay_batches_per_step":
+            args.v2_max_replay_batches_per_step,
+        "kd_active_stream_samples_per_pass": active_stream_samples,
+        "kd_active_stream_passes": "match_primary_epochs",
+        "kd_total_exposure_strategy":
+            "samples_per_pass_times_primary_epochs",
+        "joint_replay_active_stream_samples_per_primary_epoch":
+            active_stream_samples,
+        "joint_replay_total_exposure_strategy":
+            "samples_per_primary_epoch_times_primary_epochs",
+    }
+    if getattr(args, "v2_joint_replay_objective", "lm") == "hidden_mse":
+        contract.update({
+            "joint_replay_objective": "hidden_mse",
+            "hidden_mse_loss_coeff": float(getattr(
+                args, "v2_hidden_mse_loss_coeff", 1.0)),
+            "hidden_mse_teacher": "expanded_post_kd_init",
+            "hidden_mse_targets": "all_decoder_layer_outputs",
+            "hidden_mse_reduction":
+                "active_sample_mean_equal_layer_mean",
+        })
+    kd_pass_multiplier = int(getattr(args, "v2_kd_pass_multiplier", 1))
+    if kd_pass_multiplier != 1:
+        contract["kd_active_stream_passes"] = (
+            "primary_epochs_times_multiplier")
+        contract["kd_pass_multiplier"] = kd_pass_multiplier
+        contract["kd_total_exposure_strategy"] = (
+            "samples_per_pass_times_primary_epochs_times_multiplier")
+    aux_mix = float(getattr(args, "v2_new_expert_aux_mix", 0.0))
+    if aux_mix > 0:
+        contract.update({
+            "new_expert_auxiliary_route":
+                "detached_router_hard_top1_interpolation",
+            "new_expert_aux_mix": aux_mix,
+            "new_expert_aux_loss_coeff": float(getattr(
+                args, "v2_new_expert_aux_loss_coeff", 1.0)),
+            "new_expert_aux_optimizer_schedule":
+                "same_primary_update_single_optimizer_step",
+        })
+    return contract
+
+
+def v1_expert_first_v2_metadata_contract(args):
+    """KD and router-integration contract for expert-first V1."""
+    memory_batch_size = args.v2_memory_batch_size
+    kd_memory_batch_size = args.v2_kd_memory_batch_size
+    return {
+        "memory_batch_size": memory_batch_size,
+        "kd_memory_batch_size": kd_memory_batch_size,
+        "effective_kd_memory_batch_size": (
+            kd_memory_batch_size or memory_batch_size or 1),
+        "kd_loss_coeff": args.v2_kd_loss_coeff,
+        "kd_temperature": args.v2_kd_temperature,
+        "kd_learning_rate": args.v2_kd_learning_rate,
+        "kd_chunk_tokens": args.v2_kd_chunk_tokens,
+        "kd_token_scope": args.v2_kd_token_scope,
+        "kd_active_stream_samples_per_pass": args.v2_new_active_memory_cap,
+        "kd_active_stream_passes": "primary_epochs_times_multiplier",
+        "kd_pass_multiplier": args.v2_kd_pass_multiplier,
+        "router_ft_schedule": "post_expert_training_router_only",
+        "router_ft_seen_memory_exposures": args.v2_new_active_memory_cap,
+    }
+
+
+def v1_expert_first_memory_metadata_contract(args):
+    """Auditable V2-new memory mechanics used by expert-first V1."""
+    return {
+        "persistent_subset_policy":
+            "validated_output_dir_json_else_deterministic_random",
+        "persistent_samples_per_task":
+            args.v2_new_persistent_samples_per_task,
+        "persistent_memory_integrity":
+            "source_count_unique_range_sha256",
+        "persistent_memory_resume_source":
+            "output_dir/fixed_replay_memory",
+        "selection_mode": args.replay_selection_mode,
+        "active_memory_cap_unique": args.v2_new_active_memory_cap,
+        "active_memory_distribution": "equal_task",
+        "active_memory_selection": "stable_nested_task_prefix",
+        "active_stream_samples_per_pass": args.v2_new_active_memory_cap,
+        "active_stream_seed_phase": "v2_new_shared_active_memory",
+        "kd_stream_passes": "primary_epochs_times_multiplier",
+        "kd_stream_pass_multiplier": args.v2_kd_pass_multiplier,
+        "router_ft_stream_passes": "one_seen_task_stream",
+    }
+
+
+def metadata_contract_mismatches(expected, actual, prefix):
+    """Return checkpoint contract differences with user-facing key paths."""
+    return {
+        f"{prefix}.{key}": (actual.get(key), value)
+        for key, value in expected.items()
+        if actual.get(key) != value
+    }
+
+
+def v2_resume_metadata_mismatches(args, actual_v2, completed_round):
+    """Compare V2 phase metadata without tightening legacy checkpoints."""
+    if args.training_version == "v1_expert_first":
+        expected = v1_expert_first_v2_metadata_contract(args)
+        if getattr(args, "allow_v2_memory_batch_resume_override", False):
+            for key in (
+                    "memory_batch_size", "kd_memory_batch_size",
+                    "effective_kd_memory_batch_size"):
+                expected.pop(key, None)
+        return metadata_contract_mismatches(expected, actual_v2, "v2")
+    expected = {
+        "memory_batch_size": args.v2_memory_batch_size,
+        "kd_loss_coeff": args.v2_kd_loss_coeff,
+        "kd_temperature": args.v2_kd_temperature,
+        "kd_learning_rate": args.v2_kd_learning_rate,
+        "kd_chunk_tokens": args.v2_kd_chunk_tokens,
+        "kd_token_scope": args.v2_kd_token_scope,
+        "joint_replay_loss_coeff": args.v2_joint_replay_loss_coeff,
+        "max_replay_batches_per_step":
+            args.v2_max_replay_batches_per_step,
+    }
+    if is_v2_new_training_version(args.training_version):
+        # There is no legacy V2-new format, so every exposure-defining field
+        # is mandatory even for round 0.
+        expected = v2_new_v2_metadata_contract(args)
+        if getattr(args, "allow_v2_memory_batch_resume_override", False):
+            for key in (
+                    "memory_batch_size", "kd_memory_batch_size",
+                    "effective_kd_memory_batch_size",
+                    "effective_replay_memory_batch_size",
+                    "replay_forward_batch_size"):
+                expected.pop(key, None)
+        # Older checkpoints predate packed replay forwards.  This field is
+        # operational only: absence means the historical one-record forward
+        # and does not alter exposure identities or the loss contract.
+        if "replay_forward_batch_size" not in actual_v2:
+            expected.pop("replay_forward_batch_size", None)
+            expected.pop("joint_replay_forward_reduction", None)
+        return metadata_contract_mismatches(expected, actual_v2, "v2")
+
+    mismatches = metadata_contract_mismatches(expected, actual_v2, "v2")
+    optional = {
+        "kd_memory_batch_size": args.v2_kd_memory_batch_size,
+        "joint_new_to_replay_sample_ratio":
+            args.v2_joint_new_to_replay_ratio,
+        "joint_replay_reduction": "active_sample_mean",
+        "joint_replay_forward_reduction":
+            "packed_per_sample_token_mean_then_sum",
+    }
+    for key, expected_value in optional.items():
+        if key in actual_v2 and actual_v2[key] != expected_value:
+            mismatches[f"v2.{key}"] = (
+                actual_v2[key], expected_value)
+    if "joint_replay_schedule" in actual_v2:
+        expected_schedule = (
+            "every_optimizer_update_fixed_total_no_epoch_multiplier")
+        legacy_first_task_checkpoint = (
+            completed_round == 0
+            and actual_v2["joint_replay_schedule"] ==
+            "every_optimizer_update_exact_global_exposure")
+        if (actual_v2["joint_replay_schedule"] != expected_schedule
+                and not legacy_first_task_checkpoint):
+            mismatches["v2.joint_replay_schedule"] = (
+                actual_v2["joint_replay_schedule"], expected_schedule)
+    return mismatches
+
+
+def validate_v2_new_resume_persisted_identities(
+        meta, completed_round, task_names):
+    """Validate completed-task replay identities recorded by V2-new.
+
+    The same compact task -> {resolved_seed, indices_sha256} mapping is stored
+    in both replay-memory and V2-new metadata.  It is passed to the trainer so
+    loading each authoritative JSON can cross-check the checkpoint identity.
+    """
+    task_names = list(task_names)
+    if not 0 <= completed_round < len(task_names):
+        raise ValueError(
+            "V2-new resume round is outside the configured task order: "
+            f"round={completed_round}, tasks={len(task_names)}")
+    expected_tasks = task_names[:completed_round + 1]
+    replay_identities = (meta.get("replay_memory", {})
+                         .get("persisted_identities"))
+    v2_new_identities = (meta.get("v2_new", {})
+                         .get("persisted_identities"))
+
+    def validate_mapping(value, location):
+        if not isinstance(value, dict):
+            raise ValueError(
+                f"{location}.persisted_identities must be a mapping")
+        if set(value) != set(expected_tasks) or len(value) != len(expected_tasks):
+            raise ValueError(
+                f"{location}.persisted_identities task keys mismatch: "
+                f"actual={sorted(value)}, expected={sorted(expected_tasks)}")
+        validated = {}
+        for task in expected_tasks:
+            record = value[task]
+            if (not isinstance(record, dict)
+                    or set(record) != {"resolved_seed", "indices_sha256"}):
+                raise ValueError(
+                    f"{location}.persisted_identities.{task} must contain "
+                    "exactly resolved_seed and indices_sha256")
+            resolved_seed = record["resolved_seed"]
+            digest = record["indices_sha256"]
+            if (not isinstance(resolved_seed, int)
+                    or isinstance(resolved_seed, bool)):
+                raise ValueError(
+                    f"{location}.persisted_identities.{task}.resolved_seed "
+                    "must be an integer")
+            if (not isinstance(digest, str)
+                    or len(digest) != 64
+                    or any(character not in "0123456789abcdef"
+                           for character in digest)):
+                raise ValueError(
+                    f"{location}.persisted_identities.{task}.indices_sha256 "
+                    "must be a lowercase 64-character SHA256")
+            validated[task] = {
+                "resolved_seed": int(resolved_seed),
+                "indices_sha256": digest,
+            }
+        return validated
+
+    replay_validated = validate_mapping(replay_identities, "replay_memory")
+    v2_new_validated = validate_mapping(v2_new_identities, "v2_new")
+    if replay_validated != v2_new_validated:
+        raise ValueError(
+            "V2-new persisted identity metadata differs between "
+            "replay_memory and v2_new")
+    return replay_validated
+
+
+def validate_v2_new_args(args):
+    """Fail early on settings that would violate the named V2-new contract."""
+    aux_mix = float(getattr(args, "v2_new_expert_aux_mix", 0.0))
+    aux_loss_coeff = float(getattr(
+        args, "v2_new_expert_aux_loss_coeff", 1.0))
+    if not 0.0 <= aux_mix <= 1.0:
+        raise ValueError("--v2_new_expert_aux_mix must be in [0, 1]")
+    if aux_loss_coeff < 0.0:
+        raise ValueError(
+            "--v2_new_expert_aux_loss_coeff must be non-negative")
+    if aux_mix > 0 and args.training_version != "v2_new":
+        raise ValueError(
+            "--v2_new_expert_aux_mix currently requires v2_new")
+    if not uses_v2_new_memory(args.training_version):
+        return
+    fixed_contract = uses_fixed_v2_new_contract(args.training_version)
+    if fixed_contract:
+        if args.v2_new_persistent_samples_per_task != 500:
+            raise ValueError(
+                "v2_new requires --v2_new_persistent_samples_per_task 500")
+        if args.replay_subset_ratio != 0.1:
+            raise ValueError(
+                "v2_new requires --replay_subset_ratio 0.1 (500/5,000)")
+        if args.v2_new_active_memory_cap != 1000:
+            raise ValueError(
+                "v2_new requires --v2_new_active_memory_cap 1000")
+    else:
+        # Relaxed profile: the replay stream is sized directly.  The pool must
+        # still be able to fill the active cap, so persistent-per-task times
+        # the number of tasks has to reach it, and the subset ratio must match
+        # the persistent count against TRACE's 5,000-sample tasks.
+        if args.v2_new_persistent_samples_per_task < 1:
+            raise ValueError(
+                "--v2_new_persistent_samples_per_task must be positive")
+        if args.v2_new_active_memory_cap < 1:
+            raise ValueError("--v2_new_active_memory_cap must be positive")
+        if not 0.0 < args.replay_subset_ratio <= 1.0:
+            raise ValueError("--replay_subset_ratio must be in (0, 1]")
+    if args.replay_selection_mode != 'random':
+        raise ValueError(
+            "v2_new requires --replay_selection_mode random")
+    if args.replay_distribution not in ('equal_task', 'recency_weighted'):
+        raise ValueError(
+            "v2_new replay must be equal_task or recency_weighted")
+    if (uses_fixed_v2_new_contract(args.training_version)
+            and args.replay_distribution != 'equal_task'):
+        raise ValueError(
+            "the published v2_new contract fixes --replay_distribution "
+            "equal_task; recency_weighted needs a relaxed training version")
+    if (uses_fixed_v2_new_contract(args.training_version)
+            and args.v2_joint_new_to_replay_ratio != 5):
+        raise ValueError(
+            "v2_new requires --v2_joint_new_to_replay_ratio 5")
+    if args.lora_moe_rank < 1:
+        raise ValueError("v2_new requires --lora_moe_rank >= 1")
+    if args.experts_per_task < 1:
+        raise ValueError("v2_new requires --experts_per_task >= 1")
+    if args.top_k < 1:
+        raise ValueError("v2_new requires --top_k >= 1")
+    if args.top_k > args.experts_per_task:
+        raise ValueError(
+            "v2_new requires --top_k <= --experts_per_task so round 0 "
+            "has enough active experts")
+    if (args.training_version == "v1_expert_first"
+            and (args.experts_per_task != 1 or args.top_k != 1)):
+        raise ValueError(
+            "v1_expert_first requires --experts_per_task 1 --top_k 1")
+    quota_schedule = list(getattr(
+        args, "v2_new_expert_quota_schedule", []) or [])
+    if quota_schedule:
+        if args.training_version != "v2_new":
+            raise ValueError(
+                "--v2_new_expert_quota_schedule currently requires v2_new")
+        if args.experts_per_task != 1 or args.top_k != 1:
+            raise ValueError(
+                "--v2_new_expert_quota_schedule requires "
+                "--experts_per_task 1 --top_k 1")
+        if any(value < 0.0 or value > 1.0 for value in quota_schedule):
+            raise ValueError(
+                "every expert quota schedule value must be in [0, 1]")
+    if aux_mix > 0:
+        if args.experts_per_task != 1 or args.top_k != 1:
+            raise ValueError(
+                "--v2_new_expert_aux_mix requires "
+                "--experts_per_task 1 --top_k 1")
+        if args.routing_weight_mode != "straight_through_topk":
+            raise ValueError(
+                "--v2_new_expert_aux_mix requires "
+                "--routing_weight_mode straight_through_topk")
+        if aux_loss_coeff == 0.0:
+            raise ValueError(
+                "positive --v2_new_expert_aux_mix requires a positive "
+                "--v2_new_expert_aux_loss_coeff")
+        if quota_schedule:
+            raise ValueError(
+                "expert auxiliary interpolation and quota routing are "
+                "mutually exclusive")
+    if args.training_version in {"v2_new_top4", "v3_new_top4"}:
+        exact = {
+            "experts_per_task": 4,
+            "lora_moe_rank": 16,
+            "lora_moe_alpha": 128,
+            "top_k": 4,
+            "routing_weight_mode": "straight_through_topk",
+            "v2_kd_pass_multiplier": 2,
+        }
+        mismatches = {
+            name: (getattr(args, name), expected)
+            for name, expected in exact.items()
+            if getattr(args, name) != expected
+        }
+        if mismatches:
+            raise ValueError(
+                f"{args.training_version} requires its exact 4 x rank-16 "
+                "top-4 "
+                f"profile (actual, expected): {mismatches}")
+
+
 def main():
-    args = parse_args()
+    args = resolve_training_version_defaults(parse_args())
+    # _allocate_memory_counts is a staticmethod shared by every variant, so the
+    # recency exponent is published on the module instead of threaded through it.
+    ours_lora_moe_module.RECENCY_POWER[0] = float(args.replay_recency_power)
+    args.v2_new_resume_persisted_identities = None
+    dataset_argument = args.dataset_name
+    datasets = (
+        list(AllDatasetName)
+        if dataset_argument == "all" or dataset_argument[0] == "all"
+        else list(dataset_argument))
     if not 0.0 < args.past_task_ratio <= 1.0:
         raise ValueError("--past_task_ratio must be in (0, 1]")
     if (not args.gradient_accumulation_steps
             or any(value < 1 for value in args.gradient_accumulation_steps)
             or args.loss_log_interval < 1):
         raise ValueError("gradient accumulation and loss log interval must be positive")
+    if args.v3_epoch_probe_samples < 0:
+        raise ValueError("--v3_epoch_probe_samples cannot be negative")
     if args.max_train_len < 0:
         raise ValueError("--max_train_len cannot be negative")
     if not 0.0 <= args.warmup_ratio < 1.0:
@@ -209,15 +884,48 @@ def main():
         raise ValueError("--replay_subset_ratio must be in (0, 1]")
     if args.router_replay_exposure_samples < 1:
         raise ValueError("--router_replay_exposure_samples must be positive")
-    if args.training_version in ('v2', 'v2_5'):
-        if args.v2_memory_batch_size < 0 or args.v2_max_replay_batches_per_step < 0:
-            raise ValueError("v2 replay batch sizes/caps cannot be negative")
+    if args.training_version in (
+            'v1_expert_first', 'v2', 'v2_new', 'v2_new_top4',
+            'v2_5', 'v3', 'v3_new', 'v3_new_top4'):
+        if (args.v2_memory_batch_size < 0
+                or args.v2_replay_forward_batch_size < 1
+                or args.v2_kd_memory_batch_size < 0
+                or args.v2_max_replay_batches_per_step < 0):
+            raise ValueError(
+                "v2 replay forward batch size must be positive and other "
+                "V2 batch sizes/caps cannot be negative")
+        if args.v2_memory_batch_size not in (0, 1):
+            raise ValueError(
+                "--v2_memory_batch_size must be 0 or 1: exact-budget "
+                "router replay is assigned per sample at every optimizer step")
         if args.v2_kd_temperature <= 0:
             raise ValueError("v2 KD temperature must be positive")
+        if args.v2_kd_pass_multiplier < 1:
+            raise ValueError("v2 KD pass multiplier must be positive")
+        if (not uses_v2_new_memory(args.training_version)
+                and args.v2_kd_pass_multiplier != 1):
+            raise ValueError(
+                "--v2_kd_pass_multiplier is supported only by V2-new "
+                "profiles; legacy V2/V2.5/V3 must keep it at 1")
         if args.v2_kd_chunk_tokens < 1:
             raise ValueError("--v2_kd_chunk_tokens must be positive")
         if args.v2_kd_loss_coeff < 0 or args.v2_joint_replay_loss_coeff < 0:
             raise ValueError("v2 KD/replay loss coefficients cannot be negative")
+        if args.v2_hidden_mse_loss_coeff <= 0:
+            raise ValueError("v2 hidden-MSE loss coefficient must be positive")
+        if (args.v2_joint_replay_objective == 'hidden_mse'
+                and args.training_version not in {'v2_new', 'v3_new'}):
+            raise ValueError(
+                "hidden-MSE replay is currently defined for the exact "
+                "V2-new/V3-new one-expert profiles only")
+        if (args.v2_joint_replay_objective == 'hidden_mse'
+                and args.v2_kd_loss_coeff <= 0):
+            raise ValueError(
+                "hidden-MSE replay requires enabled expansion KD-init so its "
+                "post-KD teacher is well-defined")
+        if args.v2_joint_new_to_replay_ratio < 0:
+            raise ValueError("--v2_joint_new_to_replay_ratio cannot be negative")
+    validate_v2_new_args(args)
     if (args.training_version == 'v2_5'
             and (args.moe_aux_loss_coeff != 0 or args.moe_z_loss_coeff != 0)):
         raise ValueError("v2_5 requires --moe_aux_loss_coeff 0 and --moe_z_loss_coeff 0")
@@ -236,6 +944,12 @@ def main():
             "--router_replay_exposure_samples must be divisible by world size "
             "for an exact non-duplicated global DDP exposure budget: "
             f"{args.router_replay_exposure_samples} % {world_size} != 0")
+    if (uses_v2_new_memory(args.training_version)
+            and args.v2_new_active_memory_cap % world_size != 0):
+        raise ValueError(
+            "--v2_new_active_memory_cap must be divisible by world size for "
+            "an exact non-duplicated DDP active-memory stream: "
+            f"{args.v2_new_active_memory_cap} % {world_size} != 0")
 
     set_random_seed(args.seed)
     if dist.is_initialized():
@@ -252,9 +966,12 @@ def main():
                     "SLoRA training requires a configured non-Llama pad token")
             tokenizer.pad_token = "<|finetune_right_pad_id|>"
             tokenizer.pad_token_id = 128004
+        args.chat_template_source = ensure_llama31_chat_template(
+            tokenizer, args.model_name_or_path)
         tokenizer.padding_side = "right"
         tokenizer.truncation_side = "right"
     else:
+        args.chat_template_source = None
         tokenizer = load_hf_tokenizer(
             args.model_name_or_path, fast_tokenizer=True)
         assert tokenizer.padding_side == "left"
@@ -296,13 +1013,23 @@ def main():
                             torch_dtype=torch.bfloat16, low_cpu_mem_usage=True)
     model = model.to(device=device)
 
-    # Wrap every FFN with an (initially expert-less) LoRA-MoE module. Experts
-    # are added per task inside Ours_LoRA_MoE.train_one_task, not here.
-    attach_lora_moe(model, r=args.lora_moe_rank, alpha=args.lora_moe_alpha,
-                    top_k=args.top_k, aux_loss_coeff=args.moe_aux_loss_coeff,
-                    z_loss_coeff=args.moe_z_loss_coeff,
-                    routing_weight_mode=args.routing_weight_mode,
-                    dropout=args.lora_moe_dropout)
+    # V1/V2 keep the released FFN-only layout. V3 lifts the router to the
+    # decoder layer and shares its one pre-attention decision across equal-rank
+    # QKVO and FFN LoRA experts.
+    if args.training_version in V3_TRAINING_VERSIONS:
+        attach_shared_qkvo_lora_moe(
+            model, r=args.lora_moe_rank, alpha=args.lora_moe_alpha,
+            top_k=args.top_k, aux_loss_coeff=args.moe_aux_loss_coeff,
+            z_loss_coeff=args.moe_z_loss_coeff,
+            routing_weight_mode=args.routing_weight_mode,
+            dropout=args.lora_moe_dropout)
+    else:
+        attach_lora_moe(
+            model, r=args.lora_moe_rank, alpha=args.lora_moe_alpha,
+            top_k=args.top_k, aux_loss_coeff=args.moe_aux_loss_coeff,
+            z_loss_coeff=args.moe_z_loss_coeff,
+            routing_weight_mode=args.routing_weight_mode,
+            dropout=args.lora_moe_dropout)
     if args.training_version == 'v2_5':
         applied_coeffs = {
             (layer.mlp.aux_loss_coeff, layer.mlp.z_loss_coeff)
@@ -320,6 +1047,7 @@ def main():
         round_name = os.path.basename(checkpoint_dir)
         if not round_name.isdigit():
             raise ValueError("--resume_checkpoint must end in a numeric round")
+        completed_round = int(round_name)
         meta_path = os.path.join(checkpoint_dir, "lora_moe_meta.json")
         weights_path = os.path.join(checkpoint_dir, "pytorch_model.bin")
         with open(meta_path, encoding="utf-8") as handle:
@@ -332,6 +1060,14 @@ def main():
             "routing_weight_mode": args.routing_weight_mode,
             "training_version": args.training_version,
         }
+        if args.training_version in V3_TRAINING_VERSIONS:
+            expected.update({
+                "architecture": V3_ARCHITECTURE,
+                "attention_rank": args.lora_moe_rank,
+                "attention_targets": ["q", "k", "v", "o"],
+                "router_position":
+                    "post_input_layernorm_pre_self_attention",
+            })
         actual = dict(meta)
         actual.setdefault("training_version", "v1")
         mismatches = {key: (actual.get(key), value) for key, value in expected.items()
@@ -344,56 +1080,91 @@ def main():
             "adam_beta2": args.adam_beta2,
             "adam_epsilon": args.adam_epsilon,
         }
+        if args.training_version in V3_TRAINING_VERSIONS:
+            expected_training_profile["chat_template_source"] = (
+                args.chat_template_source)
         actual_training_profile = actual.get("training_profile", {})
         mismatches.update({
             f"training_profile.{key}": (actual_training_profile.get(key), value)
             for key, value in expected_training_profile.items()
             if actual_training_profile.get(key) != value
         })
-        expected_replay = {
-            "subset_ratio_per_task": args.replay_subset_ratio,
-            "exposure_samples_per_round":
-                args.router_replay_exposure_samples,
-            "v1_router_retune_enabled": args.router_retune_epochs > 0,
-            "distribution": args.replay_distribution,
-            "subset_seed": args.replay_subset_seed,
-        }
-        actual_replay = actual.get("replay_memory", {})
-        mismatches.update({
-            f"replay_memory.{key}": (actual_replay.get(key), value)
-            for key, value in expected_replay.items()
-            if actual_replay.get(key) != value
-        })
-        if args.training_version in ("v2", "v2_5"):
-            expected_v2 = {
-                "memory_batch_size": args.v2_memory_batch_size,
-                "kd_loss_coeff": args.v2_kd_loss_coeff,
-                "kd_temperature": args.v2_kd_temperature,
-                "kd_learning_rate": args.v2_kd_learning_rate,
-                "kd_chunk_tokens": args.v2_kd_chunk_tokens,
-                "kd_token_scope": args.v2_kd_token_scope,
-                "joint_replay_loss_coeff": args.v2_joint_replay_loss_coeff,
-                "max_replay_batches_per_step": args.v2_max_replay_batches_per_step,
+        if args.training_version == "v1_expert_first":
+            expected_replay = v1_expert_first_replay_memory_contract(args)
+        elif is_v2_new_training_version(args.training_version):
+            expected_replay = v2_new_replay_memory_contract(args)
+        else:
+            expected_replay = {
+                "subset_ratio_per_task": args.replay_subset_ratio,
+                "exposure_samples_per_round":
+                    args.router_replay_exposure_samples,
+                "v1_router_retune_enabled": (
+                    False if args.training_version in V3_TRAINING_VERSIONS
+                    else args.router_retune_epochs > 0),
+                "distribution": args.replay_distribution,
+                "subset_seed": args.replay_subset_seed,
             }
+        actual_replay = actual.get("replay_memory", {})
+        mismatches.update(metadata_contract_mismatches(
+            expected_replay, actual_replay, "replay_memory"))
+        if args.training_version in (
+                "v1_expert_first", "v2", "v2_new", "v2_new_top4",
+                "v2_5", "v3", "v3_new", "v3_new_top4"):
             actual_v2 = actual.get("v2", {})
-            mismatches.update({
-                f"v2.{key}": (actual_v2.get(key), value)
-                for key, value in expected_v2.items()
-                if actual_v2.get(key) != value
-            })
+            mismatches.update(v2_resume_metadata_mismatches(
+                args, actual_v2, completed_round))
+            if uses_v2_new_memory(args.training_version):
+                expected_v2_new = (
+                    v1_expert_first_memory_metadata_contract(args)
+                    if args.training_version == "v1_expert_first"
+                    else v2_new_metadata_contract(args))
+                actual_v2_new = actual.get("v2_new", {})
+                mismatches.update(metadata_contract_mismatches(
+                    expected_v2_new, actual_v2_new, "v2_new"))
+                args.v2_new_resume_persisted_identities = (
+                    validate_v2_new_resume_persisted_identities(
+                        actual, completed_round, datasets))
+        # The contract keeps a resume from silently changing replay mechanics.  A
+        # deliberate change -- re-sharding a run onto a different card count, where DDP
+        # needs the active-memory cap divisible by the world size -- can waive named keys
+        # through RESUME_CONTRACT_ALLOW_DRIFT; unnamed keys still abort.  An entry matches
+        # either the full dotted key or its final component.
+        allow_drift = {k.strip() for k in os.environ.get(
+            "RESUME_CONTRACT_ALLOW_DRIFT", "").split(",") if k.strip()}
+        if allow_drift and mismatches:
+            waived = {k: v for k, v in mismatches.items()
+                      if k in allow_drift or k.rsplit(".", 1)[-1] in allow_drift}
+            if waived:
+                print(f"[resume] waiving contract drift: {waived}", flush=True)
+                mismatches = {k: v for k, v in mismatches.items()
+                              if k not in waived}
         if mismatches:
             raise ValueError(f"resume hyperparameter mismatch: {mismatches}")
-        completed_round = int(round_name)
         expected_experts = (completed_round + 1) * args.experts_per_task
         if int(meta["num_experts"]) != expected_experts:
             raise ValueError(
                 f"round {completed_round} should have {expected_experts} experts, "
                 f"checkpoint has {meta['num_experts']}")
-        add_experts_to_all_layers(model, expected_experts)
+        if args.training_version in V3_TRAINING_VERSIONS:
+            add_v3_experts(model, expected_experts)
+        else:
+            add_experts_to_all_layers(model, expected_experts)
         state = torch.load(weights_path, map_location="cpu", weights_only=False)
         missing, unexpected = model.load_state_dict(state, strict=False)
+        if args.training_version in V3_TRAINING_VERSIONS:
+            grown_fragments = (
+                ".shared_expert_router.router.",
+                ".self_attn.q_proj.experts.",
+                ".self_attn.k_proj.experts.",
+                ".self_attn.v_proj.experts.",
+                ".self_attn.o_proj.experts.",
+                ".mlp.experts.",
+            )
+        else:
+            grown_fragments = (".mlp.experts.", ".mlp.router.")
         grown_missing = [key for key in missing
-                         if ".mlp.experts." in key or ".mlp.router." in key]
+                         if any(fragment in key
+                                for fragment in grown_fragments)]
         if unexpected or grown_missing:
             raise RuntimeError(
                 f"invalid resume state: unexpected={unexpected[:5]} "
@@ -403,8 +1174,6 @@ def main():
             f"Resumed Track1 after round {completed_round}: "
             f"experts={expected_experts}, next_task={args.start_task}",
             args.global_rank)
-
-    datasets = AllDatasetName if args.dataset_name[0] == "all" else args.dataset_name
 
     # Resolve per-task train batch size: single value -> uniform; list -> by task order.
     bs = args.per_device_train_batch_size
@@ -480,13 +1249,17 @@ def main():
                 DistributedSampler(train_dataset), DistributedSampler(eval_dataset), DistributedSampler(test_dataset))
 
         if args.train_format == "slora_chat_full":
+            slora_max_length = (args.max_train_len or (
+                args.max_prompt_len + args.max_ans_len))
             eval_data_collator = SLoRATraceDataCollator(
-                tokenizer, max_length=(args.max_train_len or (
-                    args.max_prompt_len + args.max_ans_len)))
+                tokenizer, max_length=slora_max_length,
+                label_scope="answer")
             if args.use_pretokenized_train_cache:
                 data_collator = PreTokenizedSLoRATraceDataCollator(tokenizer)
             else:
-                data_collator = eval_data_collator
+                data_collator = SLoRATraceDataCollator(
+                    tokenizer, max_length=slora_max_length,
+                    label_scope="full")
         else:
             data_collator = DataCollator(
                 tokenizer, padding="longest",
@@ -512,17 +1285,39 @@ def main():
     # gradient_checkpointing_enable with enable_input_require_grads to restore the
     # graph without unfreezing any weights.
 
-    # NOTE: no engine is built here. Each task's add_experts_to_all_layers()
-    # creates brand-new nn.Parameters (new expert A/B, a new (bigger) router
+    # NOTE: no engine is built here. Each task's expert-growth helper creates
+    # brand-new nn.Parameters (new expert A/B, a new (bigger) router
     # Linear) -- a DDP wrapper/optimizer built once, up front, would never see
     # or update them. Ours_LoRA_MoE instead builds a fresh optimizer and DDP
     # wrapper itself (_reinit_engine) at the start of every phase.
     print_rank_0(
         f"***** Running LoRA-MoE continual training ({args.training_version}) *****",
         args.global_rank)
-    trainer_class = (
-        Ours_LoRA_MoE_V2 if args.training_version in ('v2', 'v2_5')
-        else Ours_LoRA_MoE)
+    if args.training_version in {'v3_new', 'v3_new_top4', 'v3_new_replay40',
+                                 'v3_new_hidden_mse_full',
+                                 'v3_new_replay1to1',
+                                 'v3_new_hidden_mse_1to1',
+                                 'v3_new_replay1to1_recency',
+                                 'v3_new_replay1to1_p5k',
+                                 'v3_new_hidden_mse_1to1_p5k',
+                                 'v3_new_kd35k',
+                                 'v3_new_recency_kd175k',
+                                 'v3_new_p5k_kd175k',
+                                 'v3_new_r20_kd100',
+                                 'v3_new_kd200',
+                                 'v3_new_recency_p2',
+                                 'v3_new_hmse_kd200'}:
+        trainer_class = Ours_LoRA_MoE_V3_New
+    elif args.training_version == 'v3':
+        trainer_class = Ours_LoRA_MoE_V3
+    elif args.training_version == 'v1_expert_first':
+        trainer_class = Ours_LoRA_MoE_V1_Expert_First
+    elif is_v2_new_training_version(args.training_version):
+        trainer_class = Ours_LoRA_MoE_V2_New
+    elif args.training_version in ('v2', 'v2_5'):
+        trainer_class = Ours_LoRA_MoE_V2
+    else:
+        trainer_class = Ours_LoRA_MoE
     trainer = trainer_class(
         model, tokenizer, None, train_task_list, eval_task_list,
         test_task_list, args)

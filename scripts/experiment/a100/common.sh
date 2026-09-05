@@ -22,6 +22,10 @@ resolve_python() {
 export PYTHON_BIN="${PYTHON_BIN:-$(resolve_python)}"
 
 default_train_dir_for_task() {
+    if [ -n "${FLAME_DATA_ROOT:-}" ] && [ -d "$FLAME_DATA_ROOT/$1/train" ]; then
+        echo "$FLAME_DATA_ROOT/$1/train"
+        return
+    fi
     case "$1" in
         wiki)
             if [ -d "$PROJECT_ROOT/data/wiki/train" ]; then
@@ -48,6 +52,10 @@ default_train_dir_for_task() {
 }
 
 default_probe_dir_for_task() {
+    if [ -n "${FLAME_DATA_ROOT:-}" ] && [ -d "$FLAME_DATA_ROOT/$1/test" ]; then
+        echo "$FLAME_DATA_ROOT/$1/test"
+        return
+    fi
     case "$1" in
         wiki)
             if [ -d "$PROJECT_ROOT/data/wiki/test" ]; then
@@ -313,6 +321,8 @@ metadata = {
     'moe_router_topk': int(os.environ['MOE_ROUTER_TOPK']),
     'precision': os.environ['PRECISION'],
     'shared_expert_enabled': False,
+    'stage_inputs_to_scratch': os.environ.get('STAGE_INPUTS_TO_SCRATCH', '0') == '1',
+    'direct_local_save': os.environ.get('DIRECT_LOCAL_SAVE', '1') == '1',
 }
 with open(os.environ['RUN_METADATA'], 'w', encoding='utf-8') as f:
     json.dump(metadata, f, indent=2)
@@ -365,10 +375,15 @@ metadata = {
     'moe_router_topk': int(os.environ['MOE_ROUTER_TOPK']),
     'precision': os.environ['PRECISION'],
     'shared_expert_enabled': False,
+    'stage_inputs_to_scratch': os.environ.get('STAGE_INPUTS_TO_SCRATCH', '0') == '1',
+    'direct_local_save': os.environ.get('DIRECT_LOCAL_SAVE', '1') == '1',
     'shared_frozen': freeze_shared,
     'train_attention_with_new_experts': os.environ.get('TRAIN_ATTENTION_WITH_NEW_EXPERTS', '0') == '1',
     'train_new_experts_and_router_only': os.environ.get('TRAIN_NEW_EXPERTS_AND_ROUTER_ONLY', '0') == '1',
     'moe_new_expert_lr_ramp_steps': int(os.environ.get('MOE_NEW_EXPERT_LR_RAMP_STEPS', '0')),
+    'moe_router_lr_multiplier': float(os.environ.get('MOE_ROUTER_LR_MULTIPLIER', '1.0')),
+    'moe_separate_router_expert_grad_clip': os.environ.get('MOE_SEPARATE_ROUTER_EXPERT_GRAD_CLIP', '0') == '1',
+    'moe_allow_partial_optimizer_state': os.environ.get('MOE_ALLOW_PARTIAL_OPTIMIZER_STATE', '0') == '1',
     'lr': float(os.environ['LR']),
     'min_lr': float(os.environ['MIN_LR']),
     'lr_decay_style': os.environ['LR_DECAY_STYLE'],
@@ -376,7 +391,28 @@ metadata = {
     'lr_wsd_decay_iters': int(os.environ['LR_WSD_DECAY_ITERS']),
     'lr_warmup_fraction': float(os.environ['LR_WARMUP_FRACTION']),
     'moe_joint_replay_lm': os.environ.get('MOE_JOINT_REPLAY_LM', '0') == '1',
+    'moe_joint_replay_old_data_kd': os.environ.get('MOE_JOINT_REPLAY_OLD_DATA_KD', '0') == '1',
+    'moe_joint_replay_old_data_hidden_kl': os.environ.get('MOE_JOINT_REPLAY_OLD_DATA_HIDDEN_KL', '0') == '1',
+    'moe_joint_replay_old_data_hidden_mse': os.environ.get('MOE_JOINT_REPLAY_OLD_DATA_HIDDEN_MSE', '0') == '1',
+    'moe_joint_replay_total_samples': int(os.environ.get('MOE_JOINT_REPLAY_TOTAL_SAMPLES', '0')),
+    'moe_joint_replay_micro_batch_size': int(os.environ.get('MOE_JOINT_REPLAY_MICRO_BATCH_SIZE', '0')),
+    'moe_joint_replay_old_like_gt_path': os.environ.get('MOE_JOINT_REPLAY_OLD_LIKE_GT_PATH') or None,
+    'moe_joint_replay_old_like_unit': os.environ.get('MOE_JOINT_REPLAY_OLD_LIKE_UNIT', 'positive_sequence'),
+    'moe_joint_replay_old_like_target_train_fraction': float(os.environ.get('MOE_JOINT_REPLAY_OLD_LIKE_TARGET_TRAIN_FRACTION', '0')),
+    'moe_joint_replay_old_like_selected_token_count': int(os.environ.get('MOE_JOINT_REPLAY_OLD_LIKE_SELECTED_TOKEN_COUNT', '0')),
+    'moe_joint_replay_old_like_positive_sample_count': int(os.environ.get('MOE_JOINT_REPLAY_OLD_LIKE_POSITIVE_SAMPLE_COUNT', '0')),
+    'moe_joint_replay_old_like_full_train_token_count': int(os.environ.get('MOE_JOINT_REPLAY_OLD_LIKE_FULL_TRAIN_TOKEN_COUNT', '0')),
+    'moe_joint_replay_old_like_subset_count': int(os.environ.get('OLD_LIKE_REPLAY_SUBSET_COUNT', '0')),
+    'moe_joint_replay_old_like_subset_sha256': os.environ.get('OLD_LIKE_REPLAY_SUBSET_SHA256') or None,
+    'moe_joint_new_expert_quota': float(os.environ.get('MOE_JOINT_NEW_EXPERT_QUOTA', '0')),
+    'moe_joint_new_expert_quota_schedule': os.environ.get('MOE_JOINT_NEW_EXPERT_QUOTA_SCHEDULE'),
     'joint_replay_data_weight_mode': os.environ.get('JOINT_REPLAY_DATA_WEIGHT_MODE'),
+    'old_hidden_kl_coeff': float(os.environ.get('OLD_HIDDEN_KL_COEFF', '1.0')),
+    'old_hidden_kl_temperature': float(os.environ.get('OLD_HIDDEN_KL_TEMPERATURE', '1.0')),
+    'old_hidden_kl_layers': os.environ.get('OLD_HIDDEN_KL_LAYERS'),
+    'old_hidden_mse_coeff': float(os.environ.get('OLD_HIDDEN_MSE_COEFF', '1.0')),
+    'old_hidden_mse_layers': os.environ.get('OLD_HIDDEN_MSE_LAYERS'),
+    'log_router_grad_norm_sources': os.environ.get('LOG_ROUTER_GRAD_NORM_SOURCES', '0') == '1',
     'old_model_kl_enabled': old_model_kl_enabled,
     'old_model_kl_coeff': float(os.environ['OLD_MODEL_KL_COEFF']) if old_model_kl_enabled else None,
     'old_model_kl_temperature': float(os.environ['OLD_MODEL_KL_TEMPERATURE']) if old_model_kl_enabled else None,

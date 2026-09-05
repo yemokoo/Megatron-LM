@@ -11,7 +11,13 @@ fi
 export PYTHONNOUSERSITE=1
 export PYTHONPATH="$REPO_DIR/Megatron-LM"
 export FLAME_MOE_REPO_DIR="$REPO_DIR"
-export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
+if [[ -z "${CUDA_HOME:-}" ]]; then
+  if [[ -x "$CONDA_PREFIX/bin/nvcc" ]]; then
+    export CUDA_HOME="$CONDA_PREFIX"
+  else
+    export CUDA_HOME=/usr/local/cuda
+  fi
+fi
 
 echo "FLAME/Megatron runtime activated"
 echo "repo:   $REPO_DIR"

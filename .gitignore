@@ -69,3 +69,5 @@ dist/
 .idea/
 .claude/
 .DS_Store
+/trace/.venv-runtime
+/trace/.wheel-cache

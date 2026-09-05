@@ -141,7 +141,13 @@ _NUMBER_RE = re.compile(r"-?\d[\d,]*\.?\d*")
 def extract_choice(text, letters):
     if letters not in _CUE_RE_CACHE:
         _CUE_RE_CACHE[letters] = (
-            re.compile(r"^\s*([" + letters + r"])(?:\s*$|[\s:.)-])", re.IGNORECASE),
+            # Some HF tokenizers decode a trailing partial byte as U+FFFD
+            # (for example ``A�``).  The leading choice is still unambiguous and
+            # must not be discarded merely because that decode sentinel follows it.
+            re.compile(
+                r"^\s*([" + letters + r"])(?:\s*$|[\s:.)\-�])",
+                re.IGNORECASE,
+            ),
             re.compile(r"(?:answer|choice|option|stance)\W{0,15}\b([" + letters + r"])\b", re.IGNORECASE),
         )
     leading_re, cue_re = _CUE_RE_CACHE[letters]

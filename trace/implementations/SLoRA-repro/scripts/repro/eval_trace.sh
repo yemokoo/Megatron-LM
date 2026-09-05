@@ -7,6 +7,11 @@ unset PYTHONPATH
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 export PYTHONPATH="${ROOT}"
 SCAFFOLD="$(cd "${ROOT}/../.." && pwd)"
+PYTHON_BIN="${SLORA_EVAL_PYTHON:-${TRACE_PYTHON:-${SCAFFOLD}/.venv-runtime/bin/python}}"
+[[ -x "${PYTHON_BIN}" ]] || {
+  echo "[ERROR] SLoRA evaluation Python is not executable: ${PYTHON_BIN}" >&2
+  exit 4
+}
 
 METHOD="${1:?usage: eval_trace.sh <seq|pre|post> <llama31|qwen25_7b>}"
 MODEL_KEY="${2:?usage: eval_trace.sh <seq|pre|post> <llama31|qwen25_7b>}"
@@ -25,6 +30,7 @@ EVAL_SPARSE_15="${EVAL_SPARSE_15:-0}"
 EVAL_BATCH="${SLORA_EVAL_BATCH:-4}"
 EVAL_SHARD_COUNT="${EVAL_SHARD_COUNT:-1}"
 EVAL_SHARD_INDEX="${EVAL_SHARD_INDEX:-0}"
+EVAL_CONTINUE_ON_CELL_ERROR="${EVAL_CONTINUE_ON_CELL_ERROR:-0}"
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 DRY_RUN="${DRY_RUN:-0}"
 export CUDA_VISIBLE_DEVICES
@@ -44,6 +50,10 @@ export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:T
 }
 [[ "${EVAL_SHARD_INDEX}" =~ ^[0-9]+$ && "${EVAL_SHARD_INDEX}" -lt "${EVAL_SHARD_COUNT}" ]] || {
   echo "[ERROR] EVAL_SHARD_INDEX must be in [0, EVAL_SHARD_COUNT): ${EVAL_SHARD_INDEX}" >&2
+  exit 2
+}
+[[ "${EVAL_CONTINUE_ON_CELL_ERROR}" == "0" || "${EVAL_CONTINUE_ON_CELL_ERROR}" == "1" ]] || {
+  echo "[ERROR] EVAL_CONTINUE_ON_CELL_ERROR must be 0 or 1" >&2
   exit 2
 }
 
@@ -87,6 +97,8 @@ fi
 
 if [[ "${DRY_RUN}" != "1" ]]; then
   mkdir -p "${EVAL_DIR}"
+  FAILURE_FILE="${EVAL_DIR}/failed_cells.shard${EVAL_SHARD_INDEX}.tsv"
+  printf 'round\ttask\tstage\tlog\n' > "${FAILURE_FILE}"
   {
     echo "method=${METHOD}"
     echo "checkpoint_method=${CHECKPOINT_METHOD}"
@@ -102,6 +114,16 @@ if [[ "${DRY_RUN}" != "1" ]]; then
     echo "padding_side=left"
   } > "${EVAL_DIR}/eval.env"
 fi
+
+record_cell_failure() {
+  local round="$1" task="$2" stage="$3" log="$4"
+  printf '%s\t%s\t%s\t%s\n' "${round}" "${task}" "${stage}" "${log}" \
+    >> "${FAILURE_FILE}"
+  echo "[SKIP CELL] order${round}.${task} failed at ${stage}; log=${log}" >&2
+  if [[ "${EVAL_CONTINUE_ON_CELL_ERROR}" != "1" ]]; then
+    exit 5
+  fi
+}
 
 cell_index=0
 for ((round=START_ROUND; round<=8; round++)); do
@@ -120,7 +142,7 @@ for ((round=START_ROUND; round<=8; round++)); do
     mkdir -p "${task_dir}"
 
     infer_command=(
-      python3 -u -m src.eval.model_diverse_gen_batch
+      "${PYTHON_BIN}" -u -m src.eval.model_diverse_gen_batch
       --model-path "${CHECKPOINT_RUN_DIR}"
       --model-base "${MODEL_PATH}"
       --question-file "${DATA_ROOT}/${task}/test.json"
@@ -133,7 +155,7 @@ for ((round=START_ROUND; round<=8; round++)); do
       --resume
     )
     eval_command=(
-      python3 -u -m src.eval.eval_trace
+      "${PYTHON_BIN}" -u -m src.eval.eval_trace
       --input_file "${infer_file}"
       --output_file "${task_dir}/wrong.jsonl"
     )
@@ -147,8 +169,11 @@ for ((round=START_ROUND; round<=8; round++)); do
     fi
 
     cd "${ROOT}"
-    "${infer_command[@]}" 2>&1 | tee "${task_dir}/infer.log"
-    python3 - "${DATA_ROOT}/${task}/test.json" "${infer_file}" <<'PY'
+    if ! "${infer_command[@]}" 2>&1 | tee "${task_dir}/infer.log"; then
+      record_cell_failure "${round}" "${task}" infer "${task_dir}/infer.log"
+      continue
+    fi
+    if ! "${PYTHON_BIN}" - "${DATA_ROOT}/${task}/test.json" "${infer_file}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -167,6 +192,18 @@ for line_no, line in enumerate(lines, 1):
         raise SystemExit(f"[ERROR] JSONL line {line_no} missing keys: {sorted(missing)}")
 print(f"[OK] validated {len(lines)} inference records")
 PY
-    "${eval_command[@]}" 2>&1 | tee "${task_dir}/eval.log"
+    then
+      record_cell_failure "${round}" "${task}" validate "${task_dir}/infer.log"
+      continue
+    fi
+    if ! "${eval_command[@]}" 2>&1 | tee "${task_dir}/eval.log"; then
+      record_cell_failure "${round}" "${task}" score "${task_dir}/eval.log"
+      continue
+    fi
   done
 done
+
+if [[ "${DRY_RUN}" != "1" ]]; then
+  failure_count=$(( $(wc -l < "${FAILURE_FILE}") - 1 ))
+  echo "[EVAL COMPLETE] shard=${EVAL_SHARD_INDEX}/${EVAL_SHARD_COUNT} failed_cells=${failure_count}"
+fi

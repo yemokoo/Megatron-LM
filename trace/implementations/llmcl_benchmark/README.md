@@ -1,5 +1,13 @@
 # 🌟 TRACE: A Comprehensive Benchmark for Continual Learning in Large Language Models
 
+Local method notes:
+
+- `OURS_LORA_MOE_V2_KO.md`: FFN-only growing LoRA-MoE V2
+- `v2_new_top4` profile: V2-new replay/KD contract with four rank-16 FFN
+  experts per task, normalized top-4 dispatch, and alpha 128
+- `OURS_LORA_MOE_V3_KO.md`: V2 KD/replay with one pre-attention router shared by
+  equal-rank QKVO and FFN LoRA experts
+
 ## 💥 Trace Benchmark
 
 <div align=center><img src="./assets/TRACE.jpg" width="80%" /></div>
@@ -128,4 +136,3 @@ If you use our work, please cite our paper:
   year={2023}
 }
 ```
-

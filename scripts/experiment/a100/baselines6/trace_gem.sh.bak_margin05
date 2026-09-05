@@ -1,0 +1,12 @@
+#!/bin/bash
+set -euo pipefail
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$DIR/train_stage.sh"
+bash "$DIR/train_dense_wiki.sh"
+
+WIKI="$BASELINES6_OUTPUT_ROOT/common_dense/wiki"
+CODE="$BASELINES6_OUTPUT_ROOT/trace_gem/code"
+CONV="$BASELINES6_OUTPUT_ROOT/trace_gem/conversation"
+MB="$(method_micro_batch trace_gem)"
+run_baselines6_stage trace_gem code "$CODE" "$WIKI" "$(state_dir "$WIKI" trace_gem)" "$MB" 29721
+run_baselines6_stage trace_gem conversation "$CONV" "$CODE" "$(state_dir "$CODE" trace_gem)" "$MB" 29722

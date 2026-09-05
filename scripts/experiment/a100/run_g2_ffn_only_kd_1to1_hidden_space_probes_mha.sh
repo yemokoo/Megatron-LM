@@ -34,6 +34,9 @@ export MODEL_CONFIG_SCRIPT="${MODEL_CONFIG_SCRIPT:-scripts/experiment/a100/flame
 WIKI_DIR="${WIKI_DIR:-$G2_ROOT/wiki/g2matched-top4-e8-ffn352-wiki-ffn-moe-mha-a100-bf16-mb128-1800}"
 KD_INIT_DIR="${KD_INIT_DIR:-$G2_ROOT/code/expansion_distill_init/g2-ffn-only-e8to16-code-expert-init-logits-wiki-distill-mha-a100-bf16-mb48-1800}"
 CODE_1TO1_DIR="${CODE_1TO1_DIR:-$G2_ROOT/code/joint_lm_replay_ramp/g2-ffn-only-code-wiki-joint-lm-allrouter-newexpert-ramp900-mb96-1800}"
+WIKI_REQUIRED_STEP="${WIKI_REQUIRED_STEP:-1800}"
+KD_INIT_REQUIRED_STEP="${KD_INIT_REQUIRED_STEP:-1800}"
+CODE_1TO1_REQUIRED_STEP="${CODE_1TO1_REQUIRED_STEP:-1800}"
 
 require_checkpoint_step() {
     local path="$1"
@@ -128,9 +131,9 @@ run_dump() {
     echo "[DONE] $out_npz"
 }
 
-require_checkpoint_step "$WIKI_DIR" 1800 wiki_only
-require_checkpoint_step "$KD_INIT_DIR" 1800 kd_init
-require_checkpoint_step "$CODE_1TO1_DIR" 1800 code_wiki_1to1
+require_checkpoint_step "$WIKI_DIR" "$WIKI_REQUIRED_STEP" wiki_only
+require_checkpoint_step "$KD_INIT_DIR" "$KD_INIT_REQUIRED_STEP" kd_init
+require_checkpoint_step "$CODE_1TO1_DIR" "$CODE_1TO1_REQUIRED_STEP" code_wiki_1to1
 if [ ! -f "$STAGE1_LOG" ]; then
     echo "[ERROR] missing Code phase-1 log: $STAGE1_LOG" >&2
     exit 1

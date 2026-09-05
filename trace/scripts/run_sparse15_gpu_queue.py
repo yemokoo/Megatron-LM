@@ -15,7 +15,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = Path(os.environ.get("TRACE_DATA_ROOT", ROOT / "data/trace"))
-LOG_ROOT = ROOT / "results/eval_chains/llama31_sparse15_five_20260728/gpu_queue"
+LOG_ROOT = Path(os.environ.get(
+    "SPARSE15_LOG_ROOT",
+    ROOT / "results/eval_chains/llama31_sparse15_five_20260728/gpu_queue",
+))
 TASKS = [
     "C-STANCE", "FOMC", "MeetingBank", "Py150",
     "ScienceQA", "NumGLUE-cm", "NumGLUE-ds", "20Minuten",
@@ -34,8 +37,16 @@ METHODS = [
     ).split(",")
     if method.strip()
 ]
-GPUS = [0, 1, 2, 3]
+GPUS = [
+    int(gpu.strip())
+    for gpu in os.environ.get("SPARSE15_GPUS", "0,1,2,3").split(",")
+    if gpu.strip()
+]
 BATCH = int(os.environ.get("SPARSE15_EVAL_BATCH", "16"))
+OURS_RUN_DIR = (
+    Path(os.environ["OURS_LORAMOE_OUTPUT_ROOT"]).resolve()
+    if os.environ.get("OURS_LORAMOE_OUTPUT_ROOT") else None
+)
 
 
 @dataclass(frozen=True)
@@ -85,10 +96,10 @@ def expected_count(task: str) -> int:
 def is_complete(cell: Cell) -> bool:
     expected = expected_count(cell.task)
     if cell.method.startswith("ours_"):
-        path = (
-            ROOT / f"results/full_runs/llama31/{cell.method}/evaluation"
-            / f"order{cell.round_id}" / f"results-{cell.task}.json"
-        )
+        run_dir = (OURS_RUN_DIR or
+                   ROOT / f"results/full_runs/llama31/{cell.method}")
+        path = (run_dir / "evaluation" / f"order{cell.round_id}"
+                / f"results-{cell.task}.json")
         if not path.is_file():
             return False
         try:
@@ -126,6 +137,8 @@ def command(cell: Cell, gpu: int) -> tuple[list[str], dict[str, str]]:
             "OURS_EVAL_SPARSE_15": "1",
             "OURS_LORAMOE_EVAL_BATCH": str(8 if cell.task == "MeetingBank" else BATCH),
         })
+        if OURS_RUN_DIR:
+            env["OURS_LORAMOE_OUTPUT_ROOT"] = str(OURS_RUN_DIR)
         cmd = [
             "bash", str(ROOT / "scripts/baselines/_run_ours_lora_moe.sh"),
             "eval", "llama31", version,
@@ -204,29 +217,60 @@ def run_group(method: str) -> None:
 
 
 def run_long_cells(method: str) -> None:
-    for cell in (
+    long_cells = [
         Cell(method, 2, 3, "MeetingBank"),
-        Cell(method, 10, 8, "MeetingBank"),
+        Cell(method, 9, 8, "MeetingBank"),
         Cell(method, 3, 4, "Py150"),
         Cell(method, 10, 8, "Py150"),
-    ):
-        if is_complete(cell):
+    ]
+    pending = [cell for cell in long_cells if not is_complete(cell)]
+    for cell in long_cells:
+        if cell not in pending:
             print(f"[LONG SKIP] {cell.label}", flush=True)
-            continue
-        task_batch = 4 if cell.task == "MeetingBank" else min(BATCH, 8)
-        print(f"[LONG 4-WAY] {cell.label} batch={task_batch}", flush=True)
-        if method.startswith("ours_"):
-            command = [
-                sys.executable, str(ROOT / "scripts/run_ours_py150_4way.py"),
-                "--method", method, "--round", str(cell.round_id),
-                "--task", cell.task, "--batch", str(task_batch),
-            ]
-        else:
-            command = [
-                "bash", str(ROOT / "scripts/run_current_pre_py150_4way.sh"),
-                method, str(cell.round_id), cell.task, str(task_batch),
-            ]
-        subprocess.run(command, cwd=ROOT, check=True)
+
+    # Each long cell is split over four GPUs.  With eight GPUs, run two cells
+    # concurrently in each wave; on a four-GPU host retain the serial behavior.
+    group_count = max(1, len(GPUS) // 4)
+    gpu_groups = [GPUS[i:i + 4] for i in range(0, group_count * 4, 4)]
+    if any(len(group) != 4 for group in gpu_groups):
+        raise RuntimeError("long-cell evaluation requires GPU groups of four")
+    while pending:
+        wave = pending[:len(gpu_groups)]
+        pending = pending[len(gpu_groups):]
+        active = []
+        for cell, gpu_group in zip(wave, gpu_groups):
+            task_batch = 4 if cell.task == "MeetingBank" else min(BATCH, 8)
+            print(f"[LONG 4-WAY] {cell.label} batch={task_batch} "
+                  f"gpus={gpu_group}", flush=True)
+            if method.startswith("ours_"):
+                long_command = [
+                    sys.executable,
+                    str(ROOT / "scripts/run_ours_py150_4way.py"),
+                    "--round", str(cell.round_id), "--task", cell.task,
+                    "--batch", str(task_batch), "--gpus",
+                    ",".join(map(str, gpu_group)),
+                ]
+                if OURS_RUN_DIR:
+                    long_command.extend(["--run-dir", str(OURS_RUN_DIR)])
+                else:
+                    long_command.extend(["--method", method])
+            else:
+                if gpu_group != [0, 1, 2, 3]:
+                    raise RuntimeError(
+                        "SLoRA long-cell helper currently requires GPUs 0,1,2,3")
+                long_command = [
+                    "bash", str(ROOT / "scripts/run_current_pre_py150_4way.sh"),
+                    method, str(cell.round_id), cell.task, str(task_batch),
+                ]
+            active.append((
+                cell,
+                subprocess.Popen(long_command, cwd=ROOT, start_new_session=True),
+            ))
+        failures = [(cell, process.wait()) for cell, process in active]
+        failures = [(cell, code) for cell, code in failures
+                    if code != 0 or not is_complete(cell)]
+        if failures:
+            raise RuntimeError(f"long-cell failures: {failures}")
 
 
 def prepare_slora_post() -> None:
@@ -289,13 +333,17 @@ def prepare_slora_post() -> None:
 
 def collect() -> None:
     for method in METHODS:
-        subprocess.run(
-            [
+        collect_command = [
                 sys.executable, str(ROOT / "scripts/collect_results.py"),
                 "--method", method, "--model", "llama31", "--sparse-15",
-            ],
-            cwd=ROOT, check=True,
-        )
+            ]
+        if method.startswith("ours_") and OURS_RUN_DIR:
+            collect_command.extend([
+                "--run-dir", str(OURS_RUN_DIR),
+                "--family", "paper_baseline",
+                "--output", str(OURS_RUN_DIR / "sparse15_summary.json"),
+            ])
+        subprocess.run(collect_command, cwd=ROOT, check=True)
 
 
 def main() -> None:

@@ -2,6 +2,28 @@
 
 import torch
 from tqdm import tqdm
+from transformers import StopStringCriteria, StoppingCriteria, StoppingCriteriaList
+
+
+class GeneratedOnlyStopStringCriteria(StoppingCriteria):
+    """Apply ``StopStringCriteria`` only to tokens generated after the prompt.
+
+    Hugging Face's string criterion normally sees the prompt and continuation as
+    one sequence.  TRACE's post-hoc normalizer, however, searches only the raw
+    continuation.  Slicing at the padded prompt width prevents a marker split
+    across the prompt/answer boundary from stopping generation prematurely.
+    """
+
+    def __init__(self, criterion, prompt_length):
+        self.criterion = criterion
+        self.prompt_length = int(prompt_length)
+
+    def __call__(self, input_ids, scores, **kwargs):
+        generated_ids = input_ids[:, self.prompt_length:]
+        if generated_ids.shape[1] == 0:
+            return torch.zeros(
+                input_ids.shape[0], dtype=torch.bool, device=input_ids.device)
+        return self.criterion(generated_ids, scores, **kwargs)
 
 
 def all_eos_token_ids(model, tokenizer):
@@ -36,6 +58,7 @@ def generate_predictions(
     max_new_tokens,
     temperature=0.0,
     eos_token_ids=None,
+    stop_strings=None,
     length_bucketing=True,
     description="generate",
 ):
@@ -66,6 +89,16 @@ def generate_predictions(
         if eos_token_ids is None else list(dict.fromkeys(eos_token_ids))
     )
     do_sample = temperature > 0.0
+    if isinstance(stop_strings, str):
+        stop_strings = [stop_strings]
+    else:
+        stop_strings = list(stop_strings or [])
+    # Vocabulary preprocessing is relatively expensive.  Build the matcher once
+    # per task call and reuse it across every generation batch.
+    stop_string_criterion = (
+        StopStringCriteria(tokenizer, stop_strings)
+        if stop_strings else None
+    )
 
     progress = tqdm(
         range(0, len(order), batch_size),
@@ -99,6 +132,13 @@ def generate_predictions(
             generation_args["temperature"] = temperature
         if stop_token_ids:
             generation_args["eos_token_id"] = stop_token_ids
+        if stop_string_criterion is not None:
+            generation_args["stopping_criteria"] = StoppingCriteriaList([
+                GeneratedOnlyStopStringCriteria(
+                    stop_string_criterion,
+                    prompt_length=model_inputs["input_ids"].shape[1],
+                )
+            ])
 
         output_ids = model.generate(**model_inputs, **generation_args)
         generated_ids = output_ids[:, model_inputs["input_ids"].shape[1]:]

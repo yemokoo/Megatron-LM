@@ -4,7 +4,7 @@
 
 SLoRA와 Ours에 다음 공통 설정을 사용한다.
 
-- backbone: Llama-3.1-8B-Instruct 또는 Qwen2.5-7B-Instruct
+- backbone: Llama-3.1-8B base 또는 Qwen2.5-7B-Instruct
 - TRACE-5000, task 순서와 epoch: `5,3,7,5,3,5,5,7`
 - 4 GPU, micro batch 8, gradient accumulation 2 (global effective batch 64)
 - BF16, rank 64, alpha 128, LoRA dropout 0.05
@@ -38,14 +38,16 @@ attention LoRA와 Ours의 expert/router 구조 차이는 방법론 자체의 차
 
 - `--replay_subset_ratio 0.01`: task당 고유 50 samples
 - `--replay_subset_ratio 0.1`: task당 고유 500 samples
-- `--router_replay_exposure_samples 1000`: round당 정확히 1,000 global exposures
-- `--replay_distribution equal_task`: 1,000 budget을 memory scope의 task에 균등 분배
+- `--router_replay_exposure_samples 1000`: KD 및 joint replay가 공유하는 고정
+  global replay pool/stream 크기
+- `--replay_distribution equal_task`: 고정 1,000개를 memory scope의 task에 균등 분배
+- `--v2_joint_new_to_replay_ratio 5`: joint phase의 new:replay sample exposure를 5:1로 유지
 
-Task가 늘어나면 task별 subset은 누적되지만 각 phase의 총 exposure는 항상
+Task가 늘어나면 task별 subset은 누적되지만 저장/구성하는 replay stream은
 1,000으로 유지된다. seen task가 4개인 v1은 current를 포함해 각 250 exposure,
 past task가 3개인 v2는 각 334/333/333 exposure를 배정한다. 1% subset의 고유
-50개가 배정량보다 작으면 deterministic하게 반복한다. 이 예산은 new-task epoch
-수와 무관하다.
+50개가 배정량보다 작으면 deterministic하게 반복한다. v1과 KD는 이 stream을
+한 번 소비하고, v2/v3 joint phase는 동일한 1,000 stream을 순환한다.
 
 각 task subset index hash는 `fixed_replay_memory/`, round별 실제 배분은
 `replay_plans/`에 기록된다.
@@ -66,23 +68,34 @@ seen task의 full train data를 누적하거나 new-task epoch 수에 비례해 
 Task가 시작되면 current task fixed subset을 생성해 다음 task부터 past memory로
 사용한다. Task 2부터 KD와 joint replay는 동일한 past-task scope, 동일 subset
 indices, 동일 task별 allocation과 순서를 갖는 deterministic 1,000-record
-stream을 각각 한 번 사용한다.
+stream을 사용한다. KD는 한 번 소비하고 joint replay는 같은 stream을 순환한다.
 
 KD-init은 확장 직전 expert/router prefix를 frozen teacher로 사용한다.
 output-logit KL로 신규 expert와 신규 router row만 업데이트하며 기존 expert와
-기존 router row는 고정한다. 별도의 KD epoch multiplier는 없으며 총 KD exposure는
-정확히 1,000이다.
+기존 router row는 고정한다. 기본 V2-new는 primary epoch마다 같은 1,000-record
+stream을 한 번 사용한다. `v2_new_top4`는 4개 expert 동시 확장의 KD 잔차를 줄이기
+위해 고유 데이터나 replay 양은 늘리지 않고, 바로 그 동일 stream만 두 번 반복한다
+(`v2_kd_pass_multiplier=2`).
 
-Joint 학습에서는 1,000-record replay stream을 전체 new-task epoch의 primary
-microsteps에 균등하게 배치한다. replay가 배정된 microstep은 다음과 같다.
+Joint 학습에서는 **모든 optimizer update**에 두 gradient를 함께 넣는다.
 
 1. `new data`: 신규 expert + router gradient
 2. `past replay`: 모든 expert를 freeze하고 router gradient만 추가
 3. 두 gradient를 같은 buffer에 합산
 4. accumulation 경계에서 optimizer update 1회
 
-replay가 없는 primary microstep은 new-data gradient만 계산한다. KD loss와 joint
-replay loss coefficient의 기본값은 각각 1이며, 이후 loss-scale ablation은
+new-data 양과 replay-data 양은 서로 달라도 replay가 빠지는 optimizer update는
+없다. 기본 5:1에서는 global new batch 64개당 replay 12/13개를 누적 floor로
+배정한다. 5,000 samples를 3/5/7 epochs 학습하면 new exposure 15k/25k/35k와
+joint replay exposure 3k/5k/7k가 된다. 저장 pool은 계속 1,000개이며 각각
+3/5/7회 순환한다. 8-GPU에서는 해당 sample을 round-robin으로 rank에 배정하고,
+replay가 배정되지 않은 rank에는 zero gradient를 둔 뒤 모든 rank의 combined
+gradient를 명시적으로 평균한다. 이때 active rank loss에
+`world_size / global_replay_count`를 곱해 replay gradient가 assigned samples의
+평균이 되도록 한다. 따라서 각 global optimizer update에는 반드시 coefficient
+1의 old-data router gradient가 포함된다.
+
+KD loss와 joint replay loss coefficient의 기본값은 각각 1이며, 이후 loss-scale ablation은
 `OURS_V2_KD_LOSS_COEFF`와 `OURS_V2_REPLAY_LOSS_COEFF`로 분리한다.
 
 ## 실행
@@ -101,6 +114,7 @@ OURS_ROUTER_REPLAY_EXPOSURE_SAMPLES=1000 \
 
 OURS_REPLAY_SUBSET_RATIO=0.01 \
 OURS_ROUTER_REPLAY_EXPOSURE_SAMPLES=1000 \
+OURS_V2_JOINT_NEW_TO_REPLAY_RATIO=5 \
 OURS_V2_KD_LOSS_COEFF=1 \
 OURS_V2_REPLAY_LOSS_COEFF=1 \
 ./scripts/baselines/llama31/ours_lora_moe_v2.sh train
@@ -109,6 +123,4 @@ OURS_V2_REPLAY_LOSS_COEFF=1 \
 학습 산출물은 기본적으로
 `slora_repro/results/full_runs/<model>/ours_lora_moe_v1|v2`에 저장된다.
 각 task 및 전체 run의 sample/token exposure, forward/backward, optimizer update,
-operator FLOPs, 학습/저장 시간은 `training_workload.json`에 누적된다. 기존
-full-replay 또는 5:1-token checkpoint는 새 exact-budget run과 resume 호환되지
-않는다.
+operator FLOPs, 학습/저장 시간은 `training_workload.json`에 누적된다.

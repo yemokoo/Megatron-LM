@@ -138,6 +138,14 @@ for index in "${!TASKS[@]}"; do
   if [[ "${METHOD}" == "pre" ]]; then
     command+=(--mode max)
   fi
+  # Joint replay control.  Unset -> the released SLoRA-Pre command, unchanged.
+  if [[ -n "${SLORA_REPLAY_V3_RUN_DIR:-}" ]]; then
+    command+=(
+      --replay_v3_run_dir "${SLORA_REPLAY_V3_RUN_DIR}"
+      --replay_data_root "${DATA_ROOT}"
+      --replay_loss_coeff "${SLORA_REPLAY_LOSS_COEFF:-1.0}"
+    )
+  fi
   printf '%q ' "${command[@]}" | tee "${RUN_DIR}/order${order}.command.txt"
   printf '\n' | tee -a "${RUN_DIR}/order${order}.command.txt"
   if [[ "${DRY_RUN}" == "1" ]]; then

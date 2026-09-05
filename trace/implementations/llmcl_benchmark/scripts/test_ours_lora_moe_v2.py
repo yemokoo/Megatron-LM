@@ -7,6 +7,7 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from types import SimpleNamespace
 from torch.utils.data import Dataset
 
@@ -97,6 +98,7 @@ def test_accumulated_fixed_subsets_but_capped_replay_exposure():
         router_retune_epochs=1,
         router_replay_exposure_samples=1000,
         v2_memory_batch_size=0,
+        v2_kd_memory_batch_size=8,
         gradient_accumulation_steps=8,
     )
     subsets = [trainer._ensure_fixed_task_subset(name) for name in task_names]
@@ -123,10 +125,12 @@ def test_accumulated_fixed_subsets_but_capped_replay_exposure():
 
     # v2 KD and joint replay are separate loaders over the exact same
     # deterministic past-only 1,000-record exposure stream.
-    kd_loader = trainer._build_v2_memory_loader(i_task=3)
-    replay_loader = trainer._build_v2_memory_loader(i_task=3)
+    kd_loader = trainer._build_v2_memory_loader(i_task=3, role="kd")
+    replay_loader = trainer._build_v2_memory_loader(i_task=3, role="replay")
     assert len(kd_loader.dataset) == 1000
     assert len(replay_loader.dataset) == 1000
+    assert kd_loader.batch_size == 8
+    assert replay_loader.batch_size == 1
     kd_streams = [dataset.exposure_indices for dataset in kd_loader.dataset.datasets]
     replay_streams = [dataset.exposure_indices for dataset in replay_loader.dataset.datasets]
     assert kd_streams == replay_streams
@@ -144,7 +148,8 @@ def test_valid_token_ratio_accounting():
 
 def test_replay_sources_merge_into_one_forward_batch():
     trainer = object.__new__(Ours_LoRA_MoE_V2)
-    trainer.tokenizer = type("Tokenizer", (), {"pad_token_id": 0})()
+    trainer.tokenizer = type(
+        "Tokenizer", (), {"pad_token_id": 0, "padding_side": "right"})()
     first = {
         "input_ids": torch.tensor([[7, 8, 9, 10]]),
         "attention_mask": torch.tensor([[1, 1, 1, 1]]),
@@ -159,18 +164,151 @@ def test_replay_sources_merge_into_one_forward_batch():
     }
     merged = trainer._merge_replay_batches([first, second])
     assert merged["input_ids"].shape == (2, 8)
-    assert merged["input_ids"][0].tolist() == [0, 0, 0, 0, 7, 8, 9, 10]
-    assert merged["attention_mask"][0].tolist() == [0, 0, 0, 0, 1, 1, 1, 1]
-    assert merged["labels"][0].tolist()[:4] == [-100] * 4
+    assert merged["input_ids"][0].tolist() == [7, 8, 9, 10, 0, 0, 0, 0]
+    assert merged["attention_mask"][0].tolist() == [1, 1, 1, 1, 0, 0, 0, 0]
+    assert merged["labels"][0].tolist()[-4:] == [-100] * 4
     assert merged["sources"] == ["a", "b"]
     assert Ours_LoRA_MoE_V2._valid_token_count(merged) == 12
+    assert merged["labels"][:, 1:].ne(-100).sum(dim=1).tolist() == [2, 4]
+
+
+def test_packed_replay_preserves_per_sample_ce_and_gradient():
+    """Packed variable-length replay equals a sum of singleton objectives."""
+    torch.manual_seed(2025)
+    reference = nn.Linear(5, 17, bias=False)
+    packed = nn.Linear(5, 17, bias=False)
+    packed.load_state_dict(reference.state_dict())
+    features = [
+        torch.randn(1, 4, 5),
+        torch.randn(1, 7, 5),
+        torch.randn(1, 5, 5),
+    ]
+    labels = [
+        torch.tensor([[1, 2, 3, 4]]),
+        torch.tensor([[5, 6, 7, 8, 9, 10, 11]]),
+        torch.tensor([[-100, -100, 12, 13, 14]]),
+    ]
+
+    singleton_losses = []
+    for row_features, row_labels in zip(features, labels):
+        row_logits = reference(row_features)
+        row_loss = Ours_LoRA_MoE_V2._per_sample_causal_lm_losses(
+            row_logits, row_labels).sum()
+        singleton_losses.append(row_loss.detach())
+        row_loss.backward()
+
+    max_length = max(row.shape[1] for row in features)
+    packed_features = torch.cat([
+        F.pad(row, (0, 0, 0, max_length - row.shape[1]))
+        for row in features
+    ], dim=0)
+    packed_labels = torch.cat([
+        F.pad(row, (0, max_length - row.shape[1]), value=-100)
+        for row in labels
+    ], dim=0)
+    packed_losses = Ours_LoRA_MoE_V2._per_sample_causal_lm_losses(
+        packed(packed_features), packed_labels)
+    torch.testing.assert_close(
+        packed_losses.detach(), torch.stack(singleton_losses))
+    packed_losses.sum().backward()
+    torch.testing.assert_close(
+        packed.weight.grad, reference.weight.grad,
+        rtol=1e-5, atol=1e-6)
+
+    # The naive Hugging Face-style token-global mean is intentionally not the
+    # same objective when rows have different supervised lengths.
+    shift_labels = F.pad(
+        packed_labels, (0, 1), value=-100)[..., 1:].contiguous()
+    naive_loss = F.cross_entropy(
+        packed(packed_features).reshape(-1, 17),
+        shift_labels.reshape(-1), ignore_index=-100)
+    assert not torch.isclose(
+        naive_loss * len(features), packed_losses.sum(),
+        rtol=1e-4, atol=1e-5)
+
+
+def test_layer_hidden_mse_is_sample_and_layer_mean_with_padding_mask():
+    student_a = torch.tensor([
+        [[1.0, 2.0], [3.0, 4.0], [100.0, 100.0]],
+        [[2.0, 0.0], [4.0, 2.0], [6.0, 4.0]],
+    ], requires_grad=True)
+    student_b = (student_a * 0.5).detach().requires_grad_(True)
+    teacher_a = torch.zeros_like(student_a)
+    teacher_b = torch.ones_like(student_b)
+    mask = torch.tensor([[1, 1, 0], [1, 1, 1]])
+    losses = Ours_LoRA_MoE_V2._per_sample_layer_hidden_mse(
+        [student_a, student_b], [teacher_a, teacher_b], mask)
+
+    expected = []
+    for row, valid_count in enumerate((2, 3)):
+        layer_a = student_a[row, :valid_count].square().mean()
+        layer_b = (student_b[row, :valid_count] - 1).square().mean()
+        expected.append((layer_a + layer_b) / 2)
+    torch.testing.assert_close(losses, torch.stack(expected))
+    losses.sum().backward()
+    assert student_a.grad is not None and student_a.grad.abs().sum() > 0
+    assert student_b.grad is not None and student_b.grad.abs().sum() > 0
+    assert teacher_a.grad is None and teacher_b.grad is None
+    assert torch.count_nonzero(student_a.grad[0, 2]) == 0
+
+
+def test_manual_gradient_average_coalesces_without_changing_values():
+    model = nn.Sequential(
+        nn.Linear(4, 6, bias=False),
+        nn.Linear(6, 3, bias=False))
+    parameters = list(model.parameters())
+    parameters[0].grad = torch.randn_like(parameters[0])
+    parameters[1].grad = None
+    expected = parameters[0].grad.clone()
+    calls = []
+    originals = (
+        torch.distributed.is_initialized,
+        torch.distributed.get_world_size,
+        torch.distributed.all_reduce,
+    )
+    try:
+        torch.distributed.is_initialized = lambda: True
+        torch.distributed.get_world_size = lambda: 4
+
+        def fake_all_reduce(tensor):
+            calls.append(tensor.numel())
+            # Simulate four identical ranks. The subsequent world division
+            # must recover the exact local values.
+            tensor.mul_(4)
+
+        torch.distributed.all_reduce = fake_all_reduce
+        Ours_LoRA_MoE_V2._manual_average_gradients(
+            model, bucket_bytes=1024 * 1024)
+    finally:
+        (torch.distributed.is_initialized,
+         torch.distributed.get_world_size,
+         torch.distributed.all_reduce) = originals
+    assert len(calls) == 1, calls
+    torch.testing.assert_close(parameters[0].grad, expected, rtol=0, atol=0)
+    torch.testing.assert_close(
+        parameters[1].grad, torch.zeros_like(parameters[1]),
+        rtol=0, atol=0)
 
 
 def test_joint_loop_consumes_exact_replay_stream_and_updates_primary_steps():
+    class TinyLoader:
+        def __init__(self, batches, batch_size=1):
+            self.batches = list(batches)
+            self.batch_size = batch_size
+            self.dataset = range(len(self.batches) * batch_size)
+            self.sampler = SimpleNamespace()
+
+        def __len__(self):
+            return len(self.batches)
+
+        def __iter__(self):
+            return iter(self.batches)
+
     class TinyTrainModel(nn.Module):
         def __init__(self):
             super().__init__()
             self.embedding = nn.Embedding(32, 4)
+            self.lm_head = nn.Linear(4, 32, bias=False)
             self.mlp = make_layer()
             self.mlp.add_experts(2)
             for expert in self.mlp.experts:
@@ -182,7 +320,12 @@ def test_joint_loop_consumes_exact_replay_stream_and_updates_primary_steps():
                     use_cache=False):
             self.forward_calls += 1
             hidden = self.embedding(input_ids)
-            return SimpleNamespace(loss=self.mlp(hidden).square().mean())
+            logits = self.lm_head(self.mlp(hidden))
+            loss = None
+            if labels is not None:
+                loss = Ours_LoRA_MoE_V2._per_sample_causal_lm_losses(
+                    logits, labels).mean()
+            return SimpleNamespace(loss=loss, logits=logits)
 
     class CountingSGD(torch.optim.SGD):
         def __init__(self, parameters):
@@ -204,6 +347,8 @@ def test_joint_loop_consumes_exact_replay_stream_and_updates_primary_steps():
     model = TinyTrainModel()
     for parameter in model.embedding.parameters():
         parameter.requires_grad = False
+    for parameter in model.lm_head.parameters():
+        parameter.requires_grad = False
     freeze_lora_moe_experts(model, trainable_expert_indices={1})
     freeze_lora_moe_routers(model, trainable=True)
     optimizer = CountingSGD(
@@ -213,29 +358,41 @@ def test_joint_loop_consumes_exact_replay_stream_and_updates_primary_steps():
         global_rank=1,
         gradient_accumulation_steps=1,
         v2_max_replay_batches_per_step=0,
+        v2_replay_forward_batch_size=8,
         v2_joint_replay_loss_coeff=1.0,
+        v2_joint_new_to_replay_ratio=2,
         loss_log_interval=1,
     )
-    primary_loader = [
+    primary_loader = TinyLoader([
         {
-            "input_ids": torch.tensor([[1, 2, 3], [4, 5, 6]]),
-            "attention_mask": torch.ones(2, 3, dtype=torch.long),
-            "labels": torch.ones(2, 3, dtype=torch.long),
-            "sources": ["p1", "p2"],
+            "input_ids": torch.tensor([
+                [1, 2, 3], [4, 5, 6], [2, 4, 6], [3, 5, 7]]),
+            "attention_mask": torch.ones(4, 3, dtype=torch.long),
+            "labels": torch.ones(4, 3, dtype=torch.long),
+            "sources": ["p1", "p2", "p3", "p4"],
         },
         {
-            "input_ids": torch.tensor([[7, 8, 9], [10, 11, 12]]),
-            "attention_mask": torch.ones(2, 3, dtype=torch.long),
-            "labels": torch.ones(2, 3, dtype=torch.long),
-            "sources": ["p3", "p4"],
+            "input_ids": torch.tensor([
+                [7, 8, 9], [10, 11, 12], [13, 14, 15], [16, 17, 18]]),
+            "attention_mask": torch.ones(4, 3, dtype=torch.long),
+            "labels": torch.ones(4, 3, dtype=torch.long),
+            "sources": ["p5", "p6", "p7", "p8"],
         },
-    ]
-    memory_loader = [{
-        "input_ids": torch.tensor([[13, 14, 15]]),
-        "attention_mask": torch.ones(1, 3, dtype=torch.long),
-        "labels": torch.ones(1, 3, dtype=torch.long),
-        "sources": ["replay"],
-    }]
+    ], batch_size=4)
+    memory_loader = TinyLoader([
+        {
+            "input_ids": torch.tensor([[19, 20, 21]]),
+            "attention_mask": torch.ones(1, 3, dtype=torch.long),
+            "labels": torch.ones(1, 3, dtype=torch.long),
+            "sources": ["replay-1"],
+        },
+        {
+            "input_ids": torch.tensor([[22, 23, 24, 25, 26]]),
+            "attention_mask": torch.ones(1, 5, dtype=torch.long),
+            "labels": torch.ones(1, 5, dtype=torch.long),
+            "sources": ["replay-2"],
+        },
+    ])
     trainer = object.__new__(Ours_LoRA_MoE_V2)
     trainer.raw_model = model
     trainer.model = model
@@ -247,11 +404,80 @@ def test_joint_loop_consumes_exact_replay_stream_and_updates_primary_steps():
     trainer._run_v2_joint_epochs(
         primary_loader, memory_loader, epochs=1,
         device=torch.device("cpu"), phase_name="test")
-    # Two primary forwards plus the one-item replay stream consumed exactly
-    # once across the task. Optimizer cadence remains tied to primary steps.
-    assert model.forward_calls == len(primary_loader) + len(memory_loader), model.forward_calls
+    # Every optimizer update contains two replay records packed into one
+    # variable-length forward. The two-record pool cycles once to obtain the
+    # exact 8:4 == 2:1 exposure ratio.
+    assert model.forward_calls == len(primary_loader) + 2, model.forward_calls
     assert optimizer.step_calls == len(primary_loader), optimizer.step_calls
     assert scheduler.step_calls == len(primary_loader), scheduler.step_calls
+
+
+def test_every_update_replay_assignment_is_nonempty_and_exact():
+    # The actual 8-GPU task shapes use 1,000 global replay records. MeetingBank
+    # has 553 optimizer updates; each receives one or two replay records.
+    assignments = [
+        Ours_LoRA_MoE_V2._replay_exposure_assignment(
+            1000, 553, update, 8, rank)
+        for update in range(553)
+        for rank in range(8)
+    ]
+    per_update = []
+    per_rank = [0] * 8
+    for update in range(553):
+        row = assignments[update * 8:(update + 1) * 8]
+        starts = {start for start, _, _ in row}
+        stops = {stop for _, stop, _ in row}
+        assert len(starts) == len(stops) == 1
+        count = next(iter(stops)) - next(iter(starts))
+        assert count >= 1
+        assert sum(local for _, _, local in row) == count
+        per_update.append(count)
+        for rank, (_, _, local) in enumerate(row):
+            per_rank[rank] += local
+    assert sum(per_update) == 1000
+    assert per_update.count(1) == 106
+    assert per_update.count(2) == 447
+    assert per_rank == [125] * 8
+    assert Ours_LoRA_MoE_V2._replay_loss_scale(8, 4) == 2.0
+    assert Ours_LoRA_MoE_V2._replay_loss_scale(8, 5) == 1.6
+    assert Ours_LoRA_MoE_V2._replay_loss_scale(8, 8) == 1.0
+
+
+def test_five_to_one_budget_is_not_multiplied_by_epochs():
+    trainer = object.__new__(Ours_LoRA_MoE_V2)
+    trainer.args = SimpleNamespace(
+        v2_joint_new_to_replay_ratio=5,
+        router_replay_exposure_samples=1000,
+    )
+    primary_loader = SimpleNamespace(
+        sampler=SimpleNamespace(total_size=5000))
+    assert trainer._joint_replay_exposure_budget(
+        primary_loader, epochs=3) == 1000
+    assert trainer._joint_replay_exposure_budget(
+        primary_loader, epochs=5) == 1000
+    assert trainer._joint_replay_exposure_budget(
+        primary_loader, epochs=7) == 1000
+
+    # The one fixed 1,000-exposure budget is spread across every update in a
+    # five-epoch phase rather than restarted at each epoch boundary.
+    total_updates = 5 * 79
+    per_rank = [0] * 8
+    per_update = []
+    for update in range(total_updates):
+        row = [
+            Ours_LoRA_MoE_V2._replay_exposure_assignment(
+                1000, total_updates, update, 8, rank)
+            for rank in range(8)
+        ]
+        start, stop = row[0][:2]
+        count = stop - start
+        assert sum(local for _, _, local in row) == count
+        per_update.append(count)
+        for rank, (_, _, local) in enumerate(row):
+            per_rank[rank] += local
+    assert sum(per_update) == 1000
+    assert all(count >= 1 for count in per_update)
+    assert per_rank == [125] * 8
 
 
 def test_v1_phase1_updates_only_new_router_row_then_phase2_can_update_all():
@@ -365,6 +591,41 @@ def test_slora_trace_collator_full_labels_and_right_padding():
         assert torch.all(batch["labels"][row][~active].eq(-100))
 
 
+def test_slora_trace_collator_answer_only_probe_labels():
+    class FakeTokenizer:
+        pad_token_id = 0
+        eos_token_id = 99
+
+        def apply_chat_template(
+                self, messages, tokenize=False, add_generation_prompt=False):
+            assert tokenize is False
+            text = "|".join(
+                f"{item['role']}:{item['content']}" for item in messages)
+            if add_generation_prompt:
+                text += "|assistant:"
+            return text
+
+        def __call__(self, text, truncation, max_length, padding,
+                     return_tensors):
+            ids = [(ord(char) % 50) + 1 for char in text][:max_length]
+            return {"input_ids": ids, "attention_mask": [1] * len(ids)}
+
+    tokenizer = FakeTokenizer()
+    collator = SLoRATraceDataCollator(
+        tokenizer, max_length=256, label_scope="answer")
+    batch = collator([
+        {"prompt": "question", "answer": "answer"},
+        {"prompt": "q", "answer": "x"},
+    ])
+    for row in range(2):
+        labels = batch["labels"][row]
+        active = batch["attention_mask"][row].bool()
+        assert labels[active].eq(-100).any()
+        assert labels[active].ne(-100).any()
+        torch.testing.assert_close(
+            labels[labels.ne(-100)], batch["input_ids"][row][labels.ne(-100)])
+
+
 def test_workload_accounting_json():
     trainer = object.__new__(Ours_LoRA_MoE_V2)
     with tempfile.TemporaryDirectory() as output_dir:
@@ -402,12 +663,18 @@ def test_workload_accounting_json():
 def main():
     tests = [
         test_slora_trace_collator_full_labels_and_right_padding,
+        test_slora_trace_collator_answer_only_probe_labels,
         test_pre_expansion_teacher_prefix,
         test_fixed_memory_budget_does_not_grow_with_task_count,
         test_accumulated_fixed_subsets_but_capped_replay_exposure,
         test_valid_token_ratio_accounting,
         test_replay_sources_merge_into_one_forward_batch,
+        test_packed_replay_preserves_per_sample_ce_and_gradient,
+        test_layer_hidden_mse_is_sample_and_layer_mean_with_padding_mask,
+        test_manual_gradient_average_coalesces_without_changing_values,
         test_joint_loop_consumes_exact_replay_stream_and_updates_primary_steps,
+        test_every_update_replay_assignment_is_nonempty_and_exact,
+        test_five_to_one_budget_is_not_multiplied_by_epochs,
         test_v1_phase1_updates_only_new_router_row_then_phase2_can_update_all,
         test_two_backwards_add_router_only_replay_gradient,
         test_workload_accounting_json,

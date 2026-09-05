@@ -52,7 +52,9 @@ export LOCAL_BASE="${LOCAL_BASE:-$PROJECT_ROOT/.local}"
 export LOCAL_DATASET="${LOCAL_DATASET:-$LOCAL_BASE/dataset}"
 export LOCAL_WEIGHTS="${LOCAL_WEIGHTS:-$LOCAL_BASE/weights}"
 export LOCAL_SSD_ROOT="${LOCAL_SSD_ROOT:-/tmp/flame-moe}"
-export DIRECT_LOCAL_SAVE="${DIRECT_LOCAL_SAVE:-0}"
+export STAGE_INPUTS_TO_SCRATCH="${STAGE_INPUTS_TO_SCRATCH:-0}"
+export DIRECT_LOCAL_SAVE="${DIRECT_LOCAL_SAVE:-1}"
+export STORAGE_PLAN_ONLY="${STORAGE_PLAN_ONLY:-0}"
 # When the source checkpoint is ALREADY expanded to the target expert count
 # (e.g. a pre-Code expansion-distill init), load it as a fresh finetune without
 # re-expanding: --finetune resets iteration to 0 and --moe-resume-from-num-experts
@@ -63,11 +65,50 @@ export MOE_INTERLEAVE_ROUTER_STEPS="${MOE_INTERLEAVE_ROUTER_STEPS:-0}"
 export MOE_INTERLEAVE_CODE_TOTAL_STEPS="${MOE_INTERLEAVE_CODE_TOTAL_STEPS:-0}"
 export MOE_INTERLEAVE_ROUTER_AFTER_FINAL="${MOE_INTERLEAVE_ROUTER_AFTER_FINAL:-1}"
 export MOE_JOINT_REPLAY_LM="${MOE_JOINT_REPLAY_LM:-0}"
+export MOE_JOINT_REPLAY_OLD_DATA_KD="${MOE_JOINT_REPLAY_OLD_DATA_KD:-0}"
+export MOE_JOINT_REPLAY_OLD_DATA_HIDDEN_KL="${MOE_JOINT_REPLAY_OLD_DATA_HIDDEN_KL:-0}"
+export MOE_JOINT_REPLAY_OLD_DATA_HIDDEN_MSE="${MOE_JOINT_REPLAY_OLD_DATA_HIDDEN_MSE:-0}"
+export MOE_JOINT_REPLAY_TOTAL_SAMPLES="${MOE_JOINT_REPLAY_TOTAL_SAMPLES:-0}"
+export MOE_JOINT_REPLAY_MICRO_BATCH_SIZE="${MOE_JOINT_REPLAY_MICRO_BATCH_SIZE:-0}"
+export MOE_JOINT_REPLAY_OLD_LIKE_GT_PATH="${MOE_JOINT_REPLAY_OLD_LIKE_GT_PATH:-}"
+export MOE_JOINT_REPLAY_OLD_LIKE_UNIT="${MOE_JOINT_REPLAY_OLD_LIKE_UNIT:-positive_sequence}"
+export MOE_JOINT_REPLAY_OLD_LIKE_TARGET_TRAIN_FRACTION="${MOE_JOINT_REPLAY_OLD_LIKE_TARGET_TRAIN_FRACTION:-0}"
+export MOE_JOINT_REPLAY_OLD_LIKE_SELECTED_TOKEN_COUNT="${MOE_JOINT_REPLAY_OLD_LIKE_SELECTED_TOKEN_COUNT:-0}"
+export MOE_JOINT_REPLAY_OLD_LIKE_POSITIVE_SAMPLE_COUNT="${MOE_JOINT_REPLAY_OLD_LIKE_POSITIVE_SAMPLE_COUNT:-0}"
+export MOE_JOINT_REPLAY_OLD_LIKE_FULL_TRAIN_TOKEN_COUNT="${MOE_JOINT_REPLAY_OLD_LIKE_FULL_TRAIN_TOKEN_COUNT:-0}"
+export OLD_LIKE_REPLAY_SUBSET_COUNT="${OLD_LIKE_REPLAY_SUBSET_COUNT:-0}"
+export OLD_LIKE_REPLAY_SUBSET_SHA256="${OLD_LIKE_REPLAY_SUBSET_SHA256:-}"
+export MOE_JOINT_NEW_EXPERT_QUOTA="${MOE_JOINT_NEW_EXPERT_QUOTA:-0}"
+export MOE_JOINT_NEW_EXPERT_QUOTA_SCHEDULE="${MOE_JOINT_NEW_EXPERT_QUOTA_SCHEDULE:-}"
+export MOE_JOINT_NEW_EXPERT_QUOTA_MIN_NEW_SLOTS="${MOE_JOINT_NEW_EXPERT_QUOTA_MIN_NEW_SLOTS:-}"
+export MOE_JOINT_NEW_EXPERT_QUOTA_LOSS_COEFF="${MOE_JOINT_NEW_EXPERT_QUOTA_LOSS_COEFF:-1.0}"
+export MOE_JOINT_NEW_EXPERT_QUOTA_PRESERVE_NATURAL_GRADS="${MOE_JOINT_NEW_EXPERT_QUOTA_PRESERVE_NATURAL_GRADS:-0}"
+export OLD_HIDDEN_KL_COEFF_START="${OLD_HIDDEN_KL_COEFF_START:-}"
+export OLD_HIDDEN_KL_COEFF_DECAY_STEPS="${OLD_HIDDEN_KL_COEFF_DECAY_STEPS:-0}"
+export LOG_ROUTER_GRAD_NORM_SOURCES="${LOG_ROUTER_GRAD_NORM_SOURCES:-0}"
 export JOINT_REPLAY_DATASET="${JOINT_REPLAY_DATASET:-}"
 export JOINT_REPLAY_SECONDARY_DATASET="${JOINT_REPLAY_SECONDARY_DATASET:-}"
 export JOINT_REPLAY_DATA_WEIGHT_MODE="${JOINT_REPLAY_DATA_WEIGHT_MODE:-equal_dataset}"
 export RECOVERY_SAVE_INTERVAL="${RECOVERY_SAVE_INTERVAL:-0}"
 export NO_SAVE_OPTIM="${NO_SAVE_OPTIM:-0}"
+export OLD_MODEL_KL_WEIGHTS_DIR="${OLD_MODEL_KL_WEIGHTS_DIR:-}"
+export OLD_MODEL_KL_NUM_EXPERTS="${OLD_MODEL_KL_NUM_EXPERTS:-}"
+export FINGERPRINT_KD_ENABLE="${FINGERPRINT_KD_ENABLE:-0}"
+export FINGERPRINT_KD_FORCE_ENABLE_ZERO_COEFF="${FINGERPRINT_KD_FORCE_ENABLE_ZERO_COEFF:-0}"
+export FINGERPRINT_KD_COEFF="${FINGERPRINT_KD_COEFF:-0.0}"
+export FINGERPRINT_KD_LM_LOSS_COEFF="${FINGERPRINT_KD_LM_LOSS_COEFF:-1.0}"
+export LOG_FINGERPRINT_GRAD_NORM_GROUPS="${LOG_FINGERPRINT_GRAD_NORM_GROUPS:-0}"
+export TRAIN_ROUTER_USAGE_LOG_INTERVAL="${TRAIN_ROUTER_USAGE_LOG_INTERVAL:-0}"
+export TRAIN_ROUTER_USAGE_NUM_EXISTING_EXPERTS="${TRAIN_ROUTER_USAGE_NUM_EXISTING_EXPERTS:-}"
+export FINGERPRINT_KD_BUNDLE="${FINGERPRINT_KD_BUNDLE:-}"
+export FINGERPRINT_KD_RANK="${FINGERPRINT_KD_RANK:-64}"
+export FINGERPRINT_KD_LAYERS="${FINGERPRINT_KD_LAYERS:-2,3,4,5,6,7,8,9}"
+export FINGERPRINT_KD_SCORE_REPRESENTATION="${FINGERPRINT_KD_SCORE_REPRESENTATION:-stable}"
+export FINGERPRINT_KD_LOSS_REPRESENTATION="${FINGERPRINT_KD_LOSS_REPRESENTATION:-stable}"
+export FINGERPRINT_KD_GATE_MODE="${FINGERPRINT_KD_GATE_MODE:-soft}"
+export FINGERPRINT_KD_THRESHOLD="${FINGERPRINT_KD_THRESHOLD:-0.1297607421875}"
+export FINGERPRINT_KD_SOFT_TEMPERATURE="${FINGERPRINT_KD_SOFT_TEMPERATURE:-0.0069580078125}"
+export FINGERPRINT_KD_WEIGHT_ASSIGNMENT="${FINGERPRINT_KD_WEIGHT_ASSIGNMENT:-stable}"
 
 export SSD_MOUNT="${LOCAL_SSD_ROOT}/${RUN_ID}"
 export SSD_TRAIN_DATASET="${SSD_MOUNT}/dataset/train"
@@ -78,6 +119,7 @@ export SSD_INTERLEAVE_WIKI_DATASET="${SSD_MOUNT}/dataset/interleave_wiki_train"
 export SSD_INTERLEAVE_SECONDARY_DATASET="${SSD_MOUNT}/dataset/interleave_secondary_train"
 export SSD_JOINT_REPLAY_DATASET="${SSD_MOUNT}/dataset/joint_replay_train"
 export SSD_JOINT_REPLAY_SECONDARY_DATASET="${SSD_MOUNT}/dataset/joint_replay_secondary_train"
+export SSD_OLD_LIKE_GT="${SSD_MOUNT}/old_like_gt"
 
 export NUM_LAYERS="${NUM_LAYERS:-9}"
 export HIDDEN_SIZE="${HIDDEN_SIZE:-1024}"
@@ -103,6 +145,11 @@ export LOG_INTERVAL="${LOG_INTERVAL:-10}"
 export TENSORBOARD_LOG_INTERVAL="${TENSORBOARD_LOG_INTERVAL:-1}"
 export OLD_MODEL_KL_COEFF="${OLD_MODEL_KL_COEFF:-1.0}"
 export OLD_MODEL_KL_TEMPERATURE="${OLD_MODEL_KL_TEMPERATURE:-1.0}"
+export OLD_HIDDEN_KL_COEFF="${OLD_HIDDEN_KL_COEFF:-1.0}"
+export OLD_HIDDEN_KL_TEMPERATURE="${OLD_HIDDEN_KL_TEMPERATURE:-1.0}"
+export OLD_HIDDEN_KL_LAYERS="${OLD_HIDDEN_KL_LAYERS:-all_but_last}"
+export OLD_HIDDEN_MSE_COEFF="${OLD_HIDDEN_MSE_COEFF:-1.0}"
+export OLD_HIDDEN_MSE_LAYERS="${OLD_HIDDEN_MSE_LAYERS:-all}"
 export MOE_EXPANSION_DISTILL_MODE="${MOE_EXPANSION_DISTILL_MODE:-none}"
 export MOE_EXPANSION_DISTILL_LM_LOSS_COEFF="${MOE_EXPANSION_DISTILL_LM_LOSS_COEFF:-1.0}"
 export MOE_EXPANSION_DISTILL_HIDDEN_MSE_COEFF="${MOE_EXPANSION_DISTILL_HIDDEN_MSE_COEFF:-1.0}"
@@ -127,6 +174,9 @@ export LR_WARMUP_FRACTION="${LR_WARMUP_FRACTION:-0.01}"
 export LR_DECAY_ITERS="${LR_DECAY_ITERS:-$TRAIN_ITERS}"
 export LR_WSD_DECAY_ITERS="${LR_WSD_DECAY_ITERS:-$((TRAIN_ITERS / 10))}"
 export MOE_NEW_EXPERT_LR_RAMP_STEPS="${MOE_NEW_EXPERT_LR_RAMP_STEPS:-0}"
+export MOE_ROUTER_LR_MULTIPLIER="${MOE_ROUTER_LR_MULTIPLIER:-1.0}"
+export MOE_SEPARATE_ROUTER_EXPERT_GRAD_CLIP="${MOE_SEPARATE_ROUTER_EXPERT_GRAD_CLIP:-0}"
+export MOE_ALLOW_PARTIAL_OPTIMIZER_STATE="${MOE_ALLOW_PARTIAL_OPTIMIZER_STATE:-0}"
 export MODEL_CONFIG_SCRIPT="${MODEL_CONFIG_SCRIPT:-scripts/experiment/a100/flame-moe-bf16-no-shared.sh}"
 export DATASET_SPLIT="${DATASET_SPLIT:-100,0,0}"
 
@@ -182,11 +232,33 @@ if [ "$TRAIN_ATTENTION_WITH_NEW_EXPERTS" = "1" ] && [ "$TRAIN_NEW_EXPERTS_AND_RO
     exit 1
 fi
 
-if [ "$DIRECT_LOCAL_SAVE" = "1" ]; then
+export SOURCE_WEIGHTS_DIR="$(resolve_completed_run_dir)"
+case "$STAGE_INPUTS_TO_SCRATCH" in 0|1) ;; *) echo "ERROR: STAGE_INPUTS_TO_SCRATCH must be 0 or 1" >&2; exit 1 ;; esac
+case "$DIRECT_LOCAL_SAVE" in 0|1) ;; *) echo "ERROR: DIRECT_LOCAL_SAVE must be 0 or 1" >&2; exit 1 ;; esac
+[[ -d "$TRAIN_DATASET" ]] || { echo "ERROR: training dataset missing: $TRAIN_DATASET" >&2; exit 1; }
+if [ "$MOE_JOINT_REPLAY_LM" = "1" ]; then
+    [[ -n "$JOINT_REPLAY_DATASET" && -d "$JOINT_REPLAY_DATASET" ]] || {
+        echo "ERROR: joint replay dataset missing: ${JOINT_REPLAY_DATASET:-<empty>}" >&2
+        exit 1
+    }
+fi
+
+if [ "$STAGE_INPUTS_TO_SCRATCH" = "0" ]; then
+    # Inputs already live on /data2. Use the persistent paths directly rather
+    # than duplicating checkpoints, datasets, replay data, and GT on /data2.
+    export SSD_TRAIN_DATASET="$TRAIN_DATASET"
+    export SSD_TRAIN_DATASET_SECONDARY="$TRAIN_DATASET_SECONDARY"
+    export SSD_SOURCE_WEIGHTS="$SOURCE_WEIGHTS_DIR"
+    export SSD_TARGET_WEIGHTS="$TRAIN_WEIGHTS"
+    export SSD_INTERLEAVE_WIKI_DATASET="$INTERLEAVE_WIKI_DATASET"
+    export SSD_INTERLEAVE_SECONDARY_DATASET="$INTERLEAVE_SECONDARY_DATASET"
+    export SSD_JOINT_REPLAY_DATASET="$JOINT_REPLAY_DATASET"
+    export SSD_JOINT_REPLAY_SECONDARY_DATASET="$JOINT_REPLAY_SECONDARY_DATASET"
+    export SSD_OLD_LIKE_GT="$MOE_JOINT_REPLAY_OLD_LIKE_GT_PATH"
+elif [ "$DIRECT_LOCAL_SAVE" = "1" ]; then
     export SSD_TARGET_WEIGHTS="$TRAIN_WEIGHTS"
 fi
 
-export SOURCE_WEIGHTS_DIR="$(resolve_completed_run_dir)"
 export PROBE_STEP_OFFSET="${PROBE_STEP_OFFSET:-$(read_train_iters_from_run)}"
 export SECONDARY_PROBE_STEP_OFFSET="${SECONDARY_PROBE_STEP_OFFSET:-$PROBE_STEP_OFFSET}"
 export TERTIARY_PROBE_STEP_OFFSET="${TERTIARY_PROBE_STEP_OFFSET:-$PROBE_STEP_OFFSET}"
@@ -236,11 +308,26 @@ if [ "$MOE_JOINT_REPLAY_LM" = "1" ]; then
     mkdir -p "$SSD_JOINT_REPLAY_DATASET"
     [ -z "$JOINT_REPLAY_SECONDARY_DATASET" ] || mkdir -p "$SSD_JOINT_REPLAY_SECONDARY_DATASET"
 fi
+if [ -n "$MOE_JOINT_REPLAY_OLD_LIKE_GT_PATH" ]; then
+    [ "$MOE_JOINT_REPLAY_LM" = "1" ] || { echo "ERROR: old-like GT requires joint replay" >&2; exit 1; }
+    [ -f "$MOE_JOINT_REPLAY_OLD_LIKE_GT_PATH/metadata.json" ] || {
+        echo "ERROR: old-like GT metadata missing: $MOE_JOINT_REPLAY_OLD_LIKE_GT_PATH/metadata.json" >&2
+        exit 1
+    }
+    mkdir -p "$SSD_OLD_LIKE_GT"
+fi
 if [ "$MOE_INTERLEAVE_CODE_STEPS" -gt 0 ]; then
     mkdir -p "$SSD_INTERLEAVE_WIKI_DATASET"
     if [ -n "$INTERLEAVE_SECONDARY_DATASET" ]; then
         mkdir -p "$SSD_INTERLEAVE_SECONDARY_DATASET"
     fi
+fi
+
+if [ "$STORAGE_PLAN_ONLY" = "1" ]; then
+    printf 'STAGE_INPUTS_TO_SCRATCH=%s\nSOURCE=%s\nDATASET=%s\nREPLAY=%s\nGT=%s\nSAVE=%s\n' \
+        "$STAGE_INPUTS_TO_SCRATCH" "$SSD_SOURCE_WEIGHTS" "$SSD_TRAIN_DATASET" \
+        "$SSD_JOINT_REPLAY_DATASET" "$SSD_OLD_LIKE_GT" "$SSD_TARGET_WEIGHTS"
+    exit 0
 fi
 
 GPU_LOG_PID=""
@@ -325,28 +412,34 @@ echo "a100 bf16 continual run log: $RUN_LOG"
 echo "a100 bf16 continual gpu log: $GPU_LOG"
 echo "a100 bf16 continual metadata: $RUN_METADATA"
 echo "a100 bf16 source checkpoint: $SOURCE_WEIGHTS_DIR"
+echo "a100 bf16 input staging: $([ "$STAGE_INPUTS_TO_SCRATCH" = 1 ] && echo enabled || echo disabled)"
 if [ "$RESUME_FROM_TARGET" = "1" ]; then
     echo "a100 bf16 continual resume checkpoint: $TRAIN_WEIGHTS"
 fi
 
-rsync -rlptD \
-    --exclude 'logs/' \
-    --exclude 'wandb/' \
-    --exclude 'events.out.tfevents*' \
-    --exclude 'progress.txt' \
-    "$SOURCE_WEIGHTS_DIR/" "$SSD_SOURCE_WEIGHTS/"
-rsync -rlptD --info=progress2 "$TRAIN_DATASET/" "$SSD_TRAIN_DATASET/"
-if [ -n "$TRAIN_DATASET_SECONDARY" ]; then
-    rsync -rlptD --info=progress2 "$TRAIN_DATASET_SECONDARY/" "$SSD_TRAIN_DATASET_SECONDARY/"
-fi
-if [ "$MOE_JOINT_REPLAY_LM" = "1" ]; then
-    rsync -rlptD --info=progress2 "$JOINT_REPLAY_DATASET/" "$SSD_JOINT_REPLAY_DATASET/"
-    [ -z "$JOINT_REPLAY_SECONDARY_DATASET" ] || rsync -rlptD --info=progress2 "$JOINT_REPLAY_SECONDARY_DATASET/" "$SSD_JOINT_REPLAY_SECONDARY_DATASET/"
-fi
-if [ "$MOE_INTERLEAVE_CODE_STEPS" -gt 0 ]; then
-    rsync -rlptD --info=progress2 "$INTERLEAVE_WIKI_DATASET/" "$SSD_INTERLEAVE_WIKI_DATASET/"
-    if [ -n "$INTERLEAVE_SECONDARY_DATASET" ]; then
-        rsync -rlptD --info=progress2 "$INTERLEAVE_SECONDARY_DATASET/" "$SSD_INTERLEAVE_SECONDARY_DATASET/"
+if [ "$STAGE_INPUTS_TO_SCRATCH" = "1" ]; then
+    rsync -rlptD \
+        --exclude 'logs/' \
+        --exclude 'wandb/' \
+        --exclude 'events.out.tfevents*' \
+        --exclude 'progress.txt' \
+        "$SOURCE_WEIGHTS_DIR/" "$SSD_SOURCE_WEIGHTS/"
+    rsync -rlptD --info=progress2 "$TRAIN_DATASET/" "$SSD_TRAIN_DATASET/"
+    if [ -n "$TRAIN_DATASET_SECONDARY" ]; then
+        rsync -rlptD --info=progress2 "$TRAIN_DATASET_SECONDARY/" "$SSD_TRAIN_DATASET_SECONDARY/"
+    fi
+    if [ "$MOE_JOINT_REPLAY_LM" = "1" ]; then
+        rsync -rlptD --info=progress2 "$JOINT_REPLAY_DATASET/" "$SSD_JOINT_REPLAY_DATASET/"
+        [ -z "$JOINT_REPLAY_SECONDARY_DATASET" ] || rsync -rlptD --info=progress2 "$JOINT_REPLAY_SECONDARY_DATASET/" "$SSD_JOINT_REPLAY_SECONDARY_DATASET/"
+    fi
+    if [ -n "$MOE_JOINT_REPLAY_OLD_LIKE_GT_PATH" ]; then
+        rsync -rlptD --delete "$MOE_JOINT_REPLAY_OLD_LIKE_GT_PATH/" "$SSD_OLD_LIKE_GT/"
+    fi
+    if [ "$MOE_INTERLEAVE_CODE_STEPS" -gt 0 ]; then
+        rsync -rlptD --info=progress2 "$INTERLEAVE_WIKI_DATASET/" "$SSD_INTERLEAVE_WIKI_DATASET/"
+        if [ -n "$INTERLEAVE_SECONDARY_DATASET" ]; then
+            rsync -rlptD --info=progress2 "$INTERLEAVE_SECONDARY_DATASET/" "$SSD_INTERLEAVE_SECONDARY_DATASET/"
+        fi
     fi
 fi
 if [ "$RESUME_FROM_TARGET" = "1" ] && [ "$SSD_TARGET_WEIGHTS" != "$TRAIN_WEIGHTS" ]; then
@@ -417,6 +510,69 @@ if [ "$MOE_JOINT_REPLAY_LM" = "1" ]; then
       *) echo "ERROR: invalid joint replay weight mode" >&2; exit 1 ;;
     esac
     INTERLEAVE_ARGS+=(--moe-joint-replay-lm --moe-joint-replay-data-path $JOINT_PATH)
+    if [ "$MOE_JOINT_REPLAY_TOTAL_SAMPLES" -gt 0 ]; then
+        INTERLEAVE_ARGS+=(
+            --moe-joint-replay-total-samples "$MOE_JOINT_REPLAY_TOTAL_SAMPLES"
+            --moe-joint-replay-micro-batch-size "$MOE_JOINT_REPLAY_MICRO_BATCH_SIZE"
+        )
+    fi
+    if [ -n "$MOE_JOINT_REPLAY_OLD_LIKE_GT_PATH" ]; then
+        INTERLEAVE_ARGS+=(
+            --moe-joint-replay-old-like-gt-path "$SSD_OLD_LIKE_GT"
+            --moe-joint-replay-old-like-unit "$MOE_JOINT_REPLAY_OLD_LIKE_UNIT"
+            --moe-joint-replay-old-like-target-train-fraction "$MOE_JOINT_REPLAY_OLD_LIKE_TARGET_TRAIN_FRACTION"
+            --moe-joint-replay-old-like-selected-token-count "$MOE_JOINT_REPLAY_OLD_LIKE_SELECTED_TOKEN_COUNT"
+            --moe-joint-replay-old-like-positive-sample-count "$MOE_JOINT_REPLAY_OLD_LIKE_POSITIVE_SAMPLE_COUNT"
+            --moe-joint-replay-old-like-full-train-token-count "$MOE_JOINT_REPLAY_OLD_LIKE_FULL_TRAIN_TOKEN_COUNT"
+        )
+    fi
+    if [ "$MOE_JOINT_NEW_EXPERT_QUOTA" != "0" ] && [ "$MOE_JOINT_NEW_EXPERT_QUOTA" != "0.0" ]; then
+        INTERLEAVE_ARGS+=(--moe-joint-new-expert-quota "$MOE_JOINT_NEW_EXPERT_QUOTA")
+    fi
+    if [ -n "$MOE_JOINT_NEW_EXPERT_QUOTA_SCHEDULE" ]; then
+        INTERLEAVE_ARGS+=(--moe-joint-new-expert-quota-schedule "$MOE_JOINT_NEW_EXPERT_QUOTA_SCHEDULE")
+    fi
+    if [ -n "$MOE_JOINT_NEW_EXPERT_QUOTA_MIN_NEW_SLOTS" ]; then
+        INTERLEAVE_ARGS+=(--moe-joint-new-expert-quota-min-new-slots "$MOE_JOINT_NEW_EXPERT_QUOTA_MIN_NEW_SLOTS")
+    fi
+    INTERLEAVE_ARGS+=(--moe-joint-new-expert-quota-loss-coeff "$MOE_JOINT_NEW_EXPERT_QUOTA_LOSS_COEFF")
+    if [ "$MOE_JOINT_NEW_EXPERT_QUOTA_PRESERVE_NATURAL_GRADS" = "1" ]; then
+        INTERLEAVE_ARGS+=(--moe-joint-new-expert-quota-preserve-natural-grads)
+    fi
+    if [ "$MOE_JOINT_REPLAY_OLD_DATA_KD" = "1" ]; then
+        [ "$ENABLE_OLD_MODEL_KL" = "1" ] || { echo "ERROR: old-data KD replay requires ENABLE_OLD_MODEL_KL=1" >&2; exit 1; }
+        [ -n "$OLD_MODEL_KL_WEIGHTS_DIR" ] || { echo "ERROR: old-data KD replay requires OLD_MODEL_KL_WEIGHTS_DIR" >&2; exit 1; }
+        [ -d "$OLD_MODEL_KL_WEIGHTS_DIR" ] || { echo "ERROR: teacher checkpoint not found: $OLD_MODEL_KL_WEIGHTS_DIR" >&2; exit 1; }
+        INTERLEAVE_ARGS+=(--moe-joint-replay-old-data-kd)
+    fi
+    if [ "$MOE_JOINT_REPLAY_OLD_DATA_HIDDEN_KL" = "1" ]; then
+        [ "$ENABLE_OLD_MODEL_KL" = "1" ] || { echo "ERROR: old-data hidden KL replay requires ENABLE_OLD_MODEL_KL=1" >&2; exit 1; }
+        [ -n "$OLD_MODEL_KL_WEIGHTS_DIR" ] || { echo "ERROR: old-data hidden KL replay requires OLD_MODEL_KL_WEIGHTS_DIR" >&2; exit 1; }
+        [ -d "$OLD_MODEL_KL_WEIGHTS_DIR" ] || { echo "ERROR: teacher checkpoint not found: $OLD_MODEL_KL_WEIGHTS_DIR" >&2; exit 1; }
+        INTERLEAVE_ARGS+=(
+            --moe-joint-replay-old-data-hidden-kl
+            --moe-old-hidden-kl-coeff "$OLD_HIDDEN_KL_COEFF"
+            --moe-old-hidden-kl-temperature "$OLD_HIDDEN_KL_TEMPERATURE"
+            --moe-old-hidden-kl-layers "$OLD_HIDDEN_KL_LAYERS"
+        )
+        if [ "$OLD_HIDDEN_KL_COEFF_DECAY_STEPS" -gt 0 ]; then
+            [ -n "$OLD_HIDDEN_KL_COEFF_START" ] || { echo "ERROR: hidden-KL scheduling requires OLD_HIDDEN_KL_COEFF_START" >&2; exit 1; }
+            INTERLEAVE_ARGS+=(
+                --moe-old-hidden-kl-coeff-start "$OLD_HIDDEN_KL_COEFF_START"
+                --moe-old-hidden-kl-coeff-decay-steps "$OLD_HIDDEN_KL_COEFF_DECAY_STEPS"
+            )
+        fi
+    fi
+    if [ "$MOE_JOINT_REPLAY_OLD_DATA_HIDDEN_MSE" = "1" ]; then
+        [ "$ENABLE_OLD_MODEL_KL" = "1" ] || { echo "ERROR: old-data hidden MSE replay requires ENABLE_OLD_MODEL_KL=1" >&2; exit 1; }
+        [ -n "$OLD_MODEL_KL_WEIGHTS_DIR" ] || { echo "ERROR: old-data hidden MSE replay requires OLD_MODEL_KL_WEIGHTS_DIR" >&2; exit 1; }
+        [ -d "$OLD_MODEL_KL_WEIGHTS_DIR" ] || { echo "ERROR: teacher checkpoint not found: $OLD_MODEL_KL_WEIGHTS_DIR" >&2; exit 1; }
+        INTERLEAVE_ARGS+=(
+            --moe-joint-replay-old-data-hidden-mse
+            --moe-old-hidden-mse-coeff "$OLD_HIDDEN_MSE_COEFF"
+            --moe-old-hidden-mse-layers "$OLD_HIDDEN_MSE_LAYERS"
+        )
+    fi
 fi
 if [ "$MOE_INTERLEAVE_CODE_STEPS" -gt 0 ]; then
     INTERLEAVE_ROUTER_DATA_PATH_DIRS=("$SSD_INTERLEAVE_WIKI_DATASET")
@@ -522,13 +678,57 @@ fi
 if [ "$MOE_NEW_EXPERT_LR_RAMP_STEPS" -gt 0 ]; then
     SAVE_ARGS+=(--moe-new-expert-lr-ramp-steps "$MOE_NEW_EXPERT_LR_RAMP_STEPS")
 fi
+SAVE_ARGS+=(--moe-router-lr-multiplier "$MOE_ROUTER_LR_MULTIPLIER")
+if [ "$MOE_SEPARATE_ROUTER_EXPERT_GRAD_CLIP" = "1" ]; then
+    SAVE_ARGS+=(--moe-separate-router-expert-grad-clip)
+fi
+if [ "$MOE_ALLOW_PARTIAL_OPTIMIZER_STATE" = "1" ]; then
+    SAVE_ARGS+=(--moe-allow-partial-optimizer-state)
+fi
+if [ "$LOG_ROUTER_GRAD_NORM_SOURCES" = "1" ]; then
+    SAVE_ARGS+=(--log-router-grad-norm-sources)
+fi
+if [ "$TRAIN_ROUTER_USAGE_LOG_INTERVAL" -gt 0 ]; then
+    SAVE_ARGS+=(--train-router-usage-log-interval "$TRAIN_ROUTER_USAGE_LOG_INTERVAL")
+    if [ -n "$TRAIN_ROUTER_USAGE_NUM_EXISTING_EXPERTS" ]; then
+        SAVE_ARGS+=(--train-router-usage-num-existing-experts "$TRAIN_ROUTER_USAGE_NUM_EXISTING_EXPERTS")
+    fi
+fi
 
-if [ "$ENABLE_OLD_MODEL_KL" = "1" ] || [ "$MOE_EXPANSION_DISTILL_MODE" != "none" ]; then
+if [ "$ENABLE_OLD_MODEL_KL" = "1" ] || [ "$MOE_EXPANSION_DISTILL_MODE" != "none" ] || [ "$FINGERPRINT_KD_ENABLE" = "1" ]; then
+    OLD_MODEL_KL_LOAD_PATH="${OLD_MODEL_KL_WEIGHTS_DIR:-$SSD_SOURCE_WEIGHTS}"
     SAVE_ARGS+=(
-        --moe-old-model-kl-load "$SSD_SOURCE_WEIGHTS"
+        --moe-old-model-kl-load "$OLD_MODEL_KL_LOAD_PATH"
         --moe-old-model-kl-coeff "$OLD_MODEL_KL_COEFF"
         --moe-old-model-kl-temperature "$OLD_MODEL_KL_TEMPERATURE"
     )
+    if [ -n "$OLD_MODEL_KL_NUM_EXPERTS" ]; then
+        SAVE_ARGS+=(--moe-old-model-kl-num-experts "$OLD_MODEL_KL_NUM_EXPERTS")
+    fi
+fi
+
+if [ "$FINGERPRINT_KD_ENABLE" = "1" ]; then
+    [ -n "$FINGERPRINT_KD_BUNDLE" ] || { echo "ERROR: fingerprint KD requires FINGERPRINT_KD_BUNDLE" >&2; exit 1; }
+    [ -f "$FINGERPRINT_KD_BUNDLE" ] || { echo "ERROR: fingerprint bundle not found: $FINGERPRINT_KD_BUNDLE" >&2; exit 1; }
+    SAVE_ARGS+=(
+        --fingerprint-kd-coeff "$FINGERPRINT_KD_COEFF"
+        --fingerprint-kd-lm-loss-coeff "$FINGERPRINT_KD_LM_LOSS_COEFF"
+        --fingerprint-kd-bundle "$FINGERPRINT_KD_BUNDLE"
+        --fingerprint-kd-rank "$FINGERPRINT_KD_RANK"
+        --fingerprint-kd-layers "$FINGERPRINT_KD_LAYERS"
+        --fingerprint-kd-score-representation "$FINGERPRINT_KD_SCORE_REPRESENTATION"
+        --fingerprint-kd-loss-representation "$FINGERPRINT_KD_LOSS_REPRESENTATION"
+        --fingerprint-kd-gate-mode "$FINGERPRINT_KD_GATE_MODE"
+        --fingerprint-kd-threshold "$FINGERPRINT_KD_THRESHOLD"
+        --fingerprint-kd-soft-temperature "$FINGERPRINT_KD_SOFT_TEMPERATURE"
+        --fingerprint-kd-weight-assignment "$FINGERPRINT_KD_WEIGHT_ASSIGNMENT"
+    )
+    if [ "$FINGERPRINT_KD_FORCE_ENABLE_ZERO_COEFF" = "1" ]; then
+        SAVE_ARGS+=(--fingerprint-kd-force-enable-zero-coeff)
+    fi
+    if [ "$LOG_FINGERPRINT_GRAD_NORM_GROUPS" = "1" ]; then
+        SAVE_ARGS+=(--log-fingerprint-grad-norm-groups)
+    fi
 fi
 
 if [ "$MOE_EXPANSION_DISTILL_MODE" != "none" ]; then
