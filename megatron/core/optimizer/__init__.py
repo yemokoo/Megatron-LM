@@ -52,6 +52,7 @@ def _get_param_groups(
     min_lr: float,
     decoupled_lr: Optional[float],
     decoupled_min_lr: Optional[float],
+    moe_router_lr_multiplier: float = 1.0,
 ) -> List[Dict]:
     """Create parameter groups for optimizer.
 
@@ -79,6 +80,8 @@ def _get_param_groups(
     """
 
     use_decoupled_learning_rate = decoupled_lr is not None
+    if moe_router_lr_multiplier < 0.0:
+        raise ValueError("moe_router_lr_multiplier must be non-negative")
 
     # Map optimizer properties to params. The new-expert marker deliberately
     # creates a separate LR group even when expert model parallelism is 1.
@@ -95,6 +98,11 @@ def _get_param_groups(
 
             is_expert_parallel = not getattr(param, 'allreduce', True)
             is_new_expert_lr_ramp = bool(getattr(param, '_new_expert_lr_ramp', False))
+            name_parts = name.split('.')
+            is_moe_router = (
+                name_parts[-1] in {'weight', 'router_weight'}
+                and any(part == 'router' or part.endswith('_router') for part in name_parts[:-1])
+            )
             has_frozen_rows = bool(
                 getattr(param, '_exclude_from_weight_decay_for_frozen_rows', False)
             )
@@ -125,6 +133,9 @@ def _get_param_groups(
             else:
                 wd_mult, _lr_mult = 0.0, lr_mult
 
+            if is_moe_router:
+                _lr_mult *= moe_router_lr_multiplier
+
             is_decoupled_lr = False
             # For input/embedding and output layer: embedding.word_embeddings.weight /
             # output_layer.weight.
@@ -139,6 +150,7 @@ def _get_param_groups(
                 is_expert_parallel,
                 is_decoupled_lr,
                 is_new_expert_lr_ramp,
+                is_moe_router,
             )
             if key not in params_map:
                 params_map[key] = []
@@ -151,6 +163,7 @@ def _get_param_groups(
         is_expert_parallel,
         is_decoupled_lr,
         is_new_expert_lr_ramp,
+        is_moe_router,
     ), params in params_map.items():
         assert len(params) > 0
         param_group = {
@@ -160,6 +173,7 @@ def _get_param_groups(
             'is_expert_parallel': is_expert_parallel,
             'is_decoupled_lr': is_decoupled_lr,
             'is_new_expert_lr_ramp': is_new_expert_lr_ramp,
+            'is_moe_router': is_moe_router,
         }
         param_groups.append(param_group)
 
@@ -253,6 +267,7 @@ def _get_param_groups_and_buffers(
         min_lr=config.min_lr,
         decoupled_lr=config.decoupled_lr,
         decoupled_min_lr=config.decoupled_min_lr,
+        moe_router_lr_multiplier=config.moe_router_lr_multiplier,
     )
     param_groups = list(filter(filter_fn, param_groups))
     buffers = {}

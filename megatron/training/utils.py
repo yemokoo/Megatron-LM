@@ -446,17 +446,29 @@ def get_blend_and_blend_per_split(args):
 def get_batch_on_this_tp_rank(data_iterator):
 
     args = get_args()
+    old_like_gt_enabled = bool(
+        getattr(args, 'moe_joint_replay_old_like_gt_path', None)
+    )
 
     def _broadcast(item):
        if item is not None:
            torch.distributed.broadcast(item, mpu.get_tensor_model_parallel_src_rank(), group=mpu.get_tensor_model_parallel_group())
 
-    if mpu.get_tensor_model_parallel_rank() == 0:
+    tp_source = mpu.get_tensor_model_parallel_rank() == 0
+    data = next(data_iterator) if tp_source and data_iterator is not None else None
+    runtime_micro_batch_size = int(data["tokens"].shape[0]) if data is not None else 0
+    runtime_micro_batch_size_tensor = torch.tensor(
+        [runtime_micro_batch_size], dtype=torch.int64,
+        device=torch.cuda.current_device(),
+    )
+    _broadcast(runtime_micro_batch_size_tensor)
+    runtime_micro_batch_size = int(runtime_micro_batch_size_tensor.item())
+    if runtime_micro_batch_size <= 0:
+        raise RuntimeError(
+            f"invalid runtime micro-batch size: {runtime_micro_batch_size}"
+        )
 
-       if data_iterator is not None:
-           data = next(data_iterator)
-       else:
-           data = None
+    if tp_source:
 
        batch = {
            'tokens': data["tokens"].cuda(non_blocking = True),
@@ -465,6 +477,44 @@ def get_batch_on_this_tp_rank(data_iterator):
            'attention_mask': None if "attention_mask" not in data else data["attention_mask"].cuda(non_blocking = True),
            'position_ids': data["position_ids"].cuda(non_blocking = True)
        }
+       if old_like_gt_enabled:
+           expected_mask_shape = (runtime_micro_batch_size, args.seq_length)
+           expected_id_shape = (runtime_micro_batch_size,)
+           has_mask = "old_like_mask" in data
+           has_sample_id = "old_like_sample_id" in data
+           if has_mask != has_sample_id:
+               raise RuntimeError(
+                   "old-like GT batch must contain both old_like_mask and "
+                   "old_like_sample_id"
+               )
+           if has_mask:
+               old_like_mask = data["old_like_mask"]
+               old_like_sample_id = data["old_like_sample_id"]
+               if tuple(old_like_mask.shape) != expected_mask_shape:
+                   raise RuntimeError(
+                       f"old_like_mask shape {tuple(old_like_mask.shape)} does not match "
+                       f"{expected_mask_shape}"
+                   )
+               if tuple(old_like_sample_id.shape) != expected_id_shape:
+                   raise RuntimeError(
+                       "old_like_sample_id shape "
+                       f"{tuple(old_like_sample_id.shape)} does not match {expected_id_shape}"
+                   )
+               batch['old_like_mask'] = old_like_mask.to(
+                   device=torch.cuda.current_device(), dtype=torch.bool, non_blocking=True
+               )
+               batch['old_like_sample_id'] = old_like_sample_id.to(
+                   device=torch.cuda.current_device(), dtype=torch.int64, non_blocking=True
+               )
+           else:
+               # Validation/test datasets are intentionally not GT-wrapped.
+               # A training objective that sees these sentinels must fail fast.
+               batch['old_like_mask'] = torch.zeros(
+                   expected_mask_shape, dtype=torch.bool, device=torch.cuda.current_device()
+               )
+               batch['old_like_sample_id'] = torch.full(
+                   expected_id_shape, -1, dtype=torch.int64, device=torch.cuda.current_device()
+               )
        if args.moe_lpr_loss_coeff > 0.0:
            # Probe/validation datasets may be unblended and therefore have no
            # dataset_id. They never execute LPR; -1 is only a broadcast placeholder.
@@ -474,7 +524,7 @@ def get_batch_on_this_tp_rank(data_iterator):
                )
            else:
                batch['dataset_id'] = torch.full(
-                   (args.micro_batch_size,), -1, dtype=torch.int64, device=torch.cuda.current_device()
+                   (runtime_micro_batch_size,), -1, dtype=torch.int64, device=torch.cuda.current_device()
                )
 
        if args.pipeline_model_parallel_size == 1:
@@ -483,6 +533,9 @@ def get_batch_on_this_tp_rank(data_iterator):
            _broadcast(batch['loss_mask'])
            _broadcast(batch['attention_mask'])
            _broadcast(batch['position_ids'])
+           if old_like_gt_enabled:
+               _broadcast(batch['old_like_mask'])
+               _broadcast(batch['old_like_sample_id'])
            if args.moe_lpr_loss_coeff > 0.0:
                _broadcast(batch['dataset_id'])
 
@@ -490,26 +543,41 @@ def get_batch_on_this_tp_rank(data_iterator):
            _broadcast(batch['tokens'])
            _broadcast(batch['attention_mask'])
            _broadcast(batch['position_ids'])
+           if old_like_gt_enabled:
+               _broadcast(batch['old_like_mask'])
+               _broadcast(batch['old_like_sample_id'])
 
        elif mpu.is_pipeline_last_stage():
            _broadcast(batch['labels'])
            _broadcast(batch['loss_mask'])
            _broadcast(batch['attention_mask'])
+           if old_like_gt_enabled:
+               _broadcast(batch['old_like_mask'])
+               _broadcast(batch['old_like_sample_id'])
 
     else:
 
-       tokens=torch.empty((args.micro_batch_size,args.seq_length), dtype = torch.int64 , device = torch.cuda.current_device())
-       labels=torch.empty((args.micro_batch_size,args.seq_length), dtype = torch.int64 , device = torch.cuda.current_device())
-       loss_mask=torch.empty((args.micro_batch_size,args.seq_length), dtype = torch.float32 , device = torch.cuda.current_device())
+       tokens=torch.empty((runtime_micro_batch_size,args.seq_length), dtype = torch.int64 , device = torch.cuda.current_device())
+       labels=torch.empty((runtime_micro_batch_size,args.seq_length), dtype = torch.int64 , device = torch.cuda.current_device())
+       loss_mask=torch.empty((runtime_micro_batch_size,args.seq_length), dtype = torch.float32 , device = torch.cuda.current_device())
        if args.create_attention_mask_in_dataloader:
            attention_mask=torch.empty(
-                (args.micro_batch_size,1,args.seq_length,args.seq_length), dtype = torch.bool , device = torch.cuda.current_device()
+                (runtime_micro_batch_size,1,args.seq_length,args.seq_length), dtype = torch.bool , device = torch.cuda.current_device()
             )
        else:
            attention_mask=None
-       position_ids=torch.empty((args.micro_batch_size,args.seq_length), dtype = torch.int64 , device = torch.cuda.current_device())
+       position_ids=torch.empty((runtime_micro_batch_size,args.seq_length), dtype = torch.int64 , device = torch.cuda.current_device())
+       if old_like_gt_enabled:
+           old_like_mask=torch.empty(
+               (runtime_micro_batch_size,args.seq_length), dtype=torch.bool,
+               device=torch.cuda.current_device()
+           )
+           old_like_sample_id=torch.empty(
+               (runtime_micro_batch_size,), dtype=torch.int64,
+               device=torch.cuda.current_device()
+           )
        if args.moe_lpr_loss_coeff > 0.0:
-           dataset_id=torch.empty((args.micro_batch_size,), dtype=torch.int64, device=torch.cuda.current_device())
+           dataset_id=torch.empty((runtime_micro_batch_size,), dtype=torch.int64, device=torch.cuda.current_device())
 
        if args.pipeline_model_parallel_size == 1:
            _broadcast(tokens)
@@ -517,6 +585,9 @@ def get_batch_on_this_tp_rank(data_iterator):
            _broadcast(loss_mask)
            _broadcast(attention_mask)
            _broadcast(position_ids)
+           if old_like_gt_enabled:
+               _broadcast(old_like_mask)
+               _broadcast(old_like_sample_id)
            if args.moe_lpr_loss_coeff > 0.0:
                _broadcast(dataset_id)
 
@@ -527,6 +598,9 @@ def get_batch_on_this_tp_rank(data_iterator):
            _broadcast(tokens)
            _broadcast(attention_mask)
            _broadcast(position_ids)
+           if old_like_gt_enabled:
+               _broadcast(old_like_mask)
+               _broadcast(old_like_sample_id)
 
        elif mpu.is_pipeline_last_stage():
            tokens=None
@@ -535,6 +609,9 @@ def get_batch_on_this_tp_rank(data_iterator):
            _broadcast(labels)
            _broadcast(loss_mask)
            _broadcast(attention_mask)
+           if old_like_gt_enabled:
+               _broadcast(old_like_mask)
+               _broadcast(old_like_sample_id)
 
        batch = {
            'tokens': tokens,
@@ -545,6 +622,9 @@ def get_batch_on_this_tp_rank(data_iterator):
        }
        if args.moe_lpr_loss_coeff > 0.0:
            batch['dataset_id'] = dataset_id
+       if old_like_gt_enabled:
+           batch['old_like_mask'] = old_like_mask
+           batch['old_like_sample_id'] = old_like_sample_id
 
     return batch
 

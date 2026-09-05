@@ -1478,9 +1478,13 @@ def _collect_moe_router_layers(modules):
             layer_number = getattr(layer, "layer_number", None)
             mlp = getattr(layer, "mlp", None)
             router = getattr(mlp, "router", None)
+            if router is None or not hasattr(router, "gating"):
+                # shared-router hybrid layers route once, before attention, from
+                # layer.shared_expert_router rather than layer.mlp.router.
+                router = getattr(layer, "shared_expert_router", None)
             if layer_number is None or router is None or not hasattr(router, "gating"):
                 continue
-            key = (id(mlp), int(layer_number))
+            key = (id(router), int(layer_number))
             if key in seen:
                 continue
             seen.add(key)
@@ -4020,6 +4024,7 @@ def _run_hidden_space_dump(model, iteration):
         module.eval()
 
     detailed = bool(getattr(args, "hidden_space_dump_routing_details", False))
+    routing_only = detailed and os.environ.get("HIDDEN_DUMP_ROUTING_ONLY", "") == "1"
     capture_expert_outputs = bool(
         detailed and getattr(args, "hidden_space_dump_expert_outputs", False)
     )
@@ -4039,6 +4044,8 @@ def _run_hidden_space_dump(model, iteration):
         "ffn_output",
         "layer_output",
     )
+    if routing_only:
+        component_names = ("router_input",)
     component_chunks = (
         {
             name: {layer_number: [] for layer_number, _ in layer_modules}
@@ -4109,27 +4116,31 @@ def _run_hidden_space_dump(model, iteration):
     for layer_number, layer in layer_modules:
         handles.append(layer.register_forward_hook(make_layer_output_hook(layer_number)))
         if detailed:
-            handles.append(
-                layer.register_forward_pre_hook(
-                    make_pre_hook(layer_number, "layer_input"), with_kwargs=True
+            # routing-only keeps just the router input; the other five components
+            # are already available from the earlier hidden dump.
+            if not routing_only:
+                handles.append(
+                    layer.register_forward_pre_hook(
+                        make_pre_hook(layer_number, "layer_input"), with_kwargs=True
+                    )
                 )
-            )
-            handles.append(
-                layer.self_attention.register_forward_hook(
-                    make_output_hook(layer_number, "attention_output")
+                handles.append(
+                    layer.self_attention.register_forward_hook(
+                        make_output_hook(layer_number, "attention_output")
+                    )
                 )
-            )
-            handles.append(
-                layer.pre_mlp_layernorm.register_forward_pre_hook(
-                    make_pre_hook(layer_number, "post_attention_hidden"), with_kwargs=True
+                handles.append(
+                    layer.pre_mlp_layernorm.register_forward_pre_hook(
+                        make_pre_hook(layer_number, "post_attention_hidden"), with_kwargs=True
+                    )
                 )
-            )
             handles.append(
-                layer.mlp.register_forward_pre_hook(
+                moe_layers[layer_number][1].register_forward_pre_hook(
                     make_pre_hook(layer_number, "router_input"), with_kwargs=True
                 )
             )
-            handles.append(layer.mlp.register_forward_hook(make_output_hook(layer_number, "ffn_output")))
+            if not routing_only:
+                handles.append(layer.mlp.register_forward_hook(make_output_hook(layer_number, "ffn_output")))
 
     def select_indices(loss_mask):
         nonlocal total_samples
@@ -4325,7 +4336,7 @@ def _run_hidden_space_dump(model, iteration):
 
         os.makedirs(os.path.dirname(os.path.abspath(dump_path)), exist_ok=True)
         payload = dict(
-            hidden_layers=hidden_layers,
+            hidden_layers=(np.zeros((0,), dtype=np.float32) if routing_only else hidden_layers),
             layer_numbers=np.asarray(layer_numbers, dtype=np.int64),
             token_ids=token_ids,
             positions=positions,

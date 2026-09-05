@@ -2511,6 +2511,16 @@ def _add_moe_args(parser):
                             'learning rate from exactly zero on the first update to the normal '
                             'scheduled learning rate on this update. Router learning rates are '
                             'unchanged. Intended for new-expert continual-learning diagnostics.')
+    group.add_argument('--moe-router-lr-multiplier', type=float, default=1.0,
+                       help='Multiply the scheduled learning rate for MoE router parameters only. '
+                            'Expert learning rates are unchanged.')
+    group.add_argument('--moe-separate-router-expert-grad-clip', action='store_true',
+                       help='Clip router/dense and expert optimizer partitions independently '
+                            'without recreating either optimizer or resetting Adam state.')
+    group.add_argument('--moe-allow-partial-optimizer-state', action='store_true',
+                       help='Allow distributed checkpoints to contain optimizer shards only for '
+                            'trainable new experts; frozen missing expert states are zero-filled '
+                            'when loading.')
     group.add_argument('--moe-interleave-code-steps', type=int, default=0,
                        help='Run this many Code-only steps before each router-only block. '
                             'A positive value enables single-process MoE interleaving.')
@@ -2541,14 +2551,104 @@ def _add_moe_args(parser):
                        help='MoE z-loss coefficient for router-only blocks.')
     group.add_argument('--moe-joint-replay-lm', action='store_true',
                        help='Accumulate primary and replay LM backward passes before one update.')
+    group.add_argument('--moe-joint-replay-old-data-kd', action='store_true',
+                       help='Use pure old-model logits KD (no replay LM loss) on the replay '
+                            'branch. The primary branch remains new-task LM, and replay '
+                            'gradients remain router-only under the joint-replay freeze mask.')
+    group.add_argument('--moe-joint-replay-old-data-hidden-kl', action='store_true',
+                       help='Use teacher/student Transformer layer-output hidden KL (no replay '
+                            'LM or vocabulary-logit KD) on the replay branch. Replay gradients '
+                            'remain router-only under the joint-replay freeze mask.')
+    group.add_argument('--moe-joint-replay-old-data-hidden-mse', action='store_true',
+                       help='Use teacher/student Transformer layer-output hidden MSE (no replay '
+                            'LM or vocabulary-logit KD) on the replay branch. Replay gradients '
+                            'remain router-only under the joint-replay freeze mask.')
     group.add_argument('--moe-joint-replay-data-path', nargs='*', default=None,
                        help='Weighted data path for router-only replay LM.')
+    group.add_argument('--moe-joint-replay-total-samples', type=int, default=0,
+                       help='If positive, consume exactly this many replay sequences over the '
+                            'complete primary run while accumulating replay and primary gradients '
+                            'into the same optimizer update.')
+    group.add_argument('--moe-joint-replay-micro-batch-size', type=int, default=0,
+                       help='Per-data-parallel-rank replay micro-batch size used with an explicit '
+                            'replay sample budget. Zero reuses --micro-batch-size.')
+    group.add_argument('--moe-joint-replay-old-like-gt-path', type=str, default=None,
+                       help='Root of the packed contextual Code-token old-like pseudo-GT. '
+                            'When set, the train dataset emits an old_like_mask indexed by '
+                            'the outer GPTDataset sample index for aligned router-only replay.')
+    group.add_argument('--moe-joint-replay-old-like-unit', type=str,
+                       default='positive_sequence',
+                       choices=['positive_sequence', 'token_occurrence'],
+                       help='Replay-unit construction for contextual old-like GT: repeat each '
+                            'GT-positive source sequence with all of its GT positions, or repeat '
+                            'individual (source sample, position) occurrences one at a time.')
+    group.add_argument('--moe-joint-replay-old-like-target-train-fraction', type=float,
+                       default=0.0,
+                       help='If positive, expand the old-like replay stream so the expected '
+                            'number of directly supervised GT-token occurrences equals this '
+                            'fraction of the full train-token count. Replay gradients from the '
+                            'extra batches are averaged within each primary optimizer step.')
+    group.add_argument('--moe-joint-replay-old-like-selected-token-count', type=int,
+                       default=0,
+                       help='Exact contextual GT occurrence count used for replay-budget '
+                            'accounting and fail-fast validation.')
+    group.add_argument('--moe-joint-replay-old-like-positive-sample-count', type=int,
+                       default=0,
+                       help='Exact number of source sequences containing at least one GT token; '
+                            'required for positive-sequence replay-budget accounting.')
+    group.add_argument('--moe-joint-replay-old-like-full-train-token-count', type=int,
+                       default=0,
+                       help='Full train-token denominator used by the old-like replay budget.')
+    group.add_argument('--moe-joint-new-expert-quota', type=float, default=0.0,
+                       help='If positive, add an expert-only primary pass whose dispatch gives '
+                            'at least this fraction of tokens to newly added experts. Natural-new '
+                            'and replay gradients remain router-only, and one optimizer step is '
+                            'taken after all three backward passes.')
+    group.add_argument('--moe-joint-new-expert-quota-schedule', type=str, default=None,
+                       help='Optional comma-separated end_step:quota schedule, for example '
+                            '300:0.5,600:0.3. After the last end step quota is disabled and the '
+                            'ordinary joint new-task/replay update resumes without rebuilding '
+                            'the optimizer.')
+    group.add_argument('--moe-joint-new-expert-quota-min-new-slots', type=int, default=None,
+                       help='Minimum number of new-group experts in top-k for quota-qualified '
+                            'tokens. Defaults to top-k (the original fully-new-group behavior).')
+    group.add_argument('--moe-joint-new-expert-quota-loss-coeff', type=float, default=1.0,
+                       help='Scale applied to the expert-only quota-pass gradient.')
+    group.add_argument('--moe-joint-new-expert-quota-preserve-natural-grads',
+                       action='store_true',
+                       help='Keep natural primary expert gradients and add the scaled quota '
+                            'gradient instead of replacing the natural expert gradient.')
     group.add_argument('--moe-old-model-kl-load', type=str, default=None,
                        help='Checkpoint directory for reconstructing the pre-expansion MoE teacher during resumed continual learning.')
+    group.add_argument('--moe-old-model-kl-num-experts', type=int, default=None,
+                       help='Explicit teacher expert count. Defaults to the pre-expansion '
+                            'resume boundary; set this to the expanded expert count when using '
+                            'a post-expansion-KD teacher snapshot.')
     group.add_argument('--moe-old-model-kl-coeff', type=float, default=0.0,
                        help='Scale factor lambda for KL distillation from the pre-expansion MoE teacher model during continual learning.')
     group.add_argument('--moe-old-model-kl-temperature', type=float, default=1.0,
                        help='Temperature used for old-model logits distillation during continual learning.')
+    group.add_argument('--moe-old-hidden-kl-coeff', type=float, default=1.0,
+                       help='Scale factor for old-data Transformer layer-output hidden KL.')
+    group.add_argument('--moe-old-hidden-kl-coeff-start', type=float, default=None,
+                       help='Optional initial hidden-KL coefficient. When set together with '
+                            '--moe-old-hidden-kl-coeff-decay-steps, it is linearly decayed to '
+                            '--moe-old-hidden-kl-coeff by that iteration and held there.')
+    group.add_argument('--moe-old-hidden-kl-coeff-decay-steps', type=int, default=0,
+                       help='Number of continual-learning updates used to linearly decay the '
+                            'hidden-KL coefficient from its optional start value to '
+                            '--moe-old-hidden-kl-coeff. Zero disables scheduling.')
+    group.add_argument('--moe-old-hidden-kl-temperature', type=float, default=1.0,
+                       help='Softmax temperature over the hidden dimension for old-data hidden KL.')
+    group.add_argument('--moe-old-hidden-kl-layers', type=str, default='all_but_last',
+                       help='Comma-separated 1-based Transformer layer outputs used for old-data '
+                            'hidden KL, all, or all_but_last (the outputs feeding a next layer).')
+    group.add_argument('--moe-old-hidden-mse-coeff', type=float, default=1.0,
+                       help='Scale factor for old-data Transformer layer-output hidden MSE.')
+    group.add_argument('--moe-old-hidden-mse-layers', type=str, default='all',
+                       help='Comma-separated 1-based Transformer layer outputs used for old-data '
+                            'hidden MSE, all, or all_but_last. Specify the router-bearing layer '
+                            'numbers explicitly when dense and MoE layers are mixed.')
     group.add_argument('--moe-expansion-distill-mode', type=str, default='none',
                        choices=['none', 'logits', 'logits_hidden', 'logits_hidden_router'],
                        help='Pre-code expert-expansion alignment objective. logits uses old-model '
@@ -2822,6 +2922,191 @@ def _add_experimental_args(parser):
                        help='Human-readable stage label stored in --hidden-space-dump-path output.')
     group.add_argument('--hidden-space-dump-max-tokens', type=int, default=2048,
                        help='Maximum valid probe tokens to store for hidden-space visualization.')
+    group.add_argument('--hidden-space-dump-tokens-per-sample', type=int, default=0,
+                       help='If positive, deterministically select this many approximately '
+                            'evenly-spaced valid tokens from every probe sample instead of '
+                            'filling the token budget from the first samples.')
     group.add_argument('--hidden-space-dump-layers', type=str, default='all',
                        help='Comma-separated 1-based transformer layer numbers to capture, or all.')
+    group.add_argument('--hidden-space-dump-routing-details', action='store_true',
+                       help='Also store aligned layer inputs, attention/FFN components, router '
+                            'logits/probabilities/top-k diagnostics, and router weights.')
+    group.add_argument('--hidden-space-dump-expert-outputs', action='store_true',
+                       help='With --hidden-space-dump-routing-details, also recompute and store '
+                            'the unweighted output vector of every selected top-k local expert. '
+                            'Currently requires expert parallel size 1 and SequentialMLP experts.')
+    group.add_argument('--layer-output-streaming-stats-path', type=str, default=None,
+                       help='Analysis-only output .npz. Stream paired frozen-teacher/current-model '
+                            'layer-output moments on the primary probe without storing all activations.')
+    group.add_argument('--layer-output-streaming-target-tokens', type=int, default=10000000,
+                       help='Number of valid aligned probe tokens for paired streaming statistics.')
+    group.add_argument('--layer-output-streaming-block-tokens', type=int, default=2000000,
+                       help='Exact valid-token count per reproducibility/statistics block.')
+    group.add_argument('--layer-output-streaming-layers', type=str, default='2,3,4,5,6,7,8,9',
+                       help='Comma-separated 1-based residual-included Transformer layer outputs.')
+    group.add_argument('--layer-output-streaming-reservoir-size', type=int, default=4096,
+                       help='Bounded deterministic per-layer delta-vector reservoir size.')
+    group.add_argument('--layer-output-streaming-label', type=str, default=None,
+                       help='Human-readable checkpoint-pair/domain label saved in metadata.')
+    group.add_argument('--layer-output-streaming-manifest-path', type=str, default=None,
+                       help='JSON manifest path. It is created once and later paired runs must match it.')
+    group.add_argument('--layer-output-streaming-ffn-diagnostic', action='store_true',
+                       help='Also accumulate scalar (not full-covariance) drift diagnostics for MoE FFN outputs.')
+    group.add_argument('--code-token-hidden-pair-path', type=str, default=None,
+                       help='Analysis-only output directory for restartable token-occurrence, '
+                            'per-layer reference/current hidden metrics on Code train samples.')
+    group.add_argument('--code-token-hidden-pair-total-samples', type=int, default=4147200,
+                       help='Total deterministic Code GPTDataset sample count shared by all workers.')
+    group.add_argument('--code-token-hidden-pair-start-sample', type=int, default=0,
+                       help='Inclusive global GPTDataset sample index for this independent worker.')
+    group.add_argument('--code-token-hidden-pair-samples', type=int, default=0,
+                       help='Number of contiguous GPTDataset samples assigned to this worker.')
+    group.add_argument('--code-token-hidden-pair-shard-samples', type=int, default=4800,
+                       help='Number of sequences atomically committed in each token-metric shard.')
+    group.add_argument('--code-token-hidden-pair-layers', type=str, default='1,2,3,4,5,6,7,8,9',
+                       help='Comma-separated 1-based residual-included Transformer layer outputs.')
+    group.add_argument('--code-token-hidden-pair-reservoir-size', type=int, default=512,
+                       help='Deterministic per-worker raw reference/current hidden reservoir size.')
+    group.add_argument('--code-token-hidden-pair-worker-index', type=int, default=0,
+                       help='Logical independent worker index saved in extraction metadata.')
+    group.add_argument('--code-token-hidden-pair-worker-count', type=int, default=1,
+                       help='Logical worker count used to audit complete, disjoint sample ranges.')
+    group.add_argument('--code-token-hidden-pair-label', type=str, default=None,
+                       help='Human-readable checkpoint-pair label stored in extraction metadata.')
+    group.add_argument('--cka-gt-pilot-path', type=str, default=None,
+                       help='Analysis-only CKA old-like GT pilot output root. When set, probe '
+                            'evaluation runs the document-bounded paired-forward diagnostic and '
+                            'does not run training or ordinary probes.')
+    group.add_argument('--cka-gt-pilot-config', type=str, default=None,
+                       help='Frozen JSON configuration and sampled-window manifest for the CKA pilot.')
+    group.add_argument('--cka-gt-pilot-mode', type=str, default='pass2',
+                       choices=('pass1', 'pass2', 'router_smoke'),
+                       help='Pass 1 builds Wiki calibration membership statistics; pass 2 writes '
+                            'paired scalar metrics; router_smoke only validates standard routers.')
+    group.add_argument('--cka-gt-pilot-domain', type=str, default='code',
+                       choices=('code', 'wiki'),
+                       help='Sampled document-window domain assigned to this analysis worker.')
+    group.add_argument('--cka-gt-pilot-split', type=str, default='all',
+                       choices=('all', 'calibration', 'selection', 'test'),
+                       help='Manifest split assigned to this analysis worker.')
+    group.add_argument('--cka-gt-pilot-worker-index', type=int, default=0,
+                       help='Logical independent worker index for deterministic manifest partitioning.')
+    group.add_argument('--cka-gt-pilot-worker-count', type=int, default=1,
+                       help='Logical worker count for deterministic manifest partitioning.')
+    group.add_argument('--cka-gt-pilot-batch-size', type=int, default=1,
+                       help='Maximum number of equal-length document windows forwarded together.')
+    group.add_argument('--cka-gt-pilot-shard-windows', type=int, default=64,
+                       help='Number of source windows atomically committed per metric shard.')
+    group.add_argument('--cka-gt-pilot-max-windows', type=int, default=0,
+                       help='Optional diagnostic cap after worker partitioning; zero means all assigned windows.')
+    group.add_argument('--cka-gt-pilot-membership-stats', type=str, default=None,
+                       help='Pass-1 membership statistics NPZ required by pass 2.')
+    group.add_argument('--cka-gt-full-census-path', type=str, default=None,
+                       help='Analysis-only output root shared by restartable streaming '
+                            'Code-train CKA census workers. Hidden states are never written.')
+    group.add_argument('--cka-gt-full-census-config', type=str, default=None,
+                       help='Pilot analysis_config.json used for exact provenance and optional '
+                            '95/97/99 overlay lines. The full census itself is threshold-free.')
+    group.add_argument('--cka-gt-full-census-manifest', type=str, default=None,
+                       help='Full document-bounded Code-train manifest JSON binding windows.npy.')
+    group.add_argument('--cka-gt-full-census-worker-index', type=int, default=0,
+                       help='Logical independent census worker index.')
+    group.add_argument('--cka-gt-full-census-worker-count', type=int, default=1,
+                       help='Logical worker count used for exact disjoint manifest partitioning.')
+    group.add_argument('--cka-gt-full-census-batch-size', type=int, default=32,
+                       help='Maximum equal-length document windows forwarded per paired batch.')
+    group.add_argument('--cka-gt-full-census-forward-subbatch-size', type=int, default=0,
+                       help='Optional smaller GPU forward chunk inside one journal batch; zero '
+                            'uses the journal batch size. This does not change resume identity.')
+    group.add_argument('--cka-gt-full-census-checkpoint-every-batches', type=int, default=100,
+                       help='Atomically checkpoint compact streaming accumulators at this cadence.')
+    group.add_argument('--cka-gt-full-census-histogram-bins', type=int, default=4096,
+                       help='Fixed-bin resolution for compact full-census metric histograms.')
+    group.add_argument('--cka-gt-full-census-reservoir-size', type=int, default=5000000,
+                       help='Global deterministic token-score reservoir target. Each independent '
+                            'worker stores its deterministic partition share.')
+    group.add_argument('--cka-gt-full-census-max-windows', type=int, default=0,
+                       help='Optional cap after worker partitioning for batch benchmarks; zero '
+                            'processes the complete assigned train partition.')
+    group.add_argument('--cka-gt-full-census-benchmark-batch-sizes', type=str, default=None,
+                       help='Optional comma-separated in-process batch sweep. Checkpoints are '
+                            'loaded once and identical full-length windows are reused.')
+    group.add_argument('--cka-gt-full-census-benchmark-min-gain', type=float, default=0.03,
+                       help='Minimum relative throughput gain required before trying batch 192.')
+    group.add_argument('--cka-gt-full-census-benchmark-max-peak-gib', type=float, default=70.0,
+                       help='Hard peak-reserved HBM ceiling for benchmark batch selection.')
+    group.add_argument('--cka-gt-targeted-path', type=str, default=None,
+                       help='Analysis-only output directory for the exact targeted CKA B/T/M '
+                            'second pass. Hidden states are never persisted.')
+    group.add_argument('--cka-gt-targeted-config', type=str, default=None,
+                       help='Frozen pilot analysis_config.json containing bundles 95/97/99.')
+    group.add_argument('--cka-gt-targeted-candidate-manifest', type=str, default=None,
+                       help='Validated B-only candidate-window manifest.json.')
+    group.add_argument('--cka-gt-targeted-candidate-windows', type=str, default=None,
+                       help='B-candidate WINDOW_DTYPE NPY bound by the candidate manifest.')
+    group.add_argument('--cka-gt-targeted-census-summary', type=str, default=None,
+                       help='Completed full-census summary.json used for the exact coverage denominator.')
+    group.add_argument('--cka-gt-targeted-authoritative-b', type=str, default=None,
+                       help='Full-census authoritative B masks on the candidate-window axis.')
+    group.add_argument('--cka-gt-targeted-batch-size', type=int, default=192,
+                       help='Maximum equal-length candidate windows in one resume-journal batch.')
+    group.add_argument('--cka-gt-targeted-forward-subbatch-size', type=int, default=128,
+                       help='GPU forward chunk inside one targeted journal batch; zero uses the '
+                            'journal batch size and does not change journal identity.')
+    group.add_argument('--cka-gt-targeted-checkpoint-every-batches', type=int, default=10,
+                       help='Atomically commit compact targeted-result shards at this batch cadence.')
+    group.add_argument('--fingerprint-score-stats-path', type=str, default=None,
+                       help='Analysis-only output directory for streaming teacher token-to-subspace scores.')
+    group.add_argument('--fingerprint-score-bundle', type=str, default=None,
+                       help='NPZ containing stable/PCA/random bases and Wiki centering means.')
+    group.add_argument('--fingerprint-score-target-tokens', type=int, default=10000000,
+                       help='Exact number of valid teacher tokens to score.')
+    group.add_argument('--fingerprint-score-block-tokens', type=int, default=2000000,
+                       help='Exact valid-token count in each score statistics block.')
+    group.add_argument('--fingerprint-score-reservoir-size', type=int, default=8192,
+                       help='Bounded deterministic token/position/score reservoir size.')
+    group.add_argument('--fingerprint-score-manifest-path', type=str, default=None,
+                       help='Optional canonical block-hash manifest; create once or require exact match.')
+    group.add_argument('--fingerprint-score-label', type=str, default=None,
+                       help='Human-readable domain/checkpoint label stored with score statistics.')
+    group.add_argument('--fingerprint-kd-coeff', type=float, default=0.0,
+                       help='Additive projected fingerprint-MSE coefficient on new-task tokens.')
+    group.add_argument('--fingerprint-kd-lm-loss-coeff', type=float, default=1.0,
+                       help='Code LM coefficient while fingerprint KD is active. Keep at 1 for '
+                            'training; zero is intended only for isolated KD-gradient diagnostics.')
+    group.add_argument('--fingerprint-kd-force-enable-zero-coeff', action='store_true',
+                       help='Load/capture the fingerprint teacher with coefficient zero for parity diagnostics.')
+    group.add_argument('--log-fingerprint-grad-norm-groups', action='store_true',
+                       help='Log combined trainable/router old-row/router new-row/new-expert '
+                            'gradient norms for fingerprint scale diagnostics.')
+    group.add_argument('--fingerprint-kd-bundle', type=str, default=None,
+                       help='Stable/PCA/random score bundle used by projected fingerprint KD.')
+    group.add_argument('--fingerprint-kd-rank', type=int, default=64,
+                       choices=[16, 32, 64], help='Projection rank for fingerprint scoring and KD.')
+    group.add_argument('--fingerprint-kd-layers', type=str, default='2,3,4,5,6,7,8,9',
+                       help='Residual-included Transformer layer outputs used for fingerprint KD.')
+    group.add_argument('--fingerprint-kd-score-representation', type=str, default='stable',
+                       choices=['stable'], help='Teacher token-gating representation; fixed to stable.')
+    group.add_argument('--fingerprint-kd-loss-representation', type=str, default='stable',
+                       choices=['stable', 'pca_top', 'random', 'full'],
+                       help='Subspace in which teacher/student projected MSE is applied; '
+                            'full uses the implicit identity projection over all hidden dimensions.')
+    group.add_argument('--fingerprint-kd-gate-mode', type=str, default='soft',
+                       choices=['hard', 'soft', 'all'], help='Token weighting for projected KD.')
+    group.add_argument('--fingerprint-kd-threshold', type=float, default=0.1297607421875,
+                       help='Teacher stable-score threshold calibrated from Wiki token recall.')
+    group.add_argument('--fingerprint-kd-soft-temperature', type=float, default=0.0069580078125,
+                       help='Sigmoid temperature for soft fingerprint token weights.')
+    group.add_argument('--fingerprint-kd-weight-assignment', type=str, default='stable',
+                       choices=['stable', 'permuted'],
+                       help='Assign stable-score weights to their source tokens, or rotate the '
+                            'exact valid-token weight multiset by half a microbatch as a matched '
+                            'selector control. This never changes routing.')
+    group.add_argument('--router-fingerprint-intervention-path', type=str, default=None,
+                       help='Diagnostic NPZ containing layer_numbers, means, bases, and '
+                            'teacher_router_weights for actual-forward routing intervention.')
+    group.add_argument('--router-fingerprint-intervention-mode', type=str, default=None,
+                       choices=['teacher_full', 'fingerprint_only', 'fingerprint_removed'],
+                       help='Use the stored teacher router on the full current hidden state, only '
+                            'the stored fingerprint projection, or its orthogonal complement.')
     return parser

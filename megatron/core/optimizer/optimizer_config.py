@@ -24,6 +24,23 @@ class OptimizerConfig:
     min_lr: Optional[float] = None
     """Minumum value for learning rate. The scheduler clip values below this threshold."""
 
+    moe_router_lr_multiplier: float = 1.0
+    """Learning-rate multiplier applied only to MoE router parameters."""
+
+    moe_separate_router_expert_grad_clip: bool = False
+    """Clip dense/router and expert optimizer partitions independently.
+
+    This changes only gradient scaling inside one persistent chained optimizer;
+    it does not create, replace, or reset either optimizer partition.
+    """
+
+    moe_allow_partial_optimizer_state: bool = False
+    """Allow checkpointing optimizer state for only trainable expert shards.
+
+    Missing frozen-expert optimizer shards are zero-filled on load.  This is
+    intended for continual grouped-MoE expansion where old experts are frozen.
+    """
+
     decoupled_lr: Optional[float] = None
     """Separate learning rate for the input and output layer."""
 

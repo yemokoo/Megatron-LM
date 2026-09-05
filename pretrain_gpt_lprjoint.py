@@ -267,7 +267,19 @@ def get_batch(data_iterator):
         return None, None, None, None, None
 
     # get batches based on the TP rank you are on
-    batch = get_batch_on_this_tp_rank(data_iterator)
+    if JOINT_REPLAY_LPR_PER_TASK:
+        # utils.get_batch_on_this_tp_rank only ships/broadcasts dataset_id when the
+        # staged-LPR coefficient is positive; flip it for the fetch only so the
+        # stock helper stays untouched (primary/probe batches get the -1 placeholder).
+        _a = get_args(); _saved = _a.moe_lpr_loss_coeff
+        _a.moe_lpr_loss_coeff = 1.0
+        try:
+            batch = get_batch_on_this_tp_rank(data_iterator)
+        finally:
+            _a.moe_lpr_loss_coeff = _saved
+        _a._joint_replay_lpr_dataset_ids = batch.pop("dataset_id", None)
+    else:
+        batch = get_batch_on_this_tp_rank(data_iterator)
 
     # Apply the old-like objective split before context-parallel slicing so the
     # ordinary CP helper can slice the already-masked loss tensor without
@@ -421,6 +433,7 @@ def loss_func(
     hidden_kl_loss = None
     router_kl_loss = None
     lpr_loss = None
+    joint_replay_lpr_loss = None
     fingerprint_kd_loss = None
     fingerprint_mean_score = None
     fingerprint_mean_weight = None
@@ -436,6 +449,7 @@ def loss_func(
         hidden_kl_loss = output_tensor.get("hidden_kl_loss")
         router_kl_loss = output_tensor.get("router_kl_loss")
         lpr_loss = output_tensor.get("lpr_loss")
+        joint_replay_lpr_loss = output_tensor.get("joint_replay_lpr_loss")
         fingerprint_kd_loss = output_tensor.get("fingerprint_kd_loss")
         fingerprint_mean_score = output_tensor.get("fingerprint_mean_score")
         fingerprint_mean_weight = output_tensor.get("fingerprint_mean_weight")
@@ -499,6 +513,9 @@ def loss_func(
 
     if lpr_loss is not None:
         loss[0] = loss[0] + args.moe_lpr_loss_coeff * lpr_loss
+
+    if joint_replay_lpr_loss is not None:
+        loss[0] = loss[0] + JOINT_REPLAY_LPR_COEFF * joint_replay_lpr_loss
 
     if fingerprint_kd_loss is not None:
         loss[0] = loss[0] + args.fingerprint_kd_coeff * _token_mean_to_loss_numerator(
@@ -618,6 +635,10 @@ def loss_func(
         lpr_sum = lpr_loss.detach().view(1)
         torch.distributed.all_reduce(lpr_sum, group=mpu.get_data_parallel_group())
         reporting['lpr loss'] = (lpr_sum[0], reporting_loss[1])
+    if joint_replay_lpr_loss is not None:
+        jr_sum = joint_replay_lpr_loss.detach().view(1)
+        torch.distributed.all_reduce(jr_sum, group=mpu.get_data_parallel_group())
+        reporting['replay lpr loss'] = (jr_sum[0], reporting_loss[1])
     if fingerprint_kd_loss is not None:
         fingerprint_value = fingerprint_kd_loss.detach().view(1)
         torch.distributed.all_reduce(fingerprint_value, group=mpu.get_data_parallel_group())
@@ -675,6 +696,130 @@ def loss_func(
         local_num_tokens,
         reporting,
     )
+
+
+# ---------------------------------------------------------------------------
+# Joint-replay LPR (fork addition)
+#
+# MoE-LPR applies its supervised task-group loss in a SEPARATE router-only
+# retune phase.  Our 1-phase recipe already has an old-data, router-gradient-only
+# branch inside training (the joint-replay pass), so the same loss can be applied
+# there and the two phases collapse into one.  Because the replay batch is
+# entirely old-task data, no dataset_id bookkeeping is needed: every supervised
+# token is forced toward the old expert block [0, old_count).
+#
+# Enabled by JOINT_REPLAY_LPR_COEFF > 0.  JOINT_REPLAY_LPR_OLD_EXPERTS overrides
+# the old-expert count (default: --moe-expand/resume-from-num-experts).
+JOINT_REPLAY_LPR_COEFF = float(os.environ.get("JOINT_REPLAY_LPR_COEFF", "0") or 0)
+JOINT_REPLAY_LPR_OLD_EXPERTS = int(os.environ.get("JOINT_REPLAY_LPR_OLD_EXPERTS", "0") or 0)
+# Per-task mode (multi-old-task stages, e.g. conversation with wiki+code replay):
+#   JOINT_REPLAY_LPR_TASK_RANGES="0:8,8:16"  expert range per old task, in
+#                                            --moe-joint-replay-data-path order
+#   JOINT_REPLAY_LPR_PREFIX_COUNTS="1,1"      number of data prefixes per old task
+# The replay batch is a BlendedDataset, so each sample carries dataset_id
+# (= prefix index); tokens of task t are forced into range t exactly like
+# MoE-LPR's --moe-lpr-task-expert-ranges.  Unset -> single old group [0, old_count).
+JOINT_REPLAY_LPR_TASK_RANGES = os.environ.get("JOINT_REPLAY_LPR_TASK_RANGES", "").strip()
+JOINT_REPLAY_LPR_PREFIX_COUNTS = os.environ.get("JOINT_REPLAY_LPR_PREFIX_COUNTS", "").strip()
+JOINT_REPLAY_LPR_PER_TASK = bool(JOINT_REPLAY_LPR_COEFF > 0 and JOINT_REPLAY_LPR_TASK_RANGES)
+
+
+def _joint_replay_lpr_task_spec():
+    ranges = [tuple(int(x) for x in v.split(":")) for v in JOINT_REPLAY_LPR_TASK_RANGES.split(",")]
+    counts = [int(v) for v in JOINT_REPLAY_LPR_PREFIX_COUNTS.split(",")] if JOINT_REPLAY_LPR_PREFIX_COUNTS else [1] * len(ranges)
+    if len(counts) != len(ranges) or any(c <= 0 for c in counts) or any(len(r) != 2 or r[0] >= r[1] for r in ranges):
+        raise RuntimeError(
+            f"Invalid JOINT_REPLAY_LPR_TASK_RANGES={JOINT_REPLAY_LPR_TASK_RANGES!r} / "
+            f"JOINT_REPLAY_LPR_PREFIX_COUNTS={JOINT_REPLAY_LPR_PREFIX_COUNTS!r}")
+    return ranges, counts
+
+
+def _joint_replay_task_group_lpr(router_inputs, routers, labels, loss_mask, dataset_ids):
+    """Per-task old-expert range NLL on the replay batch, averaged over MoE layers.
+
+    dataset_ids[b] is the BlendedDataset prefix index of sample b; prefix counts
+    map it to an old task, whose tokens are forced into that task's expert range:
+    -log sum_{e in range(task)} p(e | token), summed over supervised tokens.
+    """
+    ranges, counts = _joint_replay_lpr_task_spec()
+    router_inputs = _router_inputs_by_layer(router_inputs)
+    common_layers = sorted(set(router_inputs) & set(routers))
+    if not common_layers:
+        raise RuntimeError("Joint-replay LPR captured no MoE router inputs.")
+    if dataset_ids is None or dataset_ids.dim() != 1 or dataset_ids.shape[0] != labels.shape[0]:
+        raise RuntimeError(
+            f"Joint-replay per-task LPR needs one dataset_id per sample; got "
+            f"{None if dataset_ids is None else tuple(dataset_ids.shape)} vs {tuple(labels.shape)}")
+    if int(dataset_ids.min().item()) < 0:
+        raise RuntimeError("Joint-replay per-task LPR: replay batch has no dataset_id (unblended dataset?).")
+    sample_task_ids = torch.full_like(dataset_ids, -1)
+    lower = 0
+    for task_id, count in enumerate(counts):
+        upper = lower + count
+        sample_task_ids[(dataset_ids >= lower) & (dataset_ids < upper)] = task_id
+        lower = upper
+    if int(dataset_ids.max().item()) >= lower:
+        raise RuntimeError(f"Joint-replay per-task LPR: dataset_id exceeds configured {lower} prefixes.")
+    token_task_ids = sample_task_ids[:, None].expand_as(labels).reshape(-1)
+    flat_loss_mask = loss_mask.reshape(-1).bool()
+    if not bool(flat_loss_mask.any()):
+        return None
+    layer_losses = []
+    for layer_number in common_layers:
+        flat_hidden = _flatten_layer_hidden(router_inputs[layer_number], labels)
+        log_probs = torch.log_softmax(routers[layer_number].gating(flat_hidden).float(), dim=-1)
+        layer_loss = log_probs.new_zeros(())
+        for task_id, (start, end) in enumerate(ranges):
+            token_mask = flat_loss_mask & (token_task_ids == task_id)
+            if not bool(token_mask.any()):
+                continue
+            if not (0 <= start < end <= log_probs.shape[-1]):
+                raise RuntimeError(f"Joint-replay LPR range {start}:{end} invalid for {log_probs.shape[-1]} experts.")
+            layer_loss = layer_loss - torch.logsumexp(log_probs[token_mask, start:end], dim=-1).sum()
+        layer_losses.append(layer_loss)
+    return torch.stack(layer_losses).mean()
+
+
+def _joint_replay_old_expert_count(args):
+    if JOINT_REPLAY_LPR_OLD_EXPERTS > 0:
+        return JOINT_REPLAY_LPR_OLD_EXPERTS
+    for attr in ("moe_expand_from_num_experts", "moe_resume_from_num_experts",
+                 "shared_router_hybrid_resume_from_num_experts"):
+        v = getattr(args, attr, None)
+        if v:
+            return int(v)
+    raise RuntimeError(
+        "JOINT_REPLAY_LPR_COEFF > 0 but the old-expert count is unknown; set "
+        "JOINT_REPLAY_LPR_OLD_EXPERTS or pass --moe-expand-from-num-experts.")
+
+
+def _joint_replay_old_group_lpr(router_inputs, routers, labels, loss_mask, old_count):
+    """Old-task group NLL on a homogeneous replay batch, averaged over MoE layers.
+
+    Same objective as _masked_task_group_lpr with a single task whose expert
+    range is [0, old_count): -log sum_{e < old_count} p(e | token), summed over
+    supervised tokens.  The replay batch carries only old-task samples, so the
+    per-sample task assignment that the staged LPR needs is unnecessary here.
+    """
+    router_inputs = _router_inputs_by_layer(router_inputs)
+    common_layers = sorted(set(router_inputs) & set(routers))
+    if not common_layers:
+        raise RuntimeError("Joint-replay LPR captured no MoE router inputs.")
+    flat_loss_mask = loss_mask.reshape(-1).bool()
+    if not bool(flat_loss_mask.any()):
+        return None
+    layer_losses = []
+    for layer_number in common_layers:
+        flat_hidden = _flatten_layer_hidden(router_inputs[layer_number], labels)
+        log_probs = torch.log_softmax(
+            routers[layer_number].gating(flat_hidden).float(), dim=-1)
+        if not (0 < old_count <= log_probs.shape[-1]):
+            raise RuntimeError(
+                f"Joint-replay LPR old-expert count {old_count} is invalid for "
+                f"{log_probs.shape[-1]} experts.")
+        layer_losses.append(
+            -torch.logsumexp(log_probs[flat_loss_mask, :old_count], dim=-1).sum())
+    return torch.stack(layer_losses).mean()
 
 
 def _masked_task_group_lpr(router_inputs, routers, labels, loss_mask, dataset_ids, args):
@@ -949,6 +1094,31 @@ def forward_step(data_iterator, model: GPTModel):
                 lpr_inputs, lpr_routers, labels, loss_mask, dataset_ids, args
             ),
         }
+    elif (
+        JOINT_REPLAY_LPR_COEFF > 0.0
+        and bool(getattr(args, "_moe_joint_replay_active", False))
+        and _as_module_list(model)[0].training
+    ):
+        # Old-data replay pass of the 1-phase schedule: keep the ordinary LM loss
+        # and add MoE-LPR's supervised old-expert group NLL on the same batch.
+        with _capture_distill_router_inputs(_as_module_list(model), detach=False) as (
+            jr_inputs, jr_routers
+        ):
+            with stimer:
+                losses = model(tokens, position_ids, attention_mask, labels=labels)
+        if JOINT_REPLAY_LPR_PER_TASK:
+            jr_lpr = _joint_replay_task_group_lpr(
+                jr_inputs, jr_routers, labels, loss_mask,
+                getattr(args, "_joint_replay_lpr_dataset_ids", None),
+            )
+        else:
+            jr_lpr = _joint_replay_old_group_lpr(
+                jr_inputs, jr_routers, labels, loss_mask,
+                _joint_replay_old_expert_count(args),
+            )
+        output_tensor = {"losses": losses}
+        if jr_lpr is not None:
+            output_tensor["joint_replay_lpr_loss"] = jr_lpr
     else:
         with stimer:
             output_tensor = model(tokens, position_ids, attention_mask, labels=labels)

@@ -86,7 +86,7 @@ from megatron.core.transformer.shared_router_hybrid import (
     capture_shared_router_routing_maps,
 )
 from megatron.core.transformer.moe import upcycling_utils
-from megatron.core.transformer.moe.router import Router
+from megatron.core.transformer.moe.router import Router, training_new_expert_quota
 from megatron.core.transformer.moe.moe_utils import track_moe_metrics
 from megatron.core.parallel_state import (
     destroy_global_memory_buffer,
@@ -372,6 +372,54 @@ def _router_grad_delta_norm(model, before_snapshot):
         else:
             deltas.append(current.detach() - before.to(device=current.device, dtype=current.dtype))
     return _router_grad_norm_from_tensors(deltas)
+
+
+def _fingerprint_grad_group_metrics(model, args):
+    """Norms of finalized gradients used by fingerprint scale diagnostics.
+
+    Data-parallel gradients have already been reduced by the regular schedule at
+    this point, so only model-parallel shards are reduced here.  Router row
+    slices use the same old/new boundary as expanded-checkpoint freezing.
+    """
+    device = torch.device('cuda', torch.cuda.current_device())
+    totals = {
+        'all_trainable': torch.zeros((), dtype=torch.float32, device=device),
+        'router_all_rows': torch.zeros((), dtype=torch.float32, device=device),
+        'router_old_rows': torch.zeros((), dtype=torch.float32, device=device),
+        'router_new_rows': torch.zeros((), dtype=torch.float32, device=device),
+        'new_experts': torch.zeros((), dtype=torch.float32, device=device),
+    }
+    boundary = getattr(args, 'moe_resume_from_num_experts', None)
+    if boundary is None:
+        boundary = getattr(args, 'moe_expand_from_num_experts', None)
+    boundary = int(boundary or 0)
+    seen = set()
+    for shard in unwrap_model(model):
+        for name, param in shard.named_parameters():
+            if id(param) in seen:
+                continue
+            seen.add(id(param))
+            grad = _param_grad_tensor(param)
+            if grad is None:
+                continue
+            grad = grad.detach().float()
+            totals['all_trainable'] += grad.square().sum()
+            if name.endswith('router.weight'):
+                totals['router_all_rows'] += grad.square().sum()
+                totals['router_old_rows'] += grad[:boundary].square().sum()
+                totals['router_new_rows'] += grad[boundary:].square().sum()
+                continue
+            match = re.search(r'local_experts\.(\d+)\.', name)
+            if match is not None and int(match.group(1)) >= boundary:
+                totals['new_experts'] += grad.square().sum()
+    if (torch.distributed.is_available() and torch.distributed.is_initialized()
+            and mpu.model_parallel_is_initialized()):
+        for value in totals.values():
+            torch.distributed.all_reduce(value, group=mpu.get_model_parallel_group())
+    return {
+        f'fingerprint_grad_norm/{name}': torch.sqrt(value.clamp_min(0.0))
+        for name, value in totals.items()
+    }
 
 
 def _run_shared_router_memory_batches(
@@ -976,20 +1024,434 @@ def _moe_joint_replay_enabled(args):
     return bool(getattr(args, 'moe_joint_replay_lm', False))
 
 
+def _moe_joint_replay_old_like_enabled(args):
+    return bool(getattr(args, 'moe_joint_replay_old_like_gt_path', None))
+
+
+def _moe_joint_replay_old_like_objective(args):
+    if not _moe_joint_replay_old_like_enabled(args):
+        return 'disabled'
+    if _moe_joint_replay_old_data_hidden_mse_enabled(args):
+        return 'layer_output_hidden_mse'
+    if _moe_joint_replay_old_data_hidden_kl_enabled(args):
+        return 'layer_output_hidden_kl'
+    if _moe_joint_replay_old_data_kd_enabled(args):
+        return 'output_vocab_kl'
+    return 'lm'
+
+
+def _moe_joint_replay_old_like_budget(args):
+    """Return the deterministic replay-batch budget for joint replay.
+
+    A packed replay dataset can provide an explicit global-batch budget.  The
+    contextual old-like path retains its selected-occurrence accounting.
+    """
+    cached = getattr(args, '_moe_joint_replay_old_like_budget', None)
+    if cached is not None:
+        return cached
+    explicit_samples = int(
+        getattr(args, 'moe_joint_replay_total_samples', 0) or 0
+    )
+    if explicit_samples < 0:
+        raise ValueError('--moe-joint-replay-total-samples must be non-negative')
+    if explicit_samples > 0:
+        train_iters = int(getattr(args, 'train_iters', 0) or 0)
+        if train_iters <= 0:
+            raise ValueError('explicit joint-replay sample budget requires positive train iters')
+        replay_micro_batch_size = int(
+            getattr(args, 'moe_joint_replay_micro_batch_size', 0)
+            or args.micro_batch_size
+        )
+        if replay_micro_batch_size <= 0:
+            raise ValueError('joint-replay micro-batch size must be positive')
+        data_parallel_size = int(mpu.get_data_parallel_world_size())
+        replay_global_micro_batch_size = replay_micro_batch_size * data_parallel_size
+        if explicit_samples % replay_global_micro_batch_size != 0:
+            raise ValueError(
+                'explicit joint-replay samples must be divisible by replay micro-batch size '
+                f'times data-parallel size: samples={explicit_samples}, '
+                f'replay_micro_batch_size={replay_micro_batch_size}, '
+                f'data_parallel_size={data_parallel_size}'
+            )
+        total_microbatches = explicit_samples // replay_global_micro_batch_size
+        budget = {
+            'mode': 'microbatch',
+            'target_fraction': explicit_samples / (train_iters * args.global_batch_size),
+            'total_batches': total_microbatches,
+            'total_microbatches': total_microbatches,
+            'total_samples': explicit_samples,
+            'replay_micro_batch_size': replay_micro_batch_size,
+            'replay_global_micro_batch_size': replay_global_micro_batch_size,
+            'expected_fraction': explicit_samples / (train_iters * args.global_batch_size),
+        }
+        args._moe_joint_replay_old_like_budget = budget
+        return budget
+    target_fraction = float(
+        getattr(args, 'moe_joint_replay_old_like_target_train_fraction', 0.0) or 0.0
+    )
+    if not _moe_joint_replay_old_like_enabled(args) or target_fraction <= 0.0:
+        budget = {
+            'mode': 'global_batch',
+            'target_fraction': 0.0,
+            'total_batches': int(getattr(args, 'train_iters', 1)),
+            'expected_fraction': 0.0,
+        }
+        args._moe_joint_replay_old_like_budget = budget
+        return budget
+    if not 0.0 < target_fraction <= 1.0:
+        raise ValueError('old-like target train fraction must be in (0, 1]')
+    selected = int(
+        getattr(args, 'moe_joint_replay_old_like_selected_token_count', 0) or 0
+    )
+    positive_samples = int(
+        getattr(args, 'moe_joint_replay_old_like_positive_sample_count', 0) or 0
+    )
+    full_tokens = int(
+        getattr(args, 'moe_joint_replay_old_like_full_train_token_count', 0) or 0
+    )
+    if selected <= 0 or full_tokens <= 0:
+        raise ValueError(
+            '20%-budget old-like replay requires positive selected-token and full-train-token counts'
+        )
+    replay_unit = getattr(args, 'moe_joint_replay_old_like_unit', 'positive_sequence')
+    if replay_unit == 'positive_sequence':
+        if positive_samples <= 0:
+            raise ValueError(
+                'positive-sequence old-like budget requires --moe-joint-replay-old-like-positive-sample-count'
+            )
+        selected_per_sample = selected / positive_samples
+    elif replay_unit == 'token_occurrence':
+        selected_per_sample = 1.0
+    else:
+        raise ValueError(f'unsupported old-like replay unit for budget accounting: {replay_unit}')
+    target_selected = target_fraction * full_tokens
+    selected_per_global_batch = args.global_batch_size * selected_per_sample
+    total_batches = max(1, int(math.floor(target_selected / selected_per_global_batch + 0.5)))
+    expected_selected = total_batches * selected_per_global_batch
+    budget = {
+        'mode': 'global_batch',
+        'target_fraction': target_fraction,
+        'target_selected_tokens': target_selected,
+        'total_batches': total_batches,
+        'selected_per_sample': selected_per_sample,
+        'expected_selected_tokens': expected_selected,
+        'expected_fraction': expected_selected / full_tokens,
+        'effective_epochs': expected_selected / selected,
+    }
+    args._moe_joint_replay_old_like_budget = budget
+    return budget
+
+
+def _moe_joint_replay_batches_before_step(args, completed_primary_steps):
+    budget = _moe_joint_replay_old_like_budget(args)
+    completed = min(max(int(completed_primary_steps), 0), int(args.train_iters))
+    # Integer half-up interpolation distributes the extra replay batches across
+    # all primary updates and is exactly reproducible on resume.
+    return (
+        budget['total_batches'] * completed + int(args.train_iters) // 2
+    ) // int(args.train_iters)
+
+
+def _moe_joint_replay_batches_for_step(args, one_based_primary_step):
+    current = int(one_based_primary_step)
+    return (
+        _moe_joint_replay_batches_before_step(args, current)
+        - _moe_joint_replay_batches_before_step(args, current - 1)
+    )
+
+
+def _parse_moe_joint_new_expert_quota_schedule(args):
+    cached = getattr(args, '_parsed_moe_joint_new_expert_quota_schedule', None)
+    if cached is not None:
+        return cached
+    spec = getattr(args, 'moe_joint_new_expert_quota_schedule', None)
+    schedule = []
+    if spec:
+        previous_end = 0
+        for item in spec.split(','):
+            try:
+                end_text, quota_text = item.strip().split(':', 1)
+                end_step = int(end_text)
+                quota = float(quota_text)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    'invalid --moe-joint-new-expert-quota-schedule entry '
+                    f'{item!r}; expected end_step:quota'
+                ) from exc
+            if end_step <= previous_end:
+                raise ValueError('new-expert quota schedule end steps must strictly increase')
+            if not 0.0 <= quota <= 1.0:
+                raise ValueError('new-expert quota schedule values must be in [0, 1]')
+            schedule.append((end_step, quota))
+            previous_end = end_step
+    args._parsed_moe_joint_new_expert_quota_schedule = schedule
+    return schedule
+
+
+def _moe_joint_new_expert_quota(args, iteration=None):
+    if iteration is None:
+        iteration = int(getattr(args, 'curr_iteration', args.iteration))
+    schedule = _parse_moe_joint_new_expert_quota_schedule(args)
+    if schedule:
+        for end_step, quota in schedule:
+            if int(iteration) < end_step:
+                return quota
+        return 0.0
+    return float(getattr(args, 'moe_joint_new_expert_quota', 0.0) or 0.0)
+
+
+def _moe_joint_new_expert_quota_enabled(args, iteration=None):
+    return _moe_joint_new_expert_quota(args, iteration) > 0.0
+
+
+def _moe_joint_replay_old_data_kd_enabled(args):
+    return bool(getattr(args, 'moe_joint_replay_old_data_kd', False))
+
+
+def _moe_joint_replay_old_data_hidden_kl_enabled(args):
+    return bool(getattr(args, 'moe_joint_replay_old_data_hidden_kl', False))
+
+
+def _moe_joint_replay_old_data_hidden_mse_enabled(args):
+    return bool(getattr(args, 'moe_joint_replay_old_data_hidden_mse', False))
+
+
+def _old_moe_distill_teacher_requested(args):
+    """Whether any configured objective needs the frozen old-model teacher."""
+    return bool(
+        getattr(args, 'layer_output_streaming_stats_path', None)
+        or getattr(args, 'code_token_hidden_pair_path', None)
+        or getattr(args, 'cka_gt_pilot_path', None)
+        or getattr(args, 'cka_gt_full_census_path', None)
+        or getattr(args, 'cka_gt_targeted_path', None)
+        or getattr(args, 'fingerprint_kd_coeff', 0.0) > 0.0
+        or getattr(args, 'fingerprint_kd_force_enable_zero_coeff', False)
+        or getattr(args, 'moe_old_model_kl_coeff', 0.0) > 0.0
+        or (
+            _moe_joint_replay_old_data_hidden_kl_enabled(args)
+            and getattr(args, 'moe_old_hidden_kl_coeff', 0.0) > 0.0
+        )
+        or (
+            _moe_joint_replay_old_data_hidden_mse_enabled(args)
+            and getattr(args, 'moe_old_hidden_mse_coeff', 0.0) > 0.0
+        )
+    )
+
+
+def _validate_joint_replay_old_data_kd(args):
+    logits_kd = _moe_joint_replay_old_data_kd_enabled(args)
+    hidden_kl = _moe_joint_replay_old_data_hidden_kl_enabled(args)
+    hidden_mse = _moe_joint_replay_old_data_hidden_mse_enabled(args)
+    selected_objectives = sum((logits_kd, hidden_kl, hidden_mse))
+    explicit_replay_samples = int(
+        getattr(args, 'moe_joint_replay_total_samples', 0) or 0
+    )
+    if explicit_replay_samples:
+        if not _moe_joint_replay_enabled(args):
+            raise ValueError('explicit replay sample budget requires --moe-joint-replay-lm')
+        if int(getattr(args, 'pipeline_model_parallel_size', 1)) != 1:
+            raise ValueError('variable-size joint replay currently requires pipeline parallel size 1')
+        _moe_joint_replay_old_like_budget(args)
+    old_like = _moe_joint_replay_old_like_enabled(args)
+    if old_like:
+        if not _moe_joint_replay_enabled(args):
+            raise ValueError('old-like GT objectives require --moe-joint-replay-lm')
+        if int(getattr(args, 'pipeline_model_parallel_size', 1)) != 1:
+            raise ValueError('old-like GT objectives currently require pipeline parallel size 1')
+        if getattr(args, 'calculate_per_token_loss', False):
+            raise ValueError(
+                'old-like joint replay does not support --calculate-per-token-loss: '
+                'the replay pass finalizes gradients separately from the primary pass'
+            )
+        if selected_objectives > 1:
+            raise ValueError(
+                'old-like GT comparison requires exactly one replay objective: '
+                'LM, output-vocab KL, layer-output KL, or layer-output MSE'
+            )
+        if hidden_mse or hidden_kl:
+            layer_spec = str(
+                args.moe_old_hidden_mse_layers
+                if hidden_mse else args.moe_old_hidden_kl_layers
+            )
+            try:
+                selected_layers = {
+                    int(value.strip()) for value in layer_spec.split(',') if value.strip()
+                }
+            except ValueError as exc:
+                raise ValueError(
+                    'old-like hidden KD requires explicit comma-separated layer numbers 2..N'
+                ) from exc
+            required_layers = set(range(2, int(args.num_layers) + 1))
+            if selected_layers != required_layers:
+                raise ValueError(
+                    'old-like hidden KD must match every residual-included layer output '
+                    f'from 2 through the final layer {args.num_layers}; got '
+                    f'{sorted(selected_layers)} expected {sorted(required_layers)}'
+                )
+        elif not logits_kd and float(getattr(args, 'moe_expansion_distill_lm_loss_coeff', 1.0)) <= 0.0:
+            raise ValueError('old-like replay LM requires a positive LM loss coefficient')
+        budget = _moe_joint_replay_old_like_budget(args)
+    if selected_objectives == 0:
+        return
+    if selected_objectives != 1:
+        raise ValueError(
+            'select exactly one old-data replay objective: logits KD, hidden KL, or hidden MSE'
+        )
+    if not _moe_joint_replay_enabled(args):
+        raise ValueError('old-data distillation replay requires --moe-joint-replay-lm')
+    if logits_kd and args.moe_old_model_kl_coeff <= 0:
+        raise ValueError('old-data KD replay requires --moe-old-model-kl-coeff > 0')
+    if hidden_kl and args.moe_old_hidden_kl_coeff <= 0:
+        raise ValueError('old-data hidden KL replay requires --moe-old-hidden-kl-coeff > 0')
+    if hidden_mse and args.moe_old_hidden_mse_coeff <= 0:
+        raise ValueError('old-data hidden MSE replay requires --moe-old-hidden-mse-coeff > 0')
+    if not args.moe_old_model_kl_load:
+        raise ValueError('old-data distillation replay requires --moe-old-model-kl-load')
+
+
 class _MoeJointReplayDataIterator(RerunDataIterator):
-    def __init__(self, primary, replay):
-        super().__init__(primary); self.replay=RerunDataIterator(replay)
-    def next_replay(self): return next(self.replay)
-    def advance(self): super().advance(); self.replay.advance()
-    def rewind(self): super().rewind(); self.replay.rewind()
-    def state_dict(self): return {'primary':super().state_dict(),'replay':self.replay.state_dict()}
+    def __init__(self, primary, replay, *, old_like_pairing=False):
+        super().__init__(primary)
+        self.replay=RerunDataIterator(replay)
+        self._old_like_pairing = bool(old_like_pairing)
+        self._old_like_primary_identities = []
+        self._quota_capture = False
+        self._quota_microbatches = []
+        self._quota_pos = 0
+
+    def __next__(self):
+        batch = super().__next__()
+        if self._old_like_pairing:
+            self._old_like_primary_identities.append(
+                self._old_like_batch_identity(batch, "primary")
+            )
+        if self._quota_capture:
+            self._quota_microbatches.append(batch)
+        return batch
+
+    @staticmethod
+    def _old_like_batch_identity(batch, branch):
+        if not isinstance(batch, dict):
+            raise RuntimeError(
+                f'old-like {branch} iterator must yield a dict, got {type(batch)}'
+            )
+        required = ('old_like_sample_id', 'old_like_mask', 'tokens', 'labels')
+        missing = [key for key in required if key not in batch]
+        if missing:
+            raise RuntimeError(
+                f'old-like {branch} batch is missing identity fields: {missing}'
+            )
+        return {
+            key: batch[key].detach().cpu().clone()
+            for key in required
+        }
+
+    @staticmethod
+    def _validate_old_like_pair(primary, replay):
+        for key in ('old_like_sample_id', 'tokens', 'labels', 'old_like_mask'):
+            if primary[key].shape != replay[key].shape:
+                raise RuntimeError(
+                    'old-like primary/replay batch identity mismatch for '
+                    f'{key}: {tuple(primary[key].shape)} != {tuple(replay[key].shape)}'
+                )
+            if not torch.equal(primary[key], replay[key]):
+                if key == 'old_like_sample_id':
+                    detail = (
+                        f'primary={primary[key].view(-1).tolist()} '
+                        f'replay={replay[key].view(-1).tolist()}'
+                    )
+                else:
+                    mismatch = torch.nonzero(
+                        primary[key] != replay[key], as_tuple=False
+                    )
+                    detail = f'first_mismatch={mismatch[0].tolist() if mismatch.numel() else None}'
+                raise RuntimeError(
+                    f'old-like primary/replay batch identity mismatch for {key}: {detail}'
+                )
+
+    def begin_quota_capture(self):
+        self._quota_capture = True
+        self._quota_microbatches = []
+        self._quota_pos = 0
+
+    def begin_quota_replay(self):
+        self._quota_capture = False
+        self._quota_pos = 0
+        if not self._quota_microbatches:
+            raise RuntimeError('quota pass requested before any primary microbatches were captured')
+
+    def next_quota(self):
+        if self._quota_pos >= len(self._quota_microbatches):
+            raise RuntimeError('quota pass consumed more microbatches than the natural primary pass')
+        batch = self._quota_microbatches[self._quota_pos]
+        self._quota_pos += 1
+        return batch
+
+    def finish_quota_replay(self):
+        if self._quota_pos != len(self._quota_microbatches):
+            raise RuntimeError(
+                'quota pass consumed a different number of microbatches than the natural '
+                f'primary pass ({self._quota_pos} != {len(self._quota_microbatches)})'
+            )
+        self._quota_microbatches = []
+        self._quota_pos = 0
+
+    def next_replay(self):
+        batch = next(self.replay)
+        if self._old_like_pairing:
+            if not self._old_like_primary_identities:
+                raise RuntimeError(
+                    'old-like replay consumed more microbatches than the primary pass'
+                )
+            primary = self._old_like_primary_identities.pop(0)
+            replay = self._old_like_batch_identity(batch, "replay")
+            self._validate_old_like_pair(primary, replay)
+        return batch
+
+    def finish_old_like_pairing(self):
+        if self._old_like_pairing and self._old_like_primary_identities:
+            raise RuntimeError(
+                'old-like primary/replay consumed different microbatch counts: '
+                f'{len(self._old_like_primary_identities)} unmatched primary batches'
+            )
+
+    def advance(self):
+        super().advance(); self.replay.advance()
+        self._old_like_primary_identities = []
+        self._quota_capture = False
+        self._quota_microbatches = []
+        self._quota_pos = 0
+    def rewind(self):
+        super().rewind(); self.replay.rewind()
+        self._old_like_primary_identities = []
+    def state_dict(self):
+        return {
+            'primary': super().state_dict(),
+            'replay': self.replay.state_dict(),
+            'old_like_pairing': self._old_like_pairing,
+            'old_like_primary_identities': self._old_like_primary_identities,
+            'quota_capture': self._quota_capture,
+            'quota_microbatches': self._quota_microbatches,
+            'quota_pos': self._quota_pos,
+        }
     def load_state_dict(self,s):
         super().load_state_dict(s['primary']); self.replay.load_state_dict(s['replay'])
+        if s.get('old_like_pairing', self._old_like_pairing) != self._old_like_pairing:
+            raise RuntimeError('old-like iterator pairing mode changed across rerun restore')
+        self._old_like_primary_identities = s.get('old_like_primary_identities', [])
+        self._quota_capture = s.get('quota_capture', False)
+        self._quota_microbatches = s.get('quota_microbatches', [])
+        self._quota_pos = s.get('quota_pos', 0)
 
 
 class _MoeReplayIteratorView:
     def __init__(self,joint): self.joint=joint
     def __next__(self): return self.joint.next_replay()
+
+
+class _MoeQuotaIteratorView:
+    def __init__(self, joint): self.joint = joint
+    def __next__(self): return self.joint.next_quota()
 
 
 def _set_moe_loss_coefficients(model,aux,z):
@@ -1024,6 +1486,192 @@ def _restore_joint_replay_non_router_grads(snapshot):
             grad.copy_(saved_grad)
 
 
+def _zero_joint_replay_non_router_grads(parameters, router_param_ids):
+    """Discard natural-primary expert grads before the quota expert pass."""
+    for param in parameters:
+        if not param.requires_grad or id(param) in router_param_ids:
+            continue
+        grad = _param_grad_tensor(param)
+        if grad is not None:
+            grad.zero_()
+
+
+def _blend_joint_replay_non_router_grads(snapshot, quota_coefficient):
+    """Keep natural expert grads and add a scaled quota-pass contribution."""
+    coefficient = float(quota_coefficient)
+    for param, natural_grad in snapshot.values():
+        grad = _param_grad_tensor(param)
+        if grad is None:
+            continue
+        if natural_grad is None:
+            grad.mul_(coefficient)
+        else:
+            natural_grad = natural_grad.to(device=grad.device, dtype=grad.dtype)
+            grad.copy_(natural_grad + coefficient * (grad - natural_grad))
+
+
+def _restore_joint_replay_router_grads(snapshot):
+    """Restore natural-primary router grads, discarding quota-router grads."""
+    for item in snapshot.values():
+        param = item['param']
+        saved_grad = item['primary']
+        grad = _param_grad_tensor(param)
+        if grad is None:
+            raise RuntimeError('router gradient buffer disappeared during quota backward')
+        grad.copy_(saved_grad.to(device=grad.device, dtype=grad.dtype))
+
+
+def _joint_replay_objective_coefficient(args):
+    """Return the coefficient already applied to the replay gradient.
+
+    The returned value is used only to report an unscaled replay-gradient norm;
+    it does not change the backward pass.  Hidden KL retains its restart-safe
+    coefficient schedule here so diagnostics remain truthful for older runs,
+    even though the new comparison runs use a fixed coefficient.
+    """
+    if _moe_joint_replay_old_data_kd_enabled(args):
+        return float(args.moe_old_model_kl_coeff)
+    if _moe_joint_replay_old_data_hidden_kl_enabled(args):
+        coefficient = float(args.moe_old_hidden_kl_coeff)
+        start = getattr(args, 'moe_old_hidden_kl_coeff_start', None)
+        decay_steps = int(getattr(args, 'moe_old_hidden_kl_coeff_decay_steps', 0) or 0)
+        if start is not None and decay_steps > 0:
+            iteration = max(0, int(getattr(args, 'curr_iteration', args.iteration)))
+            progress = min(float(iteration) / float(decay_steps), 1.0)
+            coefficient = float(start) + (coefficient - float(start)) * progress
+        return coefficient
+    if _moe_joint_replay_old_data_hidden_mse_enabled(args):
+        return float(args.moe_old_hidden_mse_coeff)
+    # Plain joint replay uses the replay LM numerator produced by loss_func.
+    return float(getattr(args, 'moe_expansion_distill_lm_loss_coeff', 1.0))
+
+
+def _snapshot_joint_replay_router_grads(model):
+    """Snapshot standard-MoE router gradients after the primary backward.
+
+    This intentionally does not reuse the shared-router-memory helpers above:
+    standard FFN MoE exposes ``Router`` modules directly, while the memory path
+    has its own shared-router collection and metric contract.
+    """
+    snapshot = {}
+    seen = set()
+    for shard in unwrap_model(model):
+        for module in shard.modules():
+            if not isinstance(module, Router):
+                continue
+            param = module.weight
+            if id(param) in seen or not param.requires_grad:
+                continue
+            seen.add(id(param))
+            grad = _param_grad_tensor(param)
+            if grad is None:
+                grad = torch.zeros_like(param)
+            layer_number = getattr(module, 'layer_number', None)
+            snapshot[id(param)] = {
+                'param': param,
+                'layer_number': None if layer_number is None else int(layer_number),
+                'primary': grad.detach().clone(),
+            }
+    return snapshot
+
+
+def _joint_replay_grad_source_stats(entries, replay_coefficient):
+    """Compute primary/replay/combined norms and primary-replay cosine."""
+    device = (
+        torch.device('cuda', torch.cuda.current_device())
+        if torch.cuda.is_available()
+        else torch.device('cpu')
+    )
+    totals = torch.zeros(4, dtype=torch.float64, device=device)
+    for primary, replay_scaled, combined in entries:
+        primary = primary.detach().to(device=device, dtype=torch.float64)
+        replay_scaled = replay_scaled.detach().to(device=device, dtype=torch.float64)
+        combined = combined.detach().to(device=device, dtype=torch.float64)
+        totals[0] += primary.pow(2).sum()
+        totals[1] += replay_scaled.pow(2).sum()
+        totals[2] += combined.pow(2).sum()
+        totals[3] += (primary * replay_scaled).sum()
+    if (
+        torch.distributed.is_available()
+        and torch.distributed.is_initialized()
+        and mpu.model_parallel_is_initialized()
+    ):
+        torch.distributed.all_reduce(totals, group=mpu.get_model_parallel_group())
+
+    primary_norm = torch.sqrt(totals[0].clamp_min(0.0)).float()
+    replay_scaled_norm = torch.sqrt(totals[1].clamp_min(0.0)).float()
+    combined_norm = torch.sqrt(totals[2].clamp_min(0.0)).float()
+    coefficient = max(abs(float(replay_coefficient)), 1.0e-12)
+    replay_raw_norm = replay_scaled_norm / coefficient
+    cosine = (
+        totals[3]
+        / torch.sqrt((totals[0] * totals[1]).clamp_min(1.0e-24))
+    ).float()
+    return {
+        'primary_norm': primary_norm,
+        'replay_scaled_norm': replay_scaled_norm,
+        'replay_raw_norm': replay_raw_norm,
+        'combined_norm': combined_norm,
+        'primary_replay_cosine': cosine,
+        'primary_to_replay_scaled': primary_norm / replay_scaled_norm.clamp_min(1.0e-12),
+        'primary_to_replay_raw': primary_norm / replay_raw_norm.clamp_min(1.0e-12),
+    }
+
+
+def _joint_replay_router_grad_metrics(model, primary_snapshot, replay_coefficient, boundary):
+    """Report replay gradient sources globally and for each routed layer."""
+    if not primary_snapshot:
+        return {}
+
+    records = []
+    for item in primary_snapshot.values():
+        param = item['param']
+        primary = item['primary']
+        current = _param_grad_tensor(param)
+        if current is None:
+            current = torch.zeros_like(primary)
+        else:
+            current = current.detach()
+        replay_scaled = current - primary.to(device=current.device, dtype=current.dtype)
+        records.append((item['layer_number'], primary, replay_scaled, current))
+
+    scopes = {'global': records}
+    layer_numbers = sorted(
+        layer_number for layer_number in {record[0] for record in records}
+        if layer_number is not None
+    )
+    for layer_number in layer_numbers:
+        scopes[f'layer_{layer_number}'] = [
+            record for record in records if record[0] == layer_number
+        ]
+
+    metrics = {}
+    for scope_name, scope_records in scopes.items():
+        row_groups = {
+            'all_rows': [(p, r, c) for _, p, r, c in scope_records],
+            'old_rows': [
+                (p[:boundary], r[:boundary], c[:boundary])
+                for _, p, r, c in scope_records
+            ],
+            'new_rows': [
+                (p[boundary:], r[boundary:], c[boundary:])
+                for _, p, r, c in scope_records
+            ],
+        }
+        for row_group, entries in row_groups.items():
+            stats = _joint_replay_grad_source_stats(entries, replay_coefficient)
+            for metric_name, value in stats.items():
+                metrics[
+                    f'joint_replay/router_grad/{scope_name}/{row_group}/{metric_name}'
+                ] = value
+
+    reference = next(iter(metrics.values()))
+    metrics['joint_replay/router_grad/replay_objective_coefficient'] = reference.new_tensor(
+        float(replay_coefficient)
+    )
+    return metrics
+
+
 def _resolve_joint_replay_existing_experts(args):
     """Resolve the frozen expert boundary for standard or shared-router MoE resume."""
     moe_boundary = getattr(args, 'moe_resume_from_num_experts', None)
@@ -1047,6 +1695,19 @@ def _activate_moe_joint_replay_optimizer(model):
     num_existing_experts = _resolve_joint_replay_existing_experts(args)
     if _moe_interleave_enabled(args): raise ValueError('joint replay conflicts with interleave')
     if not args.moe_joint_replay_data_path: raise ValueError('joint replay data required')
+    quota = float(getattr(args, 'moe_joint_new_expert_quota', 0.0) or 0.0)
+    if quota < 0.0 or quota > 1.0:
+        raise ValueError('--moe-joint-new-expert-quota must be in [0, 1]')
+    quota_schedule = _parse_moe_joint_new_expert_quota_schedule(args)
+    quota_loss_coefficient = float(
+        getattr(args, 'moe_joint_new_expert_quota_loss_coeff', 1.0)
+    )
+    if quota_loss_coefficient < 0.0:
+        raise ValueError('--moe-joint-new-expert-quota-loss-coeff must be non-negative')
+    quota_min_new_slots = getattr(args, 'moe_joint_new_expert_quota_min_new_slots', None)
+    if quota_min_new_slots is not None and int(quota_min_new_slots) <= 0:
+        raise ValueError('--moe-joint-new-expert-quota-min-new-slots must be positive')
+    _validate_joint_replay_old_data_kd(args)
     for shard in unwrap_model(model):
         freeze_all_but_new_moe_params(shard,num_existing_experts,
             freeze_existing_experts=True,freeze_existing_router=False,train_dense_attention_lora=False)
@@ -1056,7 +1717,14 @@ def _activate_moe_joint_replay_optimizer(model):
     sched=get_optimizer_param_scheduler(opt)
     print_rank_0(
         '[JOINT-REPLAY] optimizer contains new experts and all router rows '
-        f'(existing expert boundary={num_existing_experts})'
+        f'(existing expert boundary={num_existing_experts}, new_expert_quota={quota}, '
+        f'quota_schedule={quota_schedule}, quota_min_new_slots={quota_min_new_slots}, '
+        f'quota_loss_coeff={quota_loss_coefficient}, '
+        'preserve_natural_expert_grads='
+        f'{int(bool(getattr(args, "moe_joint_new_expert_quota_preserve_natural_grads", False)))}, '
+        'persistent_optimizer=1, '
+        f'old_like={int(_moe_joint_replay_old_like_enabled(args))}, '
+        f'old_like_objective={_moe_joint_replay_old_like_objective(args)})'
     )
     return opt,sched
 
@@ -1450,18 +2118,79 @@ def pretrain(
     timers('train/valid/test-data-iterators-setup', log_level=0).start(
         barrier=True)
     if _moe_joint_replay_enabled(args):
-        saved=(args.consumed_train_samples,args.data_path,args.train_data_path,args.valid_data_path,args.test_data_path)
+        saved=(
+            args.consumed_train_samples,
+            args.data_path,
+            args.train_data_path,
+            args.valid_data_path,
+            args.test_data_path,
+            args.train_iters,
+            args.train_samples,
+            args.micro_batch_size,
+            args.global_batch_size,
+        )
         primary=build_train_valid_test_data_iterators(train_valid_test_dataset_provider)
         try:
             args.data_path=list(args.moe_joint_replay_data_path)
             args.train_data_path=args.valid_data_path=args.test_data_path=None
-            args.consumed_train_samples=args.iteration*args.global_batch_size
+            replay_budget = _moe_joint_replay_old_like_budget(args)
+            completed_replay_units = _moe_joint_replay_batches_before_step(
+                args, args.iteration
+            )
+            if replay_budget.get('mode') == 'microbatch':
+                args.consumed_train_samples = (
+                    completed_replay_units
+                    * replay_budget['replay_global_micro_batch_size']
+                )
+                # Build the replay loader in units of one replay microbatch.
+                # Runtime groups 4/5 of these units into every primary update.
+                args.train_iters = replay_budget['total_microbatches']
+                args.train_samples = None
+                args.micro_batch_size = replay_budget['replay_micro_batch_size']
+                args.global_batch_size = replay_budget['replay_global_micro_batch_size']
+            else:
+                args.consumed_train_samples = (
+                    completed_replay_units * args.global_batch_size
+                )
+                # Build enough deterministic virtual replay samples for every
+                # budgeted full global batch.
+                args.train_iters = replay_budget['total_batches']
+            args._moe_joint_replay_dataset_build_active = bool(
+                _moe_joint_replay_old_like_enabled(args)
+            )
             replay=build_train_valid_test_data_iterators(train_valid_test_dataset_provider)
         finally:
-            (args.consumed_train_samples,args.data_path,args.train_data_path,args.valid_data_path,args.test_data_path)=saved
-        train_data_iterator=_MoeJointReplayDataIterator(primary[0].iterable,replay[0].iterable)
+            args._moe_joint_replay_dataset_build_active = False
+            (
+                args.consumed_train_samples,
+                args.data_path,
+                args.train_data_path,
+                args.valid_data_path,
+                args.test_data_path,
+                args.train_iters,
+                args.train_samples,
+                args.micro_batch_size,
+                args.global_batch_size,
+            ) = saved
+        train_data_iterator=_MoeJointReplayDataIterator(
+            primary[0].iterable,
+            replay[0].iterable,
+            # Old-like replay is an independent, repeated GT-positive subset,
+            # not the same primary Code microbatch forwarded twice.
+            old_like_pairing=False,
+        )
         valid_data_iterator,test_data_iterator=primary[1],primary[2]
-        print_rank_0(f'[JOINT-REPLAY] paired iterators resume={args.iteration}')
+        print_rank_0(
+            f'[JOINT-REPLAY] independent iterators resume={args.iteration} '
+            f'old_like={int(_moe_joint_replay_old_like_enabled(args))} '
+            f'old_like_replay_subset={int(_moe_joint_replay_old_like_enabled(args))} '
+            f'old_like_unit={getattr(args, "moe_joint_replay_old_like_unit", "positive_sequence")} '
+            f'objective={_moe_joint_replay_old_like_objective(args)} '
+            f'replay_budget_mode={replay_budget.get("mode", "global_batch")} '
+            f'replay_units={replay_budget["total_batches"]} '
+            f'replay_samples={replay_budget.get("total_samples", "default")} '
+            f'expected_train_fraction={replay_budget["expected_fraction"]:.9f}'
+        )
     elif _moe_interleave_enabled(args):
         _get_moe_interleave_schedule(args)
         _, code_steps_done, router_steps_done = _get_moe_interleave_position(
@@ -2289,7 +3018,7 @@ def setup_model_and_optimizer(model_provider_func,
                         indent=2,
                     )
 
-        if args.moe_old_model_kl_coeff > 0:
+        if _old_moe_distill_teacher_requested(args):
             for teacher_shard in source_model:
                 teacher_shard.eval()
                 for param in teacher_shard.parameters():
@@ -2355,7 +3084,7 @@ def setup_model_and_optimizer(model_provider_func,
                         indent=2,
                     )
 
-        if args.moe_old_model_kl_coeff > 0:
+        if _old_moe_distill_teacher_requested(args):
             for teacher_shard in source_model:
                 teacher_shard.eval()
                 for param in teacher_shard.parameters():
@@ -2406,7 +3135,7 @@ def setup_model_and_optimizer(model_provider_func,
             args.router_memory_kl_coeff > 0
             or args.router_memory_force_enable_zero_coeff
         )
-        old_model_kl_requested_for_setup = args.moe_old_model_kl_coeff > 0
+        old_model_kl_requested_for_setup = _old_moe_distill_teacher_requested(args)
         if router_memory_requested_for_setup and args.router_memory_teacher_student_kl:
             for teacher_shard in source_model:
                 teacher_shard.eval()
@@ -2433,8 +3162,8 @@ def setup_model_and_optimizer(model_provider_func,
                     param.requires_grad = False
             set_old_moe_distill_teacher(source_model)
             print_rank_0(
-                "Loaded old shared-router hybrid checkpoint as logits KD teacher "
-                f"with coefficient {args.moe_old_model_kl_coeff}."
+                "Loaded old shared-router hybrid checkpoint as the old-data "
+                "distillation teacher."
             )
         else:
             set_old_moe_distill_teacher(None)
@@ -2579,7 +3308,7 @@ def setup_model_and_optimizer(model_provider_func,
                         args.moe_freeze_existing_router,
                     )
 
-            if args.moe_old_model_kl_coeff > 0 and args.moe_old_model_kl_load:
+            if _old_moe_distill_teacher_requested(args) and args.moe_old_model_kl_load:
                 teacher_load_dir = args.moe_old_model_kl_load
                 target_num_experts = args.num_experts
                 original_load = args.load
@@ -2588,7 +3317,12 @@ def setup_model_and_optimizer(model_provider_func,
                 original_no_load_rng = args.no_load_rng
                 original_consumed_train_samples = args.consumed_train_samples
                 original_consumed_valid_samples = args.consumed_valid_samples
-                args.num_experts = args.moe_resume_from_num_experts
+                teacher_num_experts = (
+                    args.moe_old_model_kl_num_experts
+                    if args.moe_old_model_kl_num_experts is not None
+                    else args.moe_resume_from_num_experts
+                )
+                args.num_experts = teacher_num_experts
                 args.load = teacher_load_dir
                 args.finetune = True
                 args.no_load_optim = True
@@ -2636,7 +3370,7 @@ def setup_model_and_optimizer(model_provider_func,
                         args.attn_lora_freeze_existing_router,
                     )
 
-            if args.moe_old_model_kl_coeff > 0 and args.moe_old_model_kl_load:
+            if _old_moe_distill_teacher_requested(args) and args.moe_old_model_kl_load:
                 teacher_load_dir = args.moe_old_model_kl_load
                 original_load = args.load
                 original_finetune = args.finetune
@@ -2776,7 +3510,7 @@ def setup_model_and_optimizer(model_provider_func,
             args.moe_resume_from_num_experts is None
             and args.attn_lora_resume_from_num_experts is None
             and args.shared_router_hybrid_resume_from_num_experts is None
-            and args.moe_old_model_kl_coeff > 0
+            and _old_moe_distill_teacher_requested(args)
             and args.moe_old_model_kl_load
         ):
             source_model = _load_teacher_model_from_checkpoint(
@@ -3049,6 +3783,9 @@ def train_step(
 
     rerun_state_machine = get_rerun_state_machine()
     while rerun_state_machine.should_run_forward_backward(data_iterator):
+        # The natural Code pass always receives the GT complement.  This
+        # marker is flipped only for the paired replay pass below.
+        args._moe_joint_replay_active = False
         # Set grad to zero.
         for model_chunk in model:
             model_chunk.zero_grad_buffer()
@@ -3056,6 +3793,14 @@ def train_step(
 
         # Forward pass.
         forward_backward_func = get_forward_backward_func()
+        quota_value = _moe_joint_new_expert_quota(args, router_memory_iteration)
+        quota_enabled = quota_value > 0.0
+        if quota_enabled:
+            if not isinstance(data_iterator, _MoeJointReplayDataIterator):
+                raise RuntimeError(
+                    'new-expert quota requires the paired joint-replay data iterator'
+                )
+            data_iterator.begin_quota_capture()
         train_router_usage_metrics = {}
         usage_interval = getattr(args, 'train_router_usage_log_interval', 0)
         capture_train_router_usage = (
@@ -3095,23 +3840,186 @@ def train_step(
                 for module in shard.modules():
                     if isinstance(module, Router):
                         router_ids.update(id(p) for p in module.parameters(recurse=False))
-            trainable_parameters = (
+            primary_router_grad_snapshot = None
+            replay_objective_coefficient = None
+            if args.log_router_grad_norm_sources or quota_enabled:
+                primary_router_grad_snapshot = _snapshot_joint_replay_router_grads(model)
+            if args.log_router_grad_norm_sources:
+                replay_objective_coefficient = _joint_replay_objective_coefficient(args)
+
+            quota_losses = None
+            quota_stats = None
+            if quota_enabled:
+                preserve_natural_expert_grads = bool(
+                    getattr(
+                        args,
+                        'moe_joint_new_expert_quota_preserve_natural_grads',
+                        False,
+                    )
+                )
+                natural_expert_grad_snapshot = None
+                trainable_parameters = [
+                    param for shard in unwrap_model(model) for param in shard.parameters()
+                ]
+                if preserve_natural_expert_grads:
+                    natural_expert_grad_snapshot = _snapshot_joint_replay_non_router_grads(
+                        trainable_parameters, router_ids
+                    )
+                else:
+                    _zero_joint_replay_non_router_grads(trainable_parameters, router_ids)
+                aux, z = args.moe_aux_loss_coeff, args.moe_z_loss_coeff
+                _set_moe_loss_coefficients(model, 0.0, None)
+                data_iterator.begin_quota_replay()
+                try:
+                    with training_new_expert_quota(
+                        _resolve_joint_replay_existing_experts(args),
+                        quota_value,
+                        getattr(
+                            args,
+                            'moe_joint_new_expert_quota_min_new_slots',
+                            None,
+                        ),
+                    ) as quota_stats:
+                        quota_losses = forward_backward_func(
+                            forward_step_func=forward_step_func,
+                            data_iterator=_MoeQuotaIteratorView(data_iterator),
+                            model=model,
+                            num_microbatches=get_num_microbatches(),
+                            seq_length=args.seq_length,
+                            micro_batch_size=args.micro_batch_size,
+                            decoder_seq_length=args.decoder_seq_length,
+                            forward_only=False,
+                        )
+                    data_iterator.finish_quota_replay()
+                finally:
+                    _set_moe_loss_coefficients(model, aux, z)
+                if preserve_natural_expert_grads:
+                    _blend_joint_replay_non_router_grads(
+                        natural_expert_grad_snapshot,
+                        getattr(args, 'moe_joint_new_expert_quota_loss_coeff', 1.0),
+                    )
+                _restore_joint_replay_router_grads(primary_router_grad_snapshot)
+                quota_counts = torch.tensor(
+                    [
+                        quota_stats['total_tokens'],
+                        quota_stats['natural_new_group_tokens'],
+                        quota_stats['dispatched_new_group_tokens'],
+                        quota_stats['injected_tokens'],
+                    ],
+                    dtype=torch.float64,
+                    device=torch.cuda.current_device(),
+                )
+                if torch.distributed.is_available() and torch.distributed.is_initialized():
+                    torch.distributed.all_reduce(quota_counts)
+                total = quota_counts[0].clamp_min(1.0)
+                joint_replay_loss_dict.update(
+                    {
+                        'joint_replay/quota_natural_new_group_token_fraction': (
+                            quota_counts[1] / total
+                        ).float(),
+                        'joint_replay/quota_dispatched_new_group_token_fraction': (
+                            quota_counts[2] / total
+                        ).float(),
+                        'joint_replay/quota_injected_token_fraction': (
+                            quota_counts[3] / total
+                        ).float(),
+                        'joint_replay/quota_target_fraction': total.new_tensor(
+                            quota_value, dtype=torch.float32
+                        ),
+                    }
+                )
+
+            replay_batch_count = _moe_joint_replay_batches_for_step(
+                args,
+                router_memory_iteration
+                if router_memory_iteration is not None
+                else int(getattr(args, 'curr_iteration', args.iteration)) + 1,
+            )
+            replay_budget = _moe_joint_replay_old_like_budget(args)
+            replay_losses = []
+            if replay_batch_count > 0:
+                trainable_parameters = (
+                    param for shard in unwrap_model(model) for param in shard.parameters()
+                )
+                saved_grads = _snapshot_joint_replay_non_router_grads(
+                    trainable_parameters, router_ids
+                )
+                aux,z=args.moe_aux_loss_coeff,args.moe_z_loss_coeff
+                _set_moe_loss_coefficients(model,0.0,None)
+                try:
+                    args._moe_joint_replay_active = True
+                    args._moe_joint_replay_old_data_kd_active = (
+                        _moe_joint_replay_old_data_kd_enabled(args)
+                        or _moe_joint_replay_old_data_hidden_kl_enabled(args)
+                        or _moe_joint_replay_old_data_hidden_mse_enabled(args)
+                    )
+                    args._moe_joint_replay_gradient_scale = (
+                        1.0
+                        if replay_budget.get('mode') == 'microbatch'
+                        else 1.0 / replay_batch_count
+                    )
+                    with allow_existing_router_grads():
+                        if replay_budget.get('mode') == 'microbatch':
+                            replay_losses.extend(forward_backward_func(
+                                forward_step_func=forward_step_func,
+                                data_iterator=_MoeReplayIteratorView(data_iterator),
+                                model=model,
+                                num_microbatches=replay_batch_count,
+                                seq_length=args.seq_length,
+                                micro_batch_size=replay_budget['replay_micro_batch_size'],
+                                decoder_seq_length=args.decoder_seq_length,
+                                forward_only=False,
+                            ))
+                        else:
+                            for _ in range(replay_batch_count):
+                                replay_losses.extend(forward_backward_func(
+                                    forward_step_func=forward_step_func,
+                                    data_iterator=_MoeReplayIteratorView(data_iterator),
+                                    model=model,
+                                    num_microbatches=get_num_microbatches(),
+                                    seq_length=args.seq_length,
+                                    micro_batch_size=args.micro_batch_size,
+                                    decoder_seq_length=args.decoder_seq_length,
+                                    forward_only=False,
+                                ))
+                finally:
+                    args._moe_joint_replay_active = False
+                    args._moe_joint_replay_old_data_kd_active = False
+                    args._moe_joint_replay_gradient_scale = 1.0
+                    _set_moe_loss_coefficients(model,aux,z)
+                if isinstance(data_iterator, _MoeJointReplayDataIterator):
+                    data_iterator.finish_old_like_pairing()
+                _restore_joint_replay_non_router_grads(saved_grads)
+            reference_tensor = next(
                 param for shard in unwrap_model(model) for param in shard.parameters()
             )
-            saved_grads = _snapshot_joint_replay_non_router_grads(
-                trainable_parameters, router_ids
-            )
-            aux,z=args.moe_aux_loss_coeff,args.moe_z_loss_coeff
-            _set_moe_loss_coefficients(model,0.0,0.0)
-            try:
-                with allow_existing_router_grads():
-                    replay_losses=forward_backward_func(
-                        forward_step_func=forward_step_func,data_iterator=_MoeReplayIteratorView(data_iterator),
-                        model=model,num_microbatches=get_num_microbatches(),seq_length=args.seq_length,
-                        micro_batch_size=args.micro_batch_size,decoder_seq_length=args.decoder_seq_length,
-                        forward_only=False)
-            finally: _set_moe_loss_coefficients(model,aux,z)
-            _restore_joint_replay_non_router_grads(saved_grads)
+            joint_replay_loss_dict.update({
+                'joint_replay/replay_global_batches_this_step': reference_tensor.new_tensor(
+                    replay_batch_count, dtype=torch.float32
+                ),
+                'joint_replay/replay_total_global_batches': reference_tensor.new_tensor(
+                    replay_budget['total_batches'], dtype=torch.float32
+                ),
+                'joint_replay/replay_sequences_this_step': reference_tensor.new_tensor(
+                    replay_batch_count
+                    * replay_budget.get(
+                        'replay_global_micro_batch_size', args.global_batch_size
+                    ),
+                    dtype=torch.float32,
+                ),
+                'joint_replay/replay_expected_train_fraction': reference_tensor.new_tensor(
+                    replay_budget['expected_fraction'], dtype=torch.float32
+                ),
+            })
+            if args.log_router_grad_norm_sources and primary_router_grad_snapshot is not None:
+                joint_replay_loss_dict.update(
+                    _joint_replay_router_grad_metrics(
+                        model,
+                        primary_router_grad_snapshot,
+                        replay_objective_coefficient,
+                        _resolve_joint_replay_existing_experts(args),
+                    )
+                )
             if replay_losses:
                 for key in replay_losses[0]:
                     numerator = 0
@@ -3125,6 +4033,19 @@ def train_step(
                             numerator += value
                             denominator += 1
                     joint_replay_loss_dict[f'joint_replay/{key}'] = numerator / denominator
+            if quota_losses:
+                for key in quota_losses[0]:
+                    numerator = 0
+                    denominator = 0
+                    for microbatch_loss in quota_losses:
+                        value = microbatch_loss[key]
+                        if isinstance(value, (tuple, list)):
+                            numerator += value[0]
+                            denominator += value[1]
+                        else:
+                            numerator += value
+                            denominator += 1
+                    joint_replay_loss_dict[f'joint_replay/quota_{key}'] = numerator / denominator
         router_memory_loss_dict = {}
         router_lm_grad_snapshot = None
         router_grad_metrics = {}
@@ -3161,6 +4082,9 @@ def train_step(
                     )
                 )
                 router_memory_loss_dict.update(router_grad_metrics)
+        fingerprint_grad_metrics = {}
+        if getattr(args, 'log_fingerprint_grad_norm_groups', False):
+            fingerprint_grad_metrics = _fingerprint_grad_group_metrics(model, args)
     should_checkpoint, should_exit, exit_code = rerun_state_machine.should_checkpoint_and_exit()
     if should_exit:
         return {}, True, should_checkpoint, should_exit, exit_code, None, None
@@ -3258,12 +4182,27 @@ def train_step(
         loss_reduced.update(router_memory_loss_dict)
         loss_reduced.update(joint_replay_loss_dict)
         loss_reduced.update(train_router_usage_metrics)
+        loss_reduced.update(fingerprint_grad_metrics)
         if new_expert_lr_multiplier is not None:
             loss_reduced['new_expert_lr/ramp_multiplier'] = torch.tensor(
                 new_expert_lr_multiplier, dtype=torch.float, device='cuda'
             )
             loss_reduced['new_expert_lr/effective_lr'] = torch.tensor(
                 new_expert_lr, dtype=torch.float, device='cuda'
+            )
+        router_group_lrs = {
+            float(group['lr'])
+            for group in optimizer.param_groups
+            if group.get('is_moe_router', False)
+        }
+        if router_group_lrs:
+            if len(router_group_lrs) != 1:
+                raise RuntimeError(
+                    f"MoE router parameter groups have inconsistent learning rates: "
+                    f"{sorted(router_group_lrs)}"
+                )
+            loss_reduced['router_lr/effective_lr'] = torch.tensor(
+                next(iter(router_group_lrs)), dtype=torch.float, device='cuda'
             )
         lm_loss = loss_reduced.get('lm loss')
         router_kl = loss_reduced.get('router_memory_teacher_student/kl')

@@ -73,7 +73,10 @@ def get_param_id_to_sharded_param_map(
 
 
 def make_sharded_optimizer_tensor(
-    model_param: Union[ShardedTensor, ShardedTensorFactory], optim_param: torch.Tensor, prefix: str
+    model_param: Union[ShardedTensor, ShardedTensorFactory],
+    optim_param: torch.Tensor,
+    prefix: str,
+    allow_shape_mismatch: bool = False,
 ) -> Union[ShardedTensor, ShardedTensorFactory]:
     """Build a ShardedTensor or ShardedTensorFactory for optimizer param based on model param
 
@@ -87,14 +90,42 @@ def make_sharded_optimizer_tensor(
     """
     optim_param = to_local_if_dtensor(optim_param)
     if isinstance(model_param, ShardedTensorFactory):
-        return replace(model_param, key=f'{prefix}.{model_param.key}', data=optim_param)
+        if not allow_shape_mismatch:
+            return replace(model_param, key=f'{prefix}.{model_param.key}', data=optim_param)
+
+        original_build_fn = model_param.build_fn
+
+        def mark_partial(value):
+            if isinstance(value, ShardedTensor):
+                return replace(value, allow_shape_mismatch=True)
+            if isinstance(value, dict):
+                return {key: mark_partial(item) for key, item in value.items()}
+            if isinstance(value, list):
+                return [mark_partial(item) for item in value]
+            if isinstance(value, tuple):
+                return tuple(mark_partial(item) for item in value)
+            return value
+
+        def partial_build_fn(key, data, replica_id, flattened_range):
+            return mark_partial(original_build_fn(key, data, replica_id, flattened_range))
+
+        return replace(
+            model_param,
+            key=f'{prefix}.{model_param.key}',
+            data=optim_param,
+            build_fn=partial_build_fn,
+        )
 
     assert tuple(optim_param.shape) == model_param.local_shape, (
         f'Optimizer shape ({tuple(optim_param.shape)} does not match model shape '
         f'({model_param.local_shape})'
     )
     sh_ten = replace(
-        model_param, key=f'{prefix}.{model_param.key}', data=optim_param, dtype=optim_param.dtype
+        model_param,
+        key=f'{prefix}.{model_param.key}',
+        data=optim_param,
+        dtype=optim_param.dtype,
+        allow_shape_mismatch=(model_param.allow_shape_mismatch or allow_shape_mismatch),
     )
     sh_ten.validate_metadata_integrity()
     return sh_ten
@@ -104,6 +135,7 @@ def optim_state_to_sharding_state(
     optim_state_dict: StateDict,
     id_to_sharded_param_map: Dict[int, ShardedTensor],
     exclude_keys: Tuple[str] = (),
+    allow_shape_mismatch: bool = False,
 ):
     """Turn optimizer state dict to sharded state dict based on model state dict *in-place*.
 
@@ -131,7 +163,10 @@ def optim_state_to_sharding_state(
                 continue
             if param_id in id_to_sharded_param_map:
                 sharded_state[param_id][state_key] = make_sharded_optimizer_tensor(
-                    id_to_sharded_param_map[param_id], param, prefix=f'optimizer.state.{state_key}'
+                    id_to_sharded_param_map[param_id],
+                    param,
+                    prefix=f'optimizer.state.{state_key}',
+                    allow_shape_mismatch=allow_shape_mismatch,
                 )
             else:
                 raise ValueError(f'Param id {param_id} does not match any model sharded param')

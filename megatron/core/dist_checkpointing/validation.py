@@ -466,7 +466,9 @@ def _validate_sharding_for_key(rank_sharding: List[Tuple[int, ShardedTensor]]):
         # The only thing that can go wrong at this point is that some shard don't have
         # *any* representatives which will be checked later by comparing `shard_access_cnt == 1`
         shard_access_cnt = torch.minimum(shard_access_cnt, torch.tensor([1]))
-    if not torch.all(shard_access_cnt == 1):
+    allow_partial = all(sharding.allow_shape_mismatch for _, sharding in rank_sharding)
+    valid_access = shard_access_cnt <= 1 if allow_partial else shard_access_cnt == 1
+    if not torch.all(valid_access):
         raise CheckpointingException(
             f'Invalid access pattern for {rank_sharding[0][1]}: {shard_access_cnt}'
         )

@@ -693,6 +693,7 @@ class Float16OptimizerWithFloat16Params(MixedPrecisionOptimizer):
                     id_to_sharded_param_map[param_id],
                     fp32_param,
                     prefix=f'optimizer.state.fp32_param',
+                    allow_shape_mismatch=self.config.moe_allow_partial_optimizer_state,
                 )
                 for param_id, fp32_param in zip(state_group['params'], fp32_group)
             ]
@@ -708,7 +709,10 @@ class Float16OptimizerWithFloat16Params(MixedPrecisionOptimizer):
         # expected to have the same shape as the model parameters,
         # so we save the step separately and ignore it here
         optim_state_to_sharding_state(
-            state_dict['optimizer'], id_to_sharded_param_map, exclude_keys="step"
+            state_dict['optimizer'],
+            id_to_sharded_param_map,
+            exclude_keys="step",
+            allow_shape_mismatch=self.config.moe_allow_partial_optimizer_state,
         )
         # save step as a shared step among all parameters. Separate per-parameter
         # steps are not supported
@@ -886,7 +890,12 @@ class FP32Optimizer(MegatronOptimizer):
         # all optimizer parameters passed to optim_state_to_sharding_state are
         # expected to have the same shape as the model parameters,
         # so we save the step separately and ignore it here
-        optim_state_to_sharding_state(state_dict, id_to_sharded_param_map, exclude_keys="step")
+        optim_state_to_sharding_state(
+            state_dict,
+            id_to_sharded_param_map,
+            exclude_keys="step",
+            allow_shape_mismatch=self.config.moe_allow_partial_optimizer_state,
+        )
         # save step as a shared step among all parameters. Separate per-parameter
         # steps are not supported
         if step:
@@ -1053,13 +1062,20 @@ class ChainedOptimizer(MegatronOptimizer):
             grad_norms += [_grad_norm if _grad_norm else 0.0]
         grad_norm = math.sqrt(sum([x**2 for x in grad_norms]))
 
-        # Clip gradients.
-        for optimizer in self.chained_optimizers:
+        # By default Megatron clips every optimizer partition with the joint
+        # norm.  Continual MoE can opt into independent clipping so a large
+        # quota-expert gradient cannot rescale the router update (or vice
+        # versa), while retaining the same persistent optimizer instances and
+        # their Adam state.
+        separate_clip = bool(
+            getattr(self.config, 'moe_separate_router_expert_grad_clip', False)
+        )
+        for optimizer, optimizer_grad_norm in zip(self.chained_optimizers, grad_norms):
             if optimizer.config.clip_grad > 0.0:
                 clip_grad_by_total_norm_fp32(
                     optimizer.get_parameters(),
                     max_norm=optimizer.config.clip_grad,
-                    total_norm=grad_norm,
+                    total_norm=(optimizer_grad_norm if separate_clip else grad_norm),
                     use_decoupled_grad=optimizer.config.use_precision_aware_optimizer,
                 )
 

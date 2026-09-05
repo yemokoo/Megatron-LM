@@ -1,6 +1,7 @@
 # Copyright (c) 2023, NVIDIA CORPORATION. All rights reserved.
 
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from functools import partial
 from typing import Callable
 
@@ -19,6 +20,169 @@ from megatron.core.transformer.moe.moe_utils import (
     z_loss_func,
 )
 from megatron.core.transformer.transformer_config import TransformerConfig
+
+
+_TRAINING_NEW_EXPERT_QUOTA = None
+
+
+@contextmanager
+def training_new_expert_quota(
+    num_existing_experts: int, quota: float, min_new_slots: int | None = None
+):
+    """Force a minimum new-expert token share for an expert-only training pass.
+
+    This context changes dispatch only.  The caller is responsible for restoring
+    router gradients after the pass so the forced assignments cannot update the
+    router.  Keeping this as a runtime context makes evaluation and ordinary
+    training bitwise unchanged when the feature is disabled.
+    """
+    if num_existing_experts <= 0:
+        raise ValueError("num_existing_experts must be positive")
+    if not 0.0 < quota <= 1.0:
+        raise ValueError(f"new-expert quota must be in (0, 1], got {quota}")
+
+    global _TRAINING_NEW_EXPERT_QUOTA
+    previous = _TRAINING_NEW_EXPERT_QUOTA
+    state = {
+        'boundary': int(num_existing_experts),
+        'quota': float(quota),
+        'min_new_slots': min_new_slots,
+        'total_tokens': 0,
+        'natural_new_group_tokens': 0,
+        'dispatched_new_group_tokens': 0,
+        'injected_tokens': 0,
+    }
+    _TRAINING_NEW_EXPERT_QUOTA = state
+    try:
+        yield state
+    finally:
+        _TRAINING_NEW_EXPERT_QUOTA = previous
+
+
+def _apply_training_new_expert_quota(
+    logits, scores, routing_map, boundary, quota, min_new_slots=None
+):
+    """Give a quota of tokens at least ``min_new_slots`` new-group routes.
+
+    The group is every expert row at or after ``boundary``. No member receives
+    a fixed preference: inserted routes always use the highest-logit available
+    members of the whole new group. By default ``min_new_slots`` equals top-k,
+    preserving the original fully-new-group quota behavior.
+    """
+    if boundary <= 0 or boundary >= logits.shape[-1]:
+        raise ValueError(
+            f"new-expert quota boundary must be in [1, {logits.shape[-1] - 1}], "
+            f"got {boundary}"
+        )
+    if not 0.0 < quota <= 1.0:
+        raise ValueError(f"new-expert quota must be in (0, 1], got {quota}")
+    if logits.ndim != 2 or scores.shape != logits.shape or routing_map.shape != logits.shape:
+        raise ValueError("quota routing expects matching [tokens, experts] tensors")
+
+    assignments_per_token = routing_map.sum(dim=-1)
+    if assignments_per_token.numel() == 0:
+        return scores, routing_map, (0, 0, 0, 0)
+    topk = int(assignments_per_token[0].item())
+    if topk <= 0 or not torch.all(assignments_per_token == topk):
+        raise ValueError("quota routing requires a constant positive top-k per token")
+    if logits.shape[-1] - boundary < topk:
+        raise ValueError(
+            f"new-task expert group has {logits.shape[-1] - boundary} experts, "
+            f"fewer than top-k={topk}"
+        )
+
+    if min_new_slots is None:
+        min_new_slots = topk
+    min_new_slots = int(min_new_slots)
+    if min_new_slots <= 0 or min_new_slots > topk:
+        raise ValueError(
+            f"min_new_slots must be in [1, top-k={topk}], got {min_new_slots}"
+        )
+
+    token_count = logits.shape[0]
+    target = min(token_count, int(torch.ceil(logits.new_tensor(quota * token_count)).item()))
+    natural_new_slots = routing_map[:, boundary:].sum(dim=-1)
+    natural_new_group = natural_new_slots >= min_new_slots
+    inject_count = max(0, target - int(natural_new_group.sum().item()))
+    if inject_count == 0:
+        natural_count = int(natural_new_group.sum().item())
+        stats = (token_count, natural_count, natural_count, 0)
+        return scores, routing_map, stats
+
+    candidates = torch.nonzero(~natural_new_group, as_tuple=False).flatten()
+    inject_count = min(inject_count, int(candidates.numel()))
+    if inject_count == 0:
+        natural_count = int(natural_new_group.sum().item())
+        stats = (token_count, natural_count, natural_count, 0)
+        return scores, routing_map, stats
+
+    candidate_logits = logits[candidates]
+    candidate_maps = routing_map[candidates]
+    missing_slots = min_new_slots - natural_new_slots[candidates]
+    replacement_pairs = None
+    if min_new_slots == 1:
+        # Every candidate has zero selected new experts. Vectorize the common
+        # one-slot bootstrap path because this runs for every token/layer.
+        selected_old_logits = candidate_logits[:, :boundary].masked_fill(
+            ~candidate_maps[:, :boundary], torch.inf
+        )
+        remove_old_indices = selected_old_logits.argmin(dim=-1)
+        add_new_offsets = candidate_logits[:, boundary:].argmax(dim=-1)
+        add_new_indices = add_new_offsets + boundary
+        rows = torch.arange(candidates.numel(), device=logits.device)
+        margins = (
+            candidate_logits[rows, add_new_indices]
+            - candidate_logits[rows, remove_old_indices]
+        )
+    else:
+        margins = candidate_logits.new_zeros(candidates.numel())
+        replacement_pairs = []
+        for row in range(candidates.numel()):
+            missing = int(missing_slots[row].item())
+            selected_old = torch.nonzero(
+                candidate_maps[row, :boundary], as_tuple=False
+            ).flatten()
+            available_new = torch.nonzero(
+                ~candidate_maps[row, boundary:], as_tuple=False
+            ).flatten() + boundary
+            remove_old = selected_old[
+                torch.topk(
+                    candidate_logits[row, selected_old], k=missing, largest=False
+                ).indices
+            ]
+            add_new = available_new[
+                torch.topk(
+                    candidate_logits[row, available_new], k=missing, largest=True
+                ).indices
+            ]
+            margins[row] = (
+                candidate_logits[row, add_new].sum()
+                - candidate_logits[row, remove_old].sum()
+            )
+            replacement_pairs.append((remove_old, add_new))
+    chosen_offsets = torch.topk(margins, k=inject_count, largest=True, sorted=False).indices
+    chosen_tokens = candidates[chosen_offsets]
+
+    quota_map = routing_map.clone()
+    if min_new_slots == 1:
+        quota_map[chosen_tokens, remove_old_indices[chosen_offsets]] = False
+        quota_map[chosen_tokens, add_new_indices[chosen_offsets]] = True
+    else:
+        for chosen_offset, token in zip(chosen_offsets.tolist(), chosen_tokens.tolist()):
+            remove_old, add_new = replacement_pairs[chosen_offset]
+            quota_map[token, remove_old] = False
+            quota_map[token, add_new] = True
+
+    quota_scores = scores.clone()
+    selected_logits = logits[chosen_tokens].masked_fill(~quota_map[chosen_tokens], -torch.inf)
+    quota_scores[chosen_tokens] = torch.softmax(selected_logits, dim=-1).to(scores.dtype)
+    stats = (
+        token_count,
+        int(natural_new_group.sum().item()),
+        int((quota_map[:, boundary:].sum(dim=-1) >= min_new_slots).sum().item()),
+        inject_count,
+    )
+    return quota_scores, quota_map, stats
 
 
 class Router(ABC, MegatronModule):
@@ -65,7 +229,28 @@ class Router(ABC, MegatronModule):
             router_dtype = torch.float32
         elif self.config.moe_router_dtype == 'fp64':
             router_dtype = torch.float64
-        logits = torch.nn.functional.linear(input.to(router_dtype), self.weight.to(router_dtype))
+        router_input = input.to(router_dtype)
+        intervention_mode = getattr(self, '_fingerprint_intervention_mode', None)
+        intervention_weight = getattr(self, '_fingerprint_teacher_weight', None)
+        if intervention_mode:
+            mean = self._fingerprint_mean.to(dtype=router_dtype)
+            basis = self._fingerprint_basis.to(dtype=router_dtype)
+            centered = router_input - mean
+            projection = torch.matmul(torch.matmul(centered, basis), basis.transpose(0, 1))
+            if intervention_mode == 'fingerprint_only':
+                router_input = mean + projection
+            elif intervention_mode == 'fingerprint_removed':
+                router_input = mean + centered - projection
+            elif intervention_mode != 'teacher_full':
+                raise RuntimeError(
+                    f"Unsupported router fingerprint intervention mode: {intervention_mode}"
+                )
+            if intervention_weight is None:
+                raise RuntimeError('Router fingerprint intervention has no teacher router weight.')
+            weight = intervention_weight.to(dtype=router_dtype)
+        else:
+            weight = self.weight.to(router_dtype)
+        logits = torch.nn.functional.linear(router_input, weight)
         return logits
 
     @abstractmethod
@@ -377,6 +562,32 @@ class TopKRouter(Router):
             )
         else:
             raise ValueError(f"Unsupported MoE routing type: {self.routing_type}")
+
+        quota_config = _TRAINING_NEW_EXPERT_QUOTA
+        if self.training and quota_config is not None:
+            if self.score_function != "softmax" or not self.config.moe_router_pre_softmax:
+                raise RuntimeError(
+                    "training new-expert quota currently requires softmax routing with "
+                    "--moe-router-pre-softmax"
+                )
+            scores, routing_map, quota_stats = _apply_training_new_expert_quota(
+                logits,
+                scores,
+                routing_map,
+                quota_config['boundary'],
+                quota_config['quota'],
+                quota_config['min_new_slots'],
+            )
+            for key, value in zip(
+                (
+                    'total_tokens',
+                    'natural_new_group_tokens',
+                    'dispatched_new_group_tokens',
+                    'injected_tokens',
+                ),
+                quota_stats,
+            ):
+                quota_config[key] += value
         # Prevent extra local tokens accumulation on evaluation or activation recomputation
         if self.enable_expert_bias and torch.is_grad_enabled():
             with torch.no_grad():
