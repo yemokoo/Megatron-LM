@@ -95,6 +95,7 @@ PY2
 method_micro_batch() {
     case "$1" in
         ewc|trace_gem) echo "${DENSE_REGULARIZER_MB:-128}" ;;
+        gem_episodic) echo "${GEM_EPISODIC_MB:-96}" ;;
         sequential_dense) echo "${SEQUENTIAL_DENSE_MB:-144}" ;;
         slora_pre) echo "${SLORA_MB:-144}" ;;
         olora) echo "${OLORA_MB:-144}" ;;
@@ -107,6 +108,7 @@ method_port_base() {
     case "$1" in
         ewc) echo 29710 ;;
         trace_gem) echo 29720 ;;
+        gem_episodic) echo 29770 ;;
         slora_pre) echo 29730 ;;
         olora) echo 29740 ;;
         sequential_dense) echo 29750 ;;

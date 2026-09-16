@@ -110,7 +110,7 @@ for index in "${!TASKS[@]}"; do
     "${TRAIN_MODULE}"
     --bf16 True
     --use_peft True
-    --lora_r 64
+    --lora_r "${SLORA_LORA_R:-64}"
     --lora_alpha 128
     --deepspeed "${ROOT}/scripts/zero2.json"
     --model_name_or_path "${MODEL_PATH}"

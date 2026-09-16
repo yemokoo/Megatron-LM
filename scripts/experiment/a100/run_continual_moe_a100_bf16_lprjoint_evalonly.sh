@@ -839,7 +839,8 @@ GPU_LOG_PID=$!
     "${TRAIN_ENTRY:-pretrain_gpt.py}" \
     "${MODEL_ARGS[@]}" "${INFRA_ARGS[@]}" "${TRAIN_ARGS[@]}" \
     "${DATA_ARGS[@]}" "${INTERLEAVE_ARGS[@]}" "${SAVE_ARGS[@]}" \
-    "${PROBE_ARGS[@]}" "${WANDB_ARGS[@]}" "${DEBUG_TRAINABLE_ARGS[@]}"
+    "${PROBE_ARGS[@]}" "${WANDB_ARGS[@]}" "${DEBUG_TRAINABLE_ARGS[@]}" \
+    ${EXTRA_MEGATRON_ARGS:-}
 
 kill "$GPU_LOG_PID" 2>/dev/null || true
 if [ "$SSD_TARGET_WEIGHTS" != "$TRAIN_WEIGHTS" ]; then

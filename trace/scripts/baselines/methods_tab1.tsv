@@ -1,0 +1,9 @@
+method	family	scope	implementation	note
+seq_lora	control	all7 LoRA	llmcl_benchmark/model/tab1_baselines.py	TRACE 세팅 그대로; Table-1 수치는 기존 SLoRA-repro seq 런을 사용해도 동일 계약
+ewc	regularization	all7 LoRA	llmcl_benchmark/model/tab1_lora.py	TRACE 구현 대신 자체 구현: 태스크 수렴 후 penalty 없는 별도 pass로 diagonal Fisher, 샘플 수로 정규화
+olora	orthogonal	all7 LoRA x task	llmcl_benchmark/model/tab1_baselines.py	공식 손실(|A_prev A_new^T| L1 + ||theta||_2), 태스크당 rank 64, 마지막에 backbone으로 merge
+mtl	ceiling	all7 LoRA	llmcl_benchmark/model/tab1_baselines.py	8태스크 합집합 40k x 5 epoch = 순차 스케줄과 동일한 200k 샘플
+lifelong_moe	expansion	FFN experts + attn shared LoRA	llmcl_benchmark/model/tab1_moe.py	old expert/router row freeze + 출력 KD; shared path는 attention LoRA로 대체
+lifelong_moe_attn	expansion	shared-router QKVO+FFN	llmcl_benchmark/model/tab1_moe.py	ours-v3와 동일 확장; shared path 없음(모든 projection이 이미 routed)
+moe_lpr	expansion	FFN experts	llmcl_benchmark/model/tab1_moe.py	2-phase; review는 router-only, LM + gamma * 단일-expert routing CE
+moe_lpr_attn	expansion	shared-router QKVO+FFN	llmcl_benchmark/model/tab1_moe.py	ours-v3와 train param 동일하게 맞춘 MoE-LPR

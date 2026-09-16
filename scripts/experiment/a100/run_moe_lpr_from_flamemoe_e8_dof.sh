@@ -19,7 +19,8 @@ set -euo pipefail
 A="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$A/../../.."
 
-E8=/data2/seonghyeonnoh/LLM-continual-learning-runs/flamemoe/ffn_experts_only/wiki/pretrain/lm/full_training/g2_olddata_kd_9run_20260808__wiki_ffn_only_e8_step1800
+# DoF 스윕: wiki 소스를 env 로 갈아끼울 수 있게 개방 (기본값은 기존 e8 그대로)
+E8="${LPR_SOURCE_WEIGHTS:-/data2/seonghyeonnoh/LLM-continual-learning-runs/flamemoe/ffn_experts_only/wiki/pretrain/lm/full_training/g2_olddata_kd_9run_20260808__wiki_ffn_only_e8_step1800}"
 ROOT="${LPR_ROOT:-/data2/seonghyeonnoh/LLM-continual-learning-runs/moe_lpr_from_flamemoe_e8_20260826}"
 LPR_COEFF="${LPR_COEFF:-0.1}"
 # 여러 감마 셀을 동시에 돌릴 때 고정 포트가 겹쳐 EADDRINUSE 로 죽었다.

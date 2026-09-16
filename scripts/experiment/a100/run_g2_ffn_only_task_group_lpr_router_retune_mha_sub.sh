@@ -24,9 +24,7 @@ case "$STAGE" in
   conversation)
     NUM_EXPERTS=24; RESUME_FROM_NUM_EXPERTS=16
     DATA_DIRS=("$(dataset_dir_for_task wiki)" "$(dataset_dir_for_task code)" "$(dataset_dir_for_task conversation)")
-    # LPR_LABEL=old (default): wiki and code both map to the whole old group 0:16.
-    # LPR_LABEL=task reproduces the earlier per-task split 0:8,8:16.
-    if [ "${LPR_LABEL:-old}" = task ]; then LPR_RANGES="0:8,8:16,-"; else LPR_RANGES="0:16,0:16,-"; fi
+    LPR_RANGES="0:8,8:16,-"
     PROBE_DATASET="$(probe_dir_for_task wiki)"
     PROBE_NAME="wiki_probe"
     SECONDARY_PROBE_DATASET="$(probe_dir_for_task code)"
@@ -38,6 +36,17 @@ case "$STAGE" in
     ;;
   *) echo "ERROR: stage must be code or conversation" >&2; exit 1 ;;
 esac
+
+# 라우터 보정용 old 데이터를 고정 서브셋으로 교체한다(ours 1-phase replay 와 동일 풀).
+# 현재 태스크(conversation)는 replay 가 아니므로 full pool 유지. 혼합 가중치는 건드리지
+# 않으므로 old forward 횟수는 그대로이고 unique 개수만 줄어든다.
+if [ -n "${LPR_OLD_SUBSET_ROOT:-}" ]; then
+  [ -d "$LPR_OLD_SUBSET_ROOT/wiki/train" ] || { echo "ERROR: no $LPR_OLD_SUBSET_ROOT/wiki/train" >&2; exit 1; }
+  [ -d "$LPR_OLD_SUBSET_ROOT/code/train" ] || { echo "ERROR: no $LPR_OLD_SUBSET_ROOT/code/train" >&2; exit 1; }
+  DATA_DIRS[0]="$LPR_OLD_SUBSET_ROOT/wiki/train"
+  DATA_DIRS[1]="$LPR_OLD_SUBSET_ROOT/code/train"
+  echo "[LPR-SUB] old replay pool -> ${DATA_DIRS[0]} , ${DATA_DIRS[1]}"
+fi
 
 G2_ROOT="${G2_ROOT:-$PROJECT_ROOT/.local/weights/a100/mha/g2-checkpoints}"
 RUN_ID="${RUN_ID:-$DEFAULT_ID}"

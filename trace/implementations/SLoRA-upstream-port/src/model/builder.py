@@ -39,8 +39,14 @@ def load_denoised_lora(model, delta_weight, lora_config):
         print(related_modules)
         print("=" * 100)
         cur_config = deepcopy(lora_config)
-        cur_config.r = rank 
-        cur_config.lora_alpha = rank # upstream empirical scaling behavior
+        # Upstream set lora_alpha = rank, merging every denoised adapter at
+        # scaling 1 regardless of the alpha/r it was trained with.  With alpha
+        # fixed at 128 that silently applied r64 adapters at 0.5x and r512
+        # adapters at 4x (the r512 run emitted token soup from order1 on).
+        # Keep the trained scaling for whatever rank denoising settled on.
+        original_scaling = lora_config.lora_alpha / lora_config.r
+        cur_config.r = rank
+        cur_config.lora_alpha = rank * original_scaling
         target_modules = list(set([".".join(x.split(".")[3:7]) for x in key_list]))
         cur_config.target_modules = target_modules 
         model = get_peft_model(model, cur_config)

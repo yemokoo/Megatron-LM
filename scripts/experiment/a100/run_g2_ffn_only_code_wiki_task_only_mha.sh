@@ -1,12 +1,4 @@
 #!/bin/bash
-# 1-phase code stage (KD-init source, wiki LM replay, all-router) with MoE-LPR's
-# supervised old-expert group loss applied INSIDE the old-data replay pass.
-# Everything else is identical to run_g2_ffn_only_code_wiki_joint_lm_allrouter_mha.sh,
-# so JOINT_REPLAY_LPR_COEFF=0 reproduces that run exactly (control arm) and
-# JOINT_REPLAY_LPR_COEFF>0 is the treatment arm.
-export TRAIN_ENTRY=pretrain_gpt_lprjoint.py
-export JOINT_REPLAY_LPR_COEFF="${JOINT_REPLAY_LPR_COEFF:-0.1}"
-export JOINT_REPLAY_LPR_OLD_EXPERTS="${JOINT_REPLAY_LPR_OLD_EXPERTS:-8}"
 set -euo pipefail
 D="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 R="$(cd "$D/../../.." && pwd)"
@@ -25,13 +17,8 @@ export SOURCE_WEIGHTS_DIR="${SOURCE_WEIGHTS_DIR:-$G2_ROOT/code/expansion_distill
 export SOURCE_REQUIRED_ITERS="${SOURCE_REQUIRED_ITERS:-1800}"
 export MODEL_CONFIG_SCRIPT=scripts/experiment/a100/flame-moe-bf16-no-shared.sh
 export TRAIN_ITERS="${TRAIN_ITERS:-1800}" MICRO_BATCH_SIZE="${MICRO_BATCH_SIZE:-64}" GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-2304}"
-export MOE_JOINT_REPLAY_LM=1
-# 옛 데이터 리플레이 예산 = MoE-LPR 의 라우터 리튠 총 소비량과 동일하게 맞춘다.
-#   360 step x 2304 = 829,440 시퀀스 = primary(1800 x 2304)의 0.2
-# 0 으로 두면 예전처럼 매 스텝 리플레이 글로벌 배치 1개(=1:1)가 된다.
-export MOE_JOINT_REPLAY_TOTAL_SAMPLES="${MOE_JOINT_REPLAY_TOTAL_SAMPLES:-829440}"
-export MOE_JOINT_REPLAY_MICRO_BATCH_SIZE="${MOE_JOINT_REPLAY_MICRO_BATCH_SIZE:-0}"
-
+# task-only 진단용: replay 를 끌 수 있게 개방 (기본값은 기존과 동일하게 1)
+export MOE_JOINT_REPLAY_LM="${MOE_JOINT_REPLAY_LM:-1}"
 export JOINT_REPLAY_DATASET="${JOINT_REPLAY_DATASET:-$(dataset_dir_for_task wiki)}"
 export JOINT_REPLAY_DATA_WEIGHT_MODE=equal_dataset
 export ENABLE_OLD_MODEL_KL=0 OLD_MODEL_KL_COEFF=0 MOE_EXPANSION_DISTILL_MODE=none
@@ -41,8 +28,8 @@ export NO_SAVE_OPTIM="${NO_SAVE_OPTIM:-1}"
 export LOG_SOURCE_PROBE_BASELINE_BEFORE_EXPAND="${LOG_SOURCE_PROBE_BASELINE_BEFORE_EXPAND:-0}"
 export PROBE_DATASET="$(probe_dir_for_task code)" PROBE_NAME=code_probe
 export SECONDARY_PROBE_DATASET="$(probe_dir_for_task wiki)" SECONDARY_PROBE_NAME=wiki_probe
-export STAGE_DIR_NAME=a100/mha/g2-checkpoints/code/joint_lm_replay_lpr
-export RUN_ID="${RUN_ID:-g2-ffn-only-code-wiki-joint-lm-lpr${JOINT_REPLAY_LPR_COEFF}-allrouter-mb${MICRO_BATCH_SIZE}-${TRAIN_ITERS}}"
+export STAGE_DIR_NAME=a100/mha/g2-checkpoints/code/joint_lm_replay
+export RUN_ID="${RUN_ID:-g2-ffn-only-code-wiki-joint-lm-allrouter-mb${MICRO_BATCH_SIZE}-${TRAIN_ITERS}}"
 export TRAIN_WEIGHTS="${TRAIN_WEIGHTS:-$G2_ROOT/code/joint_lm_replay/$RUN_ID}"
 export WANDB_EXP_NAME="${WANDB_EXP_NAME:-G2 FFN-only Code+Wiki joint LM all-router}"
-exec bash "$D/run_continual_moe_a100_bf16_lprjoint.sh"
+exec bash "$D/run_continual_moe_a100_bf16.sh"

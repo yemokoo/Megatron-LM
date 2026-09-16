@@ -476,17 +476,24 @@ class LoRAMoEMLP(nn.Module):
         flat_x = x.reshape(-1, x.shape[-1])
         flat_gate_delta = gate.new_zeros((flat_x.shape[0], gate.shape[-1]))
         flat_up_delta = up.new_zeros((flat_x.shape[0], up.shape[-1]))
-        routes = [
-            torch.where(topk_idx.transpose(0, 1) == expert_index)
-            for expert_index in range(active_experts)
+        # Only experts selected by at least one (valid) token are visited: one
+        # host sync for the id set instead of a where()+numel() sync per expert
+        # per layer per decode step. Skipped experts had no tokens anyway, and
+        # ascending order keeps index_add_ accumulation identical.
+        route_idx = topk_idx if valid_token_mask is None else topk_idx[valid_token_mask]
+        active_ids = [
+            e for e in torch.unique(route_idx).tolist() if 0 <= e < active_experts
         ]
-        for e, expert in enumerate(self.experts[:active_experts]):
-            slot, token_idx = routes[e]
+        routes = {}
+        for e in active_ids:
+            slot, token_idx = torch.where(topk_idx.transpose(0, 1) == e)
             if valid_token_mask is not None:
                 keep = valid_token_mask[token_idx]
                 slot, token_idx = slot[keep], token_idx[keep]
-            if token_idx.numel() == 0:
-                continue
+            routes[e] = (slot, token_idx)
+        for e in active_ids:
+            expert = self.experts[e]
+            slot, token_idx = routes[e]
             routed_x = flat_x[token_idx]
             if aux_expert is None:
                 weight = topk_weight[token_idx, slot, None].to(routed_x.dtype)
@@ -531,13 +538,9 @@ class LoRAMoEMLP(nn.Module):
 
         flat_h = h.reshape(-1, h.shape[-1])
         flat_down_delta = down.new_zeros((flat_h.shape[0], down.shape[-1]))
-        for e, expert in enumerate(self.experts[:active_experts]):
+        for e in active_ids:
+            expert = self.experts[e]
             slot, token_idx = routes[e]
-            if valid_token_mask is not None:
-                keep = valid_token_mask[token_idx]
-                slot, token_idx = slot[keep], token_idx[keep]
-            if token_idx.numel() == 0:
-                continue
             routed_h = flat_h[token_idx]
             if aux_expert is None:
                 weight = topk_weight[token_idx, slot, None].to(routed_h.dtype)

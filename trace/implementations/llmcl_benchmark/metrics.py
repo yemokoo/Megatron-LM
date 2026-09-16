@@ -66,10 +66,18 @@ def caculate_rouge(results, data):
     rouges = []
     for output_id in range(len(results)):
         prediction = results[output_id]
-        target = data[output_id] 
+        target = data[output_id]
         if prediction == "" or target == "":
             continue
-        rouge = score_rouge(target, prediction)
+        try:
+            rouge = score_rouge(target, prediction)
+        except ValueError:
+            # The `rouge` package's sentence splitter can find zero sentences
+            # in a non-empty string too (e.g. pure punctuation/whitespace, or
+            # a degenerate generation), raising "Collections must contain at
+            # least 1 sentence." Treat it the same as the empty-string skip
+            # above rather than crashing the whole evaluation over one sample.
+            continue
         rouges.append(rouge)
     avg_rouge = sum(rouges) / len(results)
     return avg_rouge

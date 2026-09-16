@@ -29,6 +29,12 @@ export SOURCE_REQUIRED_ITERS="${SOURCE_REQUIRED_ITERS:-1800}"
 export MODEL_CONFIG_SCRIPT=scripts/experiment/a100/flame-moe-bf16-no-shared.sh
 export TRAIN_ITERS="${TRAIN_ITERS:-1800}" MICRO_BATCH_SIZE="${MICRO_BATCH_SIZE:-64}" GLOBAL_BATCH_SIZE="${GLOBAL_BATCH_SIZE:-2304}"
 export MOE_JOINT_REPLAY_LM=1
+# 옛 데이터 리플레이 예산 = MoE-LPR 의 라우터 리튠 총 소비량과 동일하게 맞춘다.
+#   360 step x 2304 = 829,440 시퀀스 = primary(1800 x 2304)의 0.2
+# 0 으로 두면 예전처럼 매 스텝 리플레이 글로벌 배치 1개(=1:1)가 된다.
+export MOE_JOINT_REPLAY_TOTAL_SAMPLES="${MOE_JOINT_REPLAY_TOTAL_SAMPLES:-829440}"
+export MOE_JOINT_REPLAY_MICRO_BATCH_SIZE="${MOE_JOINT_REPLAY_MICRO_BATCH_SIZE:-0}"
+
 export JOINT_REPLAY_DATASET="${JOINT_REPLAY_DATASET-$(dataset_dir_for_task wiki)}"
 export JOINT_REPLAY_SECONDARY_DATASET="${JOINT_REPLAY_SECONDARY_DATASET-$(dataset_dir_for_task code)}"
 export JOINT_REPLAY_DATA_WEIGHT_MODE=equal_dataset

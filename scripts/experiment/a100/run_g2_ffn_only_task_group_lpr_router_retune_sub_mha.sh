@@ -10,7 +10,7 @@ SOURCE="${2:?source checkpoint is required}"
 case "$STAGE" in
   code)
     NUM_EXPERTS=16; RESUME_FROM_NUM_EXPERTS=8
-    DATA_DIRS=("$(dataset_dir_for_task wiki)" "$(dataset_dir_for_task code)")
+    DATA_DIRS=("${LPR_DATA_WIKI:-$(dataset_dir_for_task wiki)}" "${LPR_DATA_CODE:-$(dataset_dir_for_task code)}")
     LPR_RANGES="0:8,-"
     PROBE_DATASET="$(probe_dir_for_task code)"
     PROBE_NAME="code_probe"
@@ -23,10 +23,8 @@ case "$STAGE" in
     ;;
   conversation)
     NUM_EXPERTS=24; RESUME_FROM_NUM_EXPERTS=16
-    DATA_DIRS=("$(dataset_dir_for_task wiki)" "$(dataset_dir_for_task code)" "$(dataset_dir_for_task conversation)")
-    # LPR_LABEL=old (default): wiki and code both map to the whole old group 0:16.
-    # LPR_LABEL=task reproduces the earlier per-task split 0:8,8:16.
-    if [ "${LPR_LABEL:-old}" = task ]; then LPR_RANGES="0:8,8:16,-"; else LPR_RANGES="0:16,0:16,-"; fi
+    DATA_DIRS=("${LPR_DATA_WIKI:-$(dataset_dir_for_task wiki)}" "${LPR_DATA_CODE:-$(dataset_dir_for_task code)}" "${LPR_DATA_CONV:-$(dataset_dir_for_task conversation)}")
+    LPR_RANGES="0:8,8:16,-"
     PROBE_DATASET="$(probe_dir_for_task wiki)"
     PROBE_NAME="wiki_probe"
     SECONDARY_PROBE_DATASET="$(probe_dir_for_task code)"

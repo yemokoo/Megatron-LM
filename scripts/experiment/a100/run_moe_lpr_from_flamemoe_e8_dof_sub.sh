@@ -19,7 +19,8 @@ set -euo pipefail
 A="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$A/../../.."
 
-E8=/data2/seonghyeonnoh/LLM-continual-learning-runs/flamemoe/ffn_experts_only/wiki/pretrain/lm/full_training/g2_olddata_kd_9run_20260808__wiki_ffn_only_e8_step1800
+# DoF 스윕: wiki 소스를 env 로 갈아끼울 수 있게 개방 (기본값은 기존 e8 그대로)
+E8="${LPR_SOURCE_WEIGHTS:-/data2/seonghyeonnoh/LLM-continual-learning-runs/flamemoe/ffn_experts_only/wiki/pretrain/lm/full_training/g2_olddata_kd_9run_20260808__wiki_ffn_only_e8_step1800}"
 ROOT="${LPR_ROOT:-/data2/seonghyeonnoh/LLM-continual-learning-runs/moe_lpr_from_flamemoe_e8_20260826}"
 LPR_COEFF="${LPR_COEFF:-0.1}"
 # 여러 감마 셀을 동시에 돌릴 때 고정 포트가 겹쳐 EADDRINUSE 로 죽었다.
@@ -78,7 +79,7 @@ if [ "$(latest "$CODE_LPR_OUT")" != 2160 ]; then
   say "stage 2: code LPR retune 360"
   RUN_ID=lpr-code-router-360 LPR_COEFF="$LPR_COEFF" RETUNE_ITERS=360 \
   MICRO_BATCH_SIZE="${CODE_LPR_MB:-96}" MASTER_PORT=$((PORT_BASE+1)) \
-    bash "$A/run_g2_ffn_only_task_group_lpr_router_retune_mha.sh" code "$CODE_OUT" "$CODE_LPR_OUT"
+    bash "$A/run_g2_ffn_only_task_group_lpr_router_retune_mha_sub.sh" code "$CODE_OUT" "$CODE_LPR_OUT"
   [ "$(latest "$CODE_LPR_OUT")" = 2160 ] || { say "stage 2 did not reach 2160"; exit 1; }
 else say "stage 2: skip (done)"; fi
 
@@ -106,7 +107,7 @@ if [ "$(latest "$CONV_LPR_OUT")" != 2160 ]; then
   say "stage 4: conversation LPR retune 360"
   RUN_ID=lpr-conv-router-360 LPR_COEFF="$LPR_COEFF" RETUNE_ITERS=360 \
   MICRO_BATCH_SIZE="${CONV_LPR_MB:-64}" MASTER_PORT=$((PORT_BASE+3)) \
-    bash "$A/run_g2_ffn_only_task_group_lpr_router_retune_mha.sh" conversation "$CONV_OUT" "$CONV_LPR_OUT"
+    bash "$A/run_g2_ffn_only_task_group_lpr_router_retune_mha_sub.sh" conversation "$CONV_OUT" "$CONV_LPR_OUT"
   [ "$(latest "$CONV_LPR_OUT")" = 2160 ] || { say "stage 4 did not reach 2160"; exit 1; }
 else say "stage 4: skip (done)"; fi
 

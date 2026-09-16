@@ -64,6 +64,31 @@ class RoutingContext:
     # them leaves both the forward computation and gradient graph unchanged.
     _route_cache: dict[int, tuple[torch.Tensor, torch.Tensor]] = field(
         default_factory=dict, init=False, repr=False, compare=False)
+    _active_cache: list[int] | None = field(
+        default=None, init=False, repr=False, compare=False)
+
+    def active_expert_ids(self):
+        """Expert ids owning at least one live token this forward.
+
+        Experts with no tokens contributed nothing before -- every projection
+        loop hit ``continue`` on them -- but reaching that ``continue`` still
+        cost a compare plus a ``torch.where`` per unused expert.  During
+        decoding that is the whole bill: top-1 routing over a single new token
+        leaves one expert live, so seven of eight iterations were pure kernel
+        launch overhead, repeated for every layer of every step.  Reading the
+        live ids once per layer replaces those launches with a single unique().
+
+        Ascending order matches the old ``range(num_experts)`` iteration, so
+        the ``index_add_`` accumulation order -- and therefore the exact
+        floating-point result -- is unchanged.
+        """
+        if self._active_cache is None:
+            indices = self.expert_indices
+            if self.valid_token_mask is not None:
+                indices = indices[self.valid_token_mask]
+            ids = torch.unique(indices.reshape(-1)).tolist()
+            self._active_cache = [e for e in ids if 0 <= e < self.num_experts]
+        return self._active_cache
 
     def routes_for(self, expert_index):
         """Return (slot, token_index), optionally excluding padded tokens."""
@@ -297,8 +322,8 @@ class RoutedLoRALinear(nn.Module):
                 "attention projection token count does not match shared routing: "
                 f"{flat_inputs.shape[0]} != {context.expert_indices.shape[0]}")
         flat_delta = output.new_zeros((flat_inputs.shape[0], self.out_features))
-        for expert_index, expert in enumerate(
-                self.experts[:context.num_experts]):
+        for expert_index in context.active_expert_ids():
+            expert = self.experts[expert_index]
             slot, token_index = context.routes_for(expert_index)
             if token_index.numel() == 0:
                 continue
@@ -370,13 +395,13 @@ class RoutedLoRAMLP(nn.Module):
         flat_gate_delta = gate.new_zeros(
             (flat_inputs.shape[0], gate.shape[-1]))
         flat_up_delta = up.new_zeros((flat_inputs.shape[0], up.shape[-1]))
-        routes = []
-        for expert_index, expert in enumerate(
-                self.experts[:context.num_experts]):
+        routes = {}
+        for expert_index in context.active_expert_ids():
+            expert = self.experts[expert_index]
             slot, token_index = context.routes_for(expert_index)
-            routes.append((slot, token_index))
             if token_index.numel() == 0:
                 continue
+            routes[expert_index] = (slot, token_index)
             expert_input = flat_inputs.index_select(0, token_index)
             weights = context.expert_weights[
                 token_index, slot, None].to(expert_input.dtype)
@@ -392,11 +417,8 @@ class RoutedLoRAMLP(nn.Module):
         flat_intermediate = intermediate.reshape(-1, intermediate.shape[-1])
         flat_down_delta = output.new_zeros(
             (flat_intermediate.shape[0], output.shape[-1]))
-        for expert_index, expert in enumerate(
-                self.experts[:context.num_experts]):
-            slot, token_index = routes[expert_index]
-            if token_index.numel() == 0:
-                continue
+        for expert_index, (slot, token_index) in routes.items():
+            expert = self.experts[expert_index]
             expert_input = flat_intermediate.index_select(0, token_index)
             weights = context.expert_weights[
                 token_index, slot, None].to(expert_input.dtype)
