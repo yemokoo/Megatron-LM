@@ -8,7 +8,15 @@ METHOD=${METHOD:?ewc|seq_lora|olora}; RANK=${RANK:?}; ALPHA=${ALPHA:-$((RANK*2))
 ROOT=/home/seonghyeonnoh/yemokoo/30_flame_agent/LLM-continual-learning/trace
 PY=$ROOT/.venv-runtime/bin/python
 SWEEP=${SWEEP_ROOT:-/data2/seonghyeonnoh/LLM-continual-learning-runs/trace/rank_sweep_20260916}
-NAME=${METHOD}_r${RANK}; RUN=$SWEEP/$NAME
+NAME=${METHOD}_r${RANK}${NAME_SUFFIX:-}; RUN=$SWEEP/$NAME
+# EWC's Fisher penalty (0.5*lambda*sum over ALL LoRA params of fisher*delta^2, see
+# model/Regular/EWC.py:77) sums over param count, so a fixed lambda=400 (tuned at the
+# r64 baseline) gets effectively stronger as rank grows and weaker as it shrinks --
+# confounding the rank sweep with an implicit regularization-strength sweep. Anchor
+# lambda at the r64/lambda400 baseline: lambda(rank) = 400 * 64 / rank.
+if [ "$METHOD" = "ewc" ]; then
+  export TAB1_EWC_LAMBDA=${TAB1_EWC_LAMBDA:-$(( 400 * 64 / RANK ))}
+fi
 OWN=/data2/seonghyeonnoh/LLM-continual-learning-runs/trace/tab3_20260913/.gpu_owner
 W=/data2/seonghyeonnoh/LLM-continual-learning-runtime/lmeval
 NGPU=$(awk -F, '{print NF}' <<< "$GPUS"); MICRO=${MICRO:-$(( 64 / NGPU > 16 ? 16 : 64 / NGPU ))}
@@ -20,7 +28,7 @@ release(){ for g in ${GPUS//,/ }; do [ "$(cat $OWN/$g 2>/dev/null)" = "$$" ] && 
 read -r -a G <<< "${GPUS//,/ }"
 
 if [ ! -f $RUN/7/tab1_meta.json ]; then
-  say "$NAME train start: r$RANK a$ALPHA, $NGPU GPUs ($GPUS) micro $MICRO global 64"
+  say "$NAME train start: r$RANK a$ALPHA, $NGPU GPUs ($GPUS) micro $MICRO global 64${TAB1_EWC_LAMBDA:+ ewc_lambda=$TAB1_EWC_LAMBDA}"
   ( cd $ROOT && env TAB1_RANK=$RANK TAB1_ALPHA=$ALPHA TAB1_GPUS=$GPUS TAB1_PORT=${PORT:-29630} TAB1_MICRO_BATCH=$MICRO TAB1_GLOBAL_BATCH=64 \
       TAB1_OUTPUT_ROOT=$RUN bash scripts/baselines/llama31/tab1_${METHOD}.sh train ) > $SWEEP/logs/$NAME.train.log 2>&1
   [ -f $RUN/7/tab1_meta.json ] || { say "$NAME TRAIN FAILED (logs/$NAME.train.log)"; exit 1; }
