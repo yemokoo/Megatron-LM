@@ -38,5 +38,7 @@ for g in "${G[@]}"; do
   pids+=($!); i=$((i+1))
 done
 erc=0; for p in "${pids[@]}"; do wait $p || erc=1; done
-say "$NAME eval exit=$erc"
+PY=$ROOT/.venv-runtime/bin/python
+sumline=$($PY $ROOT/scripts/rank_sweep/summarize_slora_sparse15.py "$RUN" 2>>$SWEEP/logs/$NAME.summarize.log)
+say "$NAME eval exit=$erc $sumline"
 # general benchmarks (MMLU/GSM8K/PIQA) intentionally NOT run for the rank sweep -- TRACE only
