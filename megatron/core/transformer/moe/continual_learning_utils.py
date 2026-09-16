@@ -1,4 +1,5 @@
 import json
+import os
 import re
 from contextlib import contextmanager
 from pathlib import Path
@@ -198,6 +199,48 @@ def expand_moe_model(target_model, source_model, num_existing_experts):
             source_module, SharedFullRankLoraExperts
         ):
             _copy_shared_full_rank_lora_experts(target_module, source_module, num_existing_experts)
+
+    if os.environ.get("MOE_EXPAND_CLONE_EXISTING") == "1":
+        _clone_existing_into_new_experts(target_model, num_existing_experts)
+
+
+def _clone_existing_into_new_experts(target_model, num_existing_experts):
+    """Initialise the new experts (and their router rows) as copies of the old ones.
+
+    Diagnostic-only alternative to the default random initialisation of new
+    experts, used to separate "expansion perturbs the model" from "randomly
+    initialised experts perturb the model".  New expert e is a copy of expert
+    e % num_existing_experts, so the expansion is functionally a duplication
+    rather than an injection of untrained parameters.
+    """
+    cloned = []
+    for module_name, module in target_model.named_modules():
+        if isinstance(module, Router):
+            with torch.no_grad():
+                total = module.weight.shape[0]
+                for e in range(num_existing_experts, total):
+                    module.weight[e].copy_(module.weight[e % num_existing_experts])
+                    if getattr(module, "expert_bias", None) is not None:
+                        module.expert_bias[e].copy_(
+                            module.expert_bias[e % num_existing_experts]
+                        )
+            cloned.append(f"{module_name}:router[{num_existing_experts}:{total}]")
+        elif isinstance(module, GroupedMLP):
+            with torch.no_grad():
+                total = module.num_local_experts
+                w1 = module.weight1.view(module.config.hidden_size, total, -1)
+                w2 = module.weight2.view(total, -1, module.config.hidden_size)
+                for e in range(num_existing_experts, total):
+                    w1[:, e, :].copy_(w1[:, e % num_existing_experts, :])
+                    w2[e, :, :].copy_(w2[e % num_existing_experts, :, :])
+            cloned.append(f"{module_name}:grouped_mlp[{num_existing_experts}:{total}]")
+    if torch.distributed.is_initialized() and torch.distributed.get_rank() != 0:
+        return
+    print(
+        f"MOE_EXPAND_CLONE_EXISTING=1: cloned existing experts into new slots "
+        f"({len(cloned)} modules)",
+        flush=True,
+    )
 
 
 def _freeze_router(module, num_existing_experts):

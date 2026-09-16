@@ -761,7 +761,11 @@ def validate_args(args, defaults={}):
         )
     assert args.moe_lpr_loss_coeff >= 0.0, "--moe-lpr-loss-coeff must be non-negative."
     if args.moe_lpr_loss_coeff > 0.0:
-        assert args.moe_train_router_only, "LPR requires --moe-train-router-only."
+        # shared-router hybrid 는 같은 freeze 를 자기 플래그로 건다
+        # (freeze_all_but_shared_router_params -> freeze_all_but_router_params, 동일 함수).
+        assert args.moe_train_router_only or args.shared_router_hybrid_train_router_only, (
+            "LPR requires --moe-train-router-only (or --shared-router-hybrid-train-router-only)."
+        )
         assert args.pipeline_model_parallel_size == 1, "LPR currently requires pipeline parallel size 1."
         assert args.moe_lpr_dataset_prefix_counts and args.moe_lpr_task_expert_ranges, "LPR task specifications are required."
         lpr_counts = [int(v) for v in args.moe_lpr_dataset_prefix_counts.split(",")]

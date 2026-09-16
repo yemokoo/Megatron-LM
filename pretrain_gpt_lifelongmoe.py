@@ -145,6 +145,101 @@ def _configure_router_fingerprint_intervention(model, args):
         f"Configured router fingerprint intervention mode={mode} layers={configured} from {path}"
     )
 
+# ---------------------------------------------------------------------------
+# Lifelong-MoE (Chen et al., ICML 2023) fork.
+#
+#   * expert expansion is the stock path (--moe-expand-from-num-experts 8 with
+#     --moe-freeze-existing-experts --moe-freeze-existing-router), which freezes
+#     the old experts and the copied gating rows exactly as the paper requires;
+#   * the shared dense/attention parameters (theta_d) stay trainable, but only
+#     inside the MoE layer range.  Layer 1 (decoder.layers.0) is the common
+#     bottom dense block and the embedding/output head are shared across every
+#     task, so they are frozen -- matching the layer 2..9 scope every other
+#     baseline in this project uses;
+#   * Online L2 regularization (paper Eq. 5):  L = L_LM + lambda * ||W - W_prev||^2,
+#     applied only to the shared parameters that already existed in the previous
+#     task's checkpoint.  Newly added experts and new gating rows have no
+#     W_prev, so pulling them toward their random init would be wrong and they
+#     are excluded from the anchor.
+#
+# lambda defaults to 1.0, the value the paper reports for this regularizer.
+LIFELONG_L2_COEFF = float(os.environ.get("LIFELONG_L2_COEFF", "1.0") or 0)
+LIFELONG_LAYER_START = int(os.environ.get("LIFELONG_TRAINABLE_LAYER_START", "2"))
+LIFELONG_LAYER_END = int(os.environ.get("LIFELONG_TRAINABLE_LAYER_END", "9"))
+_LIFELONG = {"anchors": None, "prepared": False, "frozen": 0, "trainable": 0, "anchored": 0}
+
+
+def _lifelong_layer_index(name):
+    """Return the 1-based transformer layer number for a parameter name."""
+    marker = "decoder.layers."
+    if marker not in name:
+        return None
+    tail = name.split(marker, 1)[1]
+    head = tail.split(".", 1)[0]
+    return int(head) + 1 if head.isdigit() else None
+
+
+def _lifelong_is_expert_or_router(name):
+    """New-capacity parameters: MoE experts and the gating matrix."""
+    return (".mlp.experts." in name) or (".mlp.router." in name) or name.endswith(".router.weight")
+
+
+def _lifelong_prepare(model, optimizer=None):
+    """Freeze outside the MoE layer range and snapshot the Online-L2 anchor."""
+    if _LIFELONG["prepared"]:
+        return
+    shards = model if isinstance(model, (list, tuple)) else [model]
+    anchors = {}
+    frozen = trainable = 0
+    for shard_index, shard in enumerate(shards):
+        for name, parameter in shard.named_parameters():
+            key = f"shard{shard_index}.{name}"
+            layer = _lifelong_layer_index(name)
+            if layer is None or not (LIFELONG_LAYER_START <= layer <= LIFELONG_LAYER_END):
+                # embeddings, output head, final norm and the common bottom
+                # dense layer are shared by every distribution -> frozen.
+                parameter.requires_grad = False
+                frozen += 1
+                continue
+            if not parameter.requires_grad:
+                frozen += 1
+                continue
+            trainable += 1
+            if not _lifelong_is_expert_or_router(name):
+                # theta_d: existed in the previous task's checkpoint.
+                anchors[key] = parameter.detach().float().clone()
+    _LIFELONG["anchors"] = anchors
+    _LIFELONG["frozen"] = frozen
+    _LIFELONG["trainable"] = trainable
+    _LIFELONG["anchored"] = len(anchors)
+    _LIFELONG["prepared"] = True
+    print_rank_0(
+        f"[LIFELONG-MOE] layer scope {LIFELONG_LAYER_START}..{LIFELONG_LAYER_END}, "
+        f"trainable tensors {trainable}, frozen {frozen}, L2-anchored {len(anchors)}, "
+        f"lambda {LIFELONG_L2_COEFF}"
+    )
+    if optimizer is not None and hasattr(optimizer, "reload_model_params"):
+        optimizer.reload_model_params()
+
+
+def _lifelong_l2_penalty(model):
+    """lambda * sum over anchored shared parameters of ||W - W_prev||^2."""
+    anchors = _LIFELONG["anchors"]
+    if not anchors:
+        return None
+    shards = model if isinstance(model, (list, tuple)) else [model]
+    total = None
+    for shard_index, shard in enumerate(shards):
+        for name, parameter in shard.named_parameters():
+            key = f"shard{shard_index}.{name}"
+            reference = anchors.get(key)
+            if reference is None or not parameter.requires_grad:
+                continue
+            term = (parameter.float() - reference).pow(2).sum()
+            total = term if total is None else total + term
+    return total
+
+
 def model_provider(pre_process=True, post_process=True) -> Union[GPTModel, megatron.legacy.model.GPTModel]:
     """Builds the model.
 
@@ -421,6 +516,7 @@ def loss_func(
     hidden_kl_loss = None
     router_kl_loss = None
     lpr_loss = None
+    lifelong_l2_loss = None
     fingerprint_kd_loss = None
     fingerprint_mean_score = None
     fingerprint_mean_weight = None
@@ -436,6 +532,7 @@ def loss_func(
         hidden_kl_loss = output_tensor.get("hidden_kl_loss")
         router_kl_loss = output_tensor.get("router_kl_loss")
         lpr_loss = output_tensor.get("lpr_loss")
+        lifelong_l2_loss = output_tensor.get("lifelong_l2_loss")
         fingerprint_kd_loss = output_tensor.get("fingerprint_kd_loss")
         fingerprint_mean_score = output_tensor.get("fingerprint_mean_score")
         fingerprint_mean_weight = output_tensor.get("fingerprint_mean_weight")
@@ -497,6 +594,10 @@ def loss_func(
     if router_kl_loss is not None:
         loss[0] = loss[0] + args.moe_expansion_distill_router_kl_coeff * router_kl_loss
 
+    if lifelong_l2_loss is not None:
+        # Online L2 (paper Eq. 5): L_LM + lambda * ||W - W_prev||^2
+        loss[0] = loss[0] + LIFELONG_L2_COEFF * lifelong_l2_loss
+
     if lpr_loss is not None:
         loss[0] = loss[0] + args.moe_lpr_loss_coeff * lpr_loss
 
@@ -542,6 +643,8 @@ def loss_func(
     reporting_loss = loss.clone().detach()
     torch.distributed.all_reduce(reporting_loss, group=mpu.get_data_parallel_group())
     reporting = {'lm loss': (reporting_loss[0], reporting_loss[1])}
+    if lifelong_l2_loss is not None:
+        reporting['lifelong l2'] = lifelong_l2_loss.detach().clone()
     if old_like_stats is not None:
         old_like_counts = torch.stack(
             (
@@ -749,6 +852,9 @@ def forward_step(data_iterator, model: GPTModel):
         )
     timers('batch-generator').stop()
 
+    if LIFELONG_L2_COEFF > 0 and not _LIFELONG["prepared"]:
+        _lifelong_prepare(model)
+
     teacher_model = get_old_moe_distill_teacher()
     distill_mode = getattr(args, "moe_expansion_distill_mode", "none")
     expansion_distill_enabled = distill_mode != "none"
@@ -952,6 +1058,15 @@ def forward_step(data_iterator, model: GPTModel):
     else:
         with stimer:
             output_tensor = model(tokens, position_ids, attention_mask, labels=labels)
+
+    # Online L2 is a pure weight-space term, so it is attached once per
+    # microbatch regardless of which branch produced the LM losses.
+    if LIFELONG_L2_COEFF > 0 and _as_module_list(model)[0].training:
+        penalty = _lifelong_l2_penalty(model)
+        if penalty is not None:
+            if not isinstance(output_tensor, dict):
+                output_tensor = {"losses": output_tensor}
+            output_tensor["lifelong_l2_loss"] = penalty
 
     return output_tensor, partial(
         loss_func, loss_mask, old_like_stats=old_like_stats
@@ -1514,126 +1629,6 @@ def _capture_moe_router_inputs(modules, *, detach):
     finally:
         for handle in handles:
             handle.remove()
-
-
-def route_agreement_eval(model, data_iterator, iteration):
-    """라우팅 덤프: 이 모델이 실제로 고른 top-k 를 토큰 단위로 저장한다.
-
-    §4.4 의 주 측정은  R_wiki(h_wiki) vs R_now(h_now)  — 두 모델이 **각자의 hidden**
-    으로 고른 top-k 를 비교해야 한다. 그래서 모델별로 따로 덤프하고 나중에 대조한다.
-    현재 모델 덤프에는 보조 측정용으로 R_wiki(h_now)(라우터만 교체) 도 함께 기록한다.
-      ROUTE_AGREE_OUT      : 덤프 저장 경로(.pt)
-      ROUTE_AGREE_BATCHES  : 배치 수 (기본 25 — 기존 probe 와 동일)
-      ROUTE_AGREE_OLD_CKPT : (선택) wiki 체크포인트 iter_* — 주면 보조 측정도 기록
-    """
-    import os
-    args = get_args()
-    nbatch = int(os.environ.get("ROUTE_AGREE_BATCHES", "25"))
-    out_path = os.environ["ROUTE_AGREE_OUT"]
-    old_dir = os.environ.get("ROUTE_AGREE_OLD_CKPT", "")
-    topk = args.moe_router_topk
-
-    old_w = {}
-    if old_dir:
-        import torch.distributed.checkpoint as _dcp
-        from torch.distributed.checkpoint import FileSystemReader
-        reader = FileSystemReader(old_dir); meta = reader.read_metadata()
-        keys = [k for k in meta.state_dict_metadata
-                if k.endswith("mlp.router.weight") and "optimizer" not in k]
-        sd = {k: torch.empty(tuple(meta.state_dict_metadata[k].size),
-                             dtype=meta.state_dict_metadata[k].properties.dtype) for k in keys}
-        _dcp.load(sd, storage_reader=reader)
-        for k, v in sd.items():
-            old_w[int(k.split("decoder.layers.")[1].split(".")[0]) + 1] = v
-        print_rank_0(f"[ROUTE] 보조측정용 기준 라우터 {len(old_w)}층 ← {old_dir}")
-
-    from megatron.training.training import _router_logits
-    idx_buf, swap_buf, mass_buf, hashes = {}, {}, {}, []
-    hid_out = os.environ.get("ROUTE_HIDDEN_OUT", "")
-    hid_ref = os.environ.get("ROUTE_HIDDEN_REF", "")
-    hid_buf = {} if hid_out else None
-    href = None; hstat = {}; hoff = 0
-    if hid_ref:
-        _r = torch.load(hid_ref, map_location="cpu")
-        href = _r["hidden"]
-        print_rank_0(f"[ROUTE] hidden 기준 로드 {hid_ref} (레이어 {len(href)})")
-
-    # 고정 토큰 파일이 있으면 그것만 쓴다. 데이터로더 셔플이 체크포인트/설정에 따라
-    # 달라져서 모델 간 토큰이 어긋나는 문제를 원천 차단한다.
-    fixed_path = os.environ.get("ROUTE_AGREE_TOKENS", "")
-    fixed = torch.load(fixed_path, map_location="cpu") if fixed_path else None
-    if fixed is not None:
-        nbatch = min(nbatch, int(fixed["nb"]))
-        # attention mask 모양은 실제 배치에서 한 번 가져와 재사용(배치마다 동일한 causal mask)
-        _t, _l, _lm, attn_template, _p = get_batch(data_iterator)
-        print_rank_0(f"[ROUTE] 고정 토큰 사용: {fixed_path} ({nbatch}배치 × {fixed['mb']})")
-
-    tok_per_batch = None
-    for bi in range(nbatch):
-        if fixed is not None:
-            chunk = fixed["tokens"][bi].to(torch.cuda.current_device())
-            tokens = chunk[:, :-1].contiguous()
-            labels = chunk[:, 1:].contiguous()
-            loss_mask = torch.ones_like(labels, dtype=torch.float32)
-            position_ids = torch.arange(tokens.shape[1], device=tokens.device).unsqueeze(0).expand_as(tokens)
-            attention_mask = attn_template[: tokens.shape[0]] if attn_template is not None else None
-        else:
-            tokens, labels, loss_mask, attention_mask, position_ids = get_batch(data_iterator)
-        hashes.append(int(tokens.long().sum().item()))          # 배치 정렬 검증용
-        if tok_per_batch is None: tok_per_batch = tokens.shape[0]*tokens.shape[1]
-        hoff = bi * tok_per_batch
-        with torch.no_grad():
-            with _capture_moe_router_inputs(_as_module_list(model), detach=True) as (cap, routers):
-                model[0](tokens, position_ids, attention_mask, labels=labels)
-            for ln, hidden in cap.items():
-                if ln not in routers:
-                    continue
-                h = hidden.reshape(-1, hidden.shape[-1])
-                cur = _router_logits(routers[ln], h).float()
-                idx_buf.setdefault(ln, []).append(
-                    torch.topk(cur, k=topk, dim=-1).indices.to(torch.int16).cpu())
-                # hidden 복구율용: 라우터 입력 hidden 을 fp16 으로 보관하거나
-                # 기준(wiki) hidden 과의 cos/L2 를 즉석 계산한다.
-                if href is not None:
-                    if ln in href:
-                        a = h.float()
-                        b = href[ln][hoff:hoff + a.shape[0]].to(a.device).float()
-                        cos = torch.nn.functional.cosine_similarity(a, b, dim=-1).mean()
-                        rel = ((a - b).norm(dim=-1) / b.norm(dim=-1).clamp_min(1e-6)).mean()
-                        hstat.setdefault(ln, [0.0, 0.0, 0])
-                        hstat[ln][0] += float(cos); hstat[ln][1] += float(rel); hstat[ln][2] += 1
-                elif hid_buf is not None:
-                    hid_buf.setdefault(ln, []).append(h.to(torch.float16).cpu())
-                probs = torch.softmax(cur, dim=-1)
-                mass_buf.setdefault(ln, []).append(probs.mean(dim=0).cpu())   # expert 별 평균 질량
-                if ln in old_w:
-                    ow = old_w[ln].to(device=h.device, dtype=torch.float32)
-                    sw = torch.nn.functional.linear(h.float(), ow)
-                    swap_buf.setdefault(ln, []).append(
-                        torch.topk(sw, k=min(topk, ow.shape[0]), dim=-1).indices.to(torch.int16).cpu())
-
-    dump = {"topk": topk, "num_experts": args.num_experts, "batches": nbatch,
-            "token_hashes": hashes, "ckpt": args.load,
-            "idx": {ln: torch.cat(v) for ln, v in idx_buf.items()},
-            "mass": {ln: torch.stack(v).mean(0) for ln, v in mass_buf.items()}}
-    if swap_buf:
-        dump["swap_idx"] = {ln: torch.cat(v) for ln, v in swap_buf.items()}
-    if hstat:
-        dump["hidden_vs_ref"] = {ln: {"cos": v[0]/v[2], "rel_l2": v[1]/v[2]} for ln, v in hstat.items()}
-        m = len(hstat)
-        dump["hidden_cos_mean"] = sum(v[0]/v[2] for v in hstat.values())/m
-        dump["hidden_rel_l2_mean"] = sum(v[1]/v[2] for v in hstat.values())/m
-        print_rank_0(f"[ROUTE] hidden cos={dump['hidden_cos_mean']:.4f} relL2={dump['hidden_rel_l2_mean']:.4f}")
-    if hid_buf and torch.distributed.get_rank() == 0:
-        os.makedirs(os.path.dirname(hid_out), exist_ok=True)
-        torch.save({"hidden": {ln: torch.cat(v) for ln, v in hid_buf.items()}}, hid_out)
-        print_rank_0(f"[ROUTE] hidden 기준 저장 {hid_out}")
-    if torch.distributed.get_rank() == 0:
-        os.makedirs(os.path.dirname(out_path), exist_ok=True)
-        torch.save(dump, out_path)
-        t = next(iter(dump["idx"].values())).shape[0]
-        print_rank_0(f"[ROUTE] 덤프 저장 {out_path}  레이어 {len(dump['idx'])}개, 토큰 {t}, experts {args.num_experts}")
-    return dump
 
 
 @contextmanager
@@ -4698,8 +4693,6 @@ if __name__ == "__main__":
     # Temporary for transition to core datasets
     train_valid_test_datasets_provider.is_distributed = True
 
-    import megatron.training.training as _tr
-    _tr._ROUTE_AGREE_HOOK = route_agreement_eval
     pretrain(
         train_valid_test_datasets_provider,
         model_provider,

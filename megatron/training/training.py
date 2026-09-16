@@ -2113,6 +2113,14 @@ def pretrain(
         args.consumed_train_samples = args.diagnostic_override_consumed_train_samples
         update_num_microbatches(consumed_samples=args.consumed_train_samples, verbose=True)
 
+    # 라우팅 덤프는 체크포인트 iteration 과 무관하게 항상 같은 토큰을 봐야 하므로
+    # 데이터로더를 만들기 전에 소비량을 0 으로 되돌린다.
+    import os as _route_os
+    if _route_os.environ.get("ROUTE_AGREE_OUT"):
+        args.consumed_train_samples = 0
+        update_num_microbatches(consumed_samples=0, verbose=False)
+        print_rank_0("[ROUTE] consumed_train_samples=0 고정 (덤프 간 토큰 정렬)")
+
     # Data stuff.
     app_metrics['app_build_dataiters_start_time'] = one_logger_utils.get_timestamp_in_ms()
     timers('train/valid/test-data-iterators-setup', log_level=0).start(
@@ -2316,6 +2324,10 @@ def pretrain(
         iteration = args.iteration
         if args.run_initial_probe_eval and probe_eval_func is not None:
             probe_eval_func(model, iteration)
+        # 라우팅 덤프(오프라인 §4.4 측정) — ROUTE_AGREE_OUT 가 있을 때만 동작한다.
+        import os as _os
+        if _os.environ.get("ROUTE_AGREE_OUT") and globals().get("_ROUTE_AGREE_HOOK"):
+            _ROUTE_AGREE_HOOK(model, train_data_iterator, iteration)
 
     if args.do_valid:
         prefix = f'iteration {iteration} on validation set'

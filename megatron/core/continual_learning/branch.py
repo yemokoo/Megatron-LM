@@ -20,6 +20,7 @@ from megatron.core.continual_learning.parameter_scope import (
 from megatron.core.continual_learning.runtime import (
     configure_continual_learning,
     continual_after_optimizer_step,
+    continual_attach_gem_episodic_context,
     continual_before_optimizer_step,
     continual_loss_penalty,
     continual_on_train_end,
@@ -32,7 +33,16 @@ def add_baselines6_args(parser):
     group = parser.add_argument_group(title="six continual-learning baselines")
     group.add_argument(
         "--continual-method",
-        choices=["none", "sequential_dense", "ewc", "trace_gem", "slora_pre", "olora", "fixed_moe"],
+        choices=[
+            "none",
+            "sequential_dense",
+            "ewc",
+            "trace_gem",
+            "gem_episodic",
+            "slora_pre",
+            "olora",
+            "fixed_moe",
+        ],
         default="none",
     )
     group.add_argument(
@@ -50,6 +60,20 @@ def add_baselines6_args(parser):
     group.add_argument("--continual-trace-gem-margin", type=float, default=0.5)
     group.add_argument("--continual-trace-gem-eps", type=float, default=1.0e-6)
 
+    # gem_episodic: paper-faithful GEM.  Each past task contributes one
+    # episodic-memory dataset; its gradient is recomputed every step from a
+    # fresh global batch drawn cyclically from that stored subset.
+    group.add_argument(
+        "--continual-gem-memory-data-path",
+        nargs="*",
+        action="append",
+        default=None,
+        help="One Megatron blend per past task, in task order. Repeat the flag "
+             "once per past task, e.g. --continual-gem-memory-data-path 1.0 /path/wiki_prefix",
+    )
+    group.add_argument("--continual-gem-margin", type=float, default=0.5)
+    group.add_argument("--continual-gem-eps", type=float, default=1.0e-3)
+
     group.add_argument("--continual-slora-rank", type=int, default=64)
     group.add_argument("--continual-slora-conversation-rank", type=int, default=64)
     group.add_argument("--continual-slora-max-rank", type=int, default=256)
@@ -62,6 +86,9 @@ def add_baselines6_args(parser):
     group.add_argument("--continual-olora-alpha", type=float, default=352.0)
     group.add_argument("--continual-olora-dropout", type=float, default=0.1)
     group.add_argument("--continual-olora-orth-lambda", type=float, default=0.5)
+    group.add_argument("--continual-olora-l2-lambda", type=float, default=0.0,
+                       help="O-LoRA lambda_2: L2 shrinkage on the current task adapter "
+                            "(paper reports 0 to 0.3).")
     return parser
 
 
@@ -88,9 +115,12 @@ def _install_model_branch(base_module):
         if args.continual_method != "fixed_moe":
             if args.num_layers != 9:
                 raise ValueError("The matched six-baseline architecture requires exactly 9 layers")
-            if args.continual_dense_ffn_hidden_size != 1408:
-                raise ValueError("The matched dense Layer-2--9 FFN width must be 1408")
-            # Layer 1 has FFN width 5472 while Layers 2--9 have width 1408.
+            if args.continual_dense_ffn_hidden_size <= 0:
+                raise ValueError("The dense Layer-2--9 FFN width must be positive")
+            # The ordinary matched baseline uses 5472 in Layer 1 and 1408 in
+            # Layers 2--9.  DoF sweeps may set both --ffn-hidden-size and
+            # --continual-dense-ffn-hidden-size to the same value in order to
+            # load a uniformly sized dense source checkpoint.
             # TransformerBlock uses a list-valued moe_layer_freq as its existing
             # signal that layer checkpoint shapes are heterogeneous.  The all-zero
             # pattern does not create MoE layers in this dedicated dense spec; it
@@ -159,6 +189,57 @@ def _install_probe_branch(base_module):
         return dataloader
 
     base_module._build_probe_dataloader = baseline_probe_dataloader
+
+
+_GEM_MEMORY_BOX = {"iterators": []}
+
+
+def _build_gem_episodic_memory_iterators(dataset_provider, build_iterators):
+    """Build one training iterator per past-task episodic memory.
+
+    Mirrors how the joint-replay path in ``training.py`` builds a second
+    stream: swap ``args.data_path`` to the stored subset, rebuild, restore.
+    The subset is far smaller than ``train_iters * global_batch_size``, so the
+    GPT dataset simply cycles through it -- which is the intended "sample a
+    fresh global batch from the stored memory each step" behaviour.
+    """
+    args = get_args()
+    blends = getattr(args, "continual_gem_memory_data_path", None)
+    if not blends:
+        raise RuntimeError(
+            "gem_episodic requires --continual-gem-memory-data-path once per past task"
+        )
+    expected = {"wiki": 0, "code": 1, "conversation": 2}[args.continual_task_name]
+    if len(blends) != expected:
+        raise RuntimeError(
+            f"gem_episodic at task {args.continual_task_name} expects {expected} episodic "
+            f"memories, got {len(blends)}"
+        )
+
+    iterators = []
+    saved = (
+        args.data_path,
+        args.train_data_path,
+        args.valid_data_path,
+        args.test_data_path,
+        args.consumed_train_samples,
+    )
+    try:
+        for blend in blends:
+            args.data_path = list(blend)
+            args.train_data_path = args.valid_data_path = args.test_data_path = None
+            args.consumed_train_samples = 0
+            built = build_iterators(dataset_provider)
+            iterators.append(built[0])
+    finally:
+        (
+            args.data_path,
+            args.train_data_path,
+            args.valid_data_path,
+            args.test_data_path,
+            args.consumed_train_samples,
+        ) = saved
+    return iterators
 
 
 def _install_training_branch():
@@ -251,6 +332,9 @@ def _install_training_branch():
         router_memory_eval_func=None,
         router_memory_accum_func=None,
     ):
+        continual_attach_gem_episodic_context(
+            forward_step_func, _GEM_MEMORY_BOX["iterators"]
+        )
         result = original_train(
             forward_step_func,
             model,
@@ -270,9 +354,25 @@ def _install_training_branch():
         continual_on_train_end(optimizer, train_data_iterator, forward_step_func, config)
         return result
 
+    original_build_iterators = training_module.build_train_valid_test_data_iterators
+
+    def baseline_build_iterators(dataset_provider):
+        result = original_build_iterators(dataset_provider)
+        runtime_args = get_args()
+        if (
+            getattr(runtime_args, "continual_method", "none") == "gem_episodic"
+            and runtime_args.continual_task_name != "wiki"
+            and not _GEM_MEMORY_BOX["iterators"]
+        ):
+            _GEM_MEMORY_BOX["iterators"] = _build_gem_episodic_memory_iterators(
+                dataset_provider, original_build_iterators
+            )
+        return result
+
     training_module.get_model = baseline_get_model
     training_module.setup_model_and_optimizer = baseline_setup
     training_module.train = baseline_train
+    training_module.build_train_valid_test_data_iterators = baseline_build_iterators
 
 
 def install_baselines6_branch(base_module):

@@ -63,15 +63,19 @@ def apply_parameter_scope(model, method: str, task: str, layer_start: int, layer
                         for parameter in module.parameters():
                             parameter.requires_grad_(False)
         elif method == "olora":
+            # OLORA_WIKI_BACKBONE_ONLY=1 → wiki 는 백본만 학습(어댑터 전부 동결).
+            # 기본값은 기존 동작(슬롯0 도 함께 학습).
+            import os as _os
+            _wiki_slot = -1 if _os.environ.get("OLORA_WIKI_BACKBONE_ONLY", "0") == "1" else 0
             for _, layer in iter_layers(model):
                 for parent in layer.modules():
                     for collection_name in ("continual_q_adapters", "continual_v_adapters"):
                         for index, adapter in enumerate(getattr(parent, collection_name, ())):
                             for parameter in adapter.parameters():
-                                parameter.requires_grad_(index == 0)
+                                parameter.requires_grad_(index == _wiki_slot)
     else:
         _set_all(model, False)
-        if method in {"ewc", "trace_gem", "sequential_dense", "fixed_moe"}:
+        if method in {"ewc", "trace_gem", "gem_episodic", "sequential_dense", "fixed_moe"}:
             for layer_number, layer in iter_layers(model):
                 if layer_start <= layer_number <= layer_end:
                     for parameter in layer.parameters():
@@ -85,7 +89,8 @@ def apply_parameter_scope(model, method: str, task: str, layer_start: int, layer
                         for parameter in module.parameters():
                             parameter.requires_grad_(True)
         elif method == "olora":
-            current_slot = 1 if task == "code" else 2
+            from megatron.core.continual_learning.olora import _olora_slot_index
+            current_slot = _olora_slot_index(task)
             for layer_number, layer in iter_layers(model):
                 if not layer_start <= layer_number <= layer_end:
                     continue

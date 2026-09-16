@@ -23,6 +23,18 @@ from megatron.core import parallel_state
 from .parameter_scope import iter_layers
 
 
+
+def _olora_slot_index(task: str) -> int:
+    """현재 태스크가 쓰는 LoRA 슬롯.
+
+    기본(기존 동작): wiki 가 슬롯0 을 쓰므로 code=1, conv=2.
+    OLORA_WIKI_BACKBONE_ONLY=1 이면 wiki 는 백본만 학습하고 슬롯을 안 쓰므로
+    code=0, conv=1 로 한 칸씩 당긴다 (논문의 "고정 백본 + 태스크별 LoRA" 전제).
+    """
+    import os
+    shift = 0 if os.environ.get("OLORA_WIKI_BACKBONE_ONLY", "0") == "1" else 1
+    return (0 if task == "code" else 1) + shift
+
 def _global_gram(previous, current):
     """The paper's overlap ``O_{i,t} = A_i^T A_t``.
 
@@ -40,7 +52,7 @@ def orthogonality_penalty(model, task: str, coefficient: float, layer_start: int
         reference = next(iter(model)).parameters() if isinstance(model, (list, tuple)) else model.parameters()
         parameter = next(reference)
         return parameter.new_zeros((), dtype=torch.float32)
-    current_index = 1 if task == "code" else 2
+    current_index = _olora_slot_index(task)
     previous_indices = range(current_index)
     losses = []
     for layer_number, layer in iter_layers(model):
@@ -56,8 +68,47 @@ def orthogonality_penalty(model, task: str, coefficient: float, layer_start: int
                     gram = _global_gram(adapters[previous_index], current)
                     losses.append(gram.square().sum())
     if not losses:
+        if current_index == 0:      # 첫 LoRA 태스크 — 직교할 이전 슬롯이 없다
+            reference = next(iter(model)).parameters() if isinstance(model, (list, tuple)) else model.parameters()
+            return next(reference).new_zeros((), dtype=torch.float32)
         raise RuntimeError("O-LoRA found no Q/V adapter pairs in Layer 2--9")
     return float(coefficient) * torch.stack(losses).sum()
+
+
+def adapter_l2_penalty(model, task: str, coefficient: float, layer_start: int, layer_end: int):
+    """O-LoRA's lambda_2 term: L2 shrinkage on the *current* task's adapter.
+
+    The public implementation (``O-LoRA/src/uie_trainer_lora.py``) computes
+
+        l2_loss = sum over parameters named ``loranew_*`` of ||param||_2
+        loss    = loss + orthogonal_loss * lamda_1 + l2_loss * lamda_2
+
+    i.e. the plain Frobenius norm (not its square) of the newly added task's
+    A and B factors only -- previously learned slots are left alone.  This
+    function mirrors that definition on our slot layout: ``loranew_`` is the
+    slot indexed by the current task, and Q/V are the only adapted modules.
+    """
+    if coefficient == 0.0 or task == "wiki":
+        return torch.zeros((), dtype=torch.float32)
+    current_index = _olora_slot_index(task)
+    terms = []
+    for layer_number, layer in iter_layers(model):
+        if not layer_start <= layer_number <= layer_end:
+            continue
+        for parent in layer.modules():
+            for collection_name in ("continual_q_adapters", "continual_v_adapters"):
+                adapters = getattr(parent, collection_name, None)
+                if adapters is None or len(adapters) != 3:
+                    continue
+                current = adapters[current_index]
+                rank = max(int(current.active_rank), 0)
+                if rank == 0:
+                    continue
+                terms.append(torch.linalg.vector_norm(current.lora_a[:, :rank].float()))
+                terms.append(torch.linalg.vector_norm(current.lora_b[:rank, :].float()))
+    if not terms:
+        raise RuntimeError("O-LoRA lambda_2 found no active Q/V adapter in Layer 2--9")
+    return float(coefficient) * torch.stack(terms).sum()
 
 
 @torch.no_grad()

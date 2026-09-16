@@ -15,7 +15,13 @@ from megatron.core import parallel_state
 from .audit import expected_active_counts, write_audit
 from .ewc import consolidate_equal_lambda, ewc_penalty
 from .lora_adapter import ContinualLowRankAdapter
-from .olora import adapter_slot_norms, orthogonality_penalty
+from .olora import adapter_l2_penalty, adapter_slot_norms, orthogonality_penalty
+from .gem_episodic import (
+    flatten_gradients,
+    project_global_gradient,
+    unflatten_into,
+    violation_stats,
+)
 from .parameter_scope import (
     apply_parameter_scope,
     frozen_checksum,
@@ -68,6 +74,14 @@ class ContinualController:
         self._initial_frozen_checksum = None
         self._penalty_calls = 0
         self._last_penalty = None
+        # gem_episodic: paper-faithful GEM keeps *examples*, not a stale
+        # terminal gradient, so the constraint gradients are recomputed each
+        # step from these iterators.  Attached by the branch installer.
+        self.gem_forward_step_func = None
+        self.gem_memory_iterators = []
+        self.gem_projection_calls = 0
+        self.gem_violation_calls = 0
+        self._gem_last_stats = None
 
         if args.continual_state_load:
             expected = self.method
@@ -123,12 +137,25 @@ class ContinualController:
                 expert_ffn=352,
                 top_k=4,
                 olora_rank=args.continual_olora_rank,
+                # Widths other than the matched 4 x 352 control are deliberate
+                # in the dense DoF sweep and must be audited, not rejected.
+                enforce_dense_moe_match=args.continual_dense_ffn_hidden_size == 1408,
+                enforce_olora_moe_match=args.continual_olora_rank == 352,
             ),
             "old_model_kd_coefficient": float(getattr(args, "moe_old_model_kl_coeff", 0.0)),
         }
         if self.audit["old_model_kd_coefficient"] != 0.0:
             raise RuntimeError("Six-baseline runs forbid old-model KD")
         self._write_audit("setup.json")
+
+    def attach_gem_episodic_context(self, forward_step_func, memory_iterators):
+        """Give the controller what it needs to recompute past-task gradients.
+
+        ``memory_iterators`` is an ordered list of episodic-memory iterators,
+        one per previously learned task, in task order.
+        """
+        self.gem_forward_step_func = forward_step_func
+        self.gem_memory_iterators = list(memory_iterators or [])
 
     def _state_dir(self, method: Optional[str] = None) -> str:
         return os.path.join(self.args.save, f"continual_state_{method or self.method}")
@@ -170,8 +197,19 @@ class ContinualController:
                         if isinstance(module, ContinualLowRankAdapter):
                             module.set_active(rank)
         elif self.method == "olora":
-            active_count = {"wiki": 1, "code": 2, "conversation": 3}[self.task]
-            current = active_count - 1
+            # 슬롯 규약은 parameter_scope / olora 와 반드시 같아야 한다.
+            # 하드코딩하면 OLORA_WIKI_BACKBONE_ONLY=1 에서 "초기화한 슬롯"과
+            # "학습하는 슬롯"이 어긋나 A=B=0 인 죽은 LoRA 가 만들어진다.
+            from megatron.core.continual_learning.olora import _olora_slot_index
+
+            if self.task == "wiki":
+                if os.environ.get("OLORA_WIKI_BACKBONE_ONLY", "0") == "1":
+                    active_count, current = 0, -1   # wiki 는 슬롯을 쓰지 않음
+                else:
+                    active_count, current = 1, 0
+            else:
+                current = _olora_slot_index(self.task)
+                active_count = current + 1
             for layer_number, layer in iter_layers(self.model):
                 if not self.layer_start <= layer_number <= self.layer_end:
                     continue
@@ -208,6 +246,7 @@ class ContinualController:
                 self.args.continual_ewc_lambda,
             )
         elif self.method == "olora":
+            # O-LoRA: loss + lambda_1 * orthogonality + lambda_2 * L2(current slot)
             penalty = orthogonality_penalty(
                 self.model,
                 self.task,
@@ -215,6 +254,15 @@ class ContinualController:
                 self.layer_start,
                 self.layer_end,
             )
+            l2_lambda = float(getattr(self.args, "continual_olora_l2_lambda", 0.0))
+            if l2_lambda != 0.0:
+                penalty = penalty + adapter_l2_penalty(
+                    self.model,
+                    self.task,
+                    l2_lambda,
+                    self.layer_start,
+                    self.layer_end,
+                )
         else:
             return None
         self._penalty_calls += 1
@@ -224,7 +272,87 @@ class ContinualController:
         self._last_penalty = penalty.detach().clone()
         return penalty
 
+    def _gem_episodic_project(self):
+        """Recompute past-task gradients from episodic memory, then project.
+
+        Sequence per optimizer step (Lopez-Paz & Ranzato 2017, Eq. 11):
+          1. snapshot the current-task gradient already in the grad buffers,
+          2. for each past task, clear the buffers and run one global batch
+             from that task's episodic memory to obtain ``g_k``,
+          3. restore the current-task gradient and project it once, globally.
+        Only the gradient buffers are touched; the optimizer's own state is
+        left alone because it reads ``main_grad`` when ``step()`` runs next.
+        """
+        from megatron.core.pipeline_parallel.schedules import get_forward_backward_func
+        from megatron.core.num_microbatches_calculator import get_num_microbatches
+
+        if not self.gem_memory_iterators:
+            raise RuntimeError(
+                "gem_episodic needs one episodic-memory iterator per past task; none were attached"
+            )
+        if self.gem_forward_step_func is None:
+            raise RuntimeError("gem_episodic was not given the forward step function")
+
+        parameters = scoped_trainable_parameters(self.model, self.layer_start, self.layer_end)
+        order = sorted(parameters)
+        live = {}
+        for name in order:
+            gradient = _gradient_tensor(parameters[name])
+            if gradient is None:
+                return
+            live[name] = gradient
+
+        current = flatten_gradients(live, order)
+
+        forward_backward_func = get_forward_backward_func()
+        memories = []
+        try:
+            for iterator in self.gem_memory_iterators:
+                for shard in iter_shards(self.training_model):
+                    shard.zero_grad_buffer()
+                forward_backward_func(
+                    forward_step_func=self.gem_forward_step_func,
+                    data_iterator=iterator,
+                    model=self.training_model,
+                    num_microbatches=get_num_microbatches(),
+                    seq_length=self.args.seq_length,
+                    micro_batch_size=self.args.micro_batch_size,
+                    decoder_seq_length=self.args.decoder_seq_length,
+                    forward_only=False,
+                )
+                refreshed = {}
+                for name in order:
+                    gradient = _gradient_tensor(parameters[name])
+                    if gradient is None:
+                        raise RuntimeError(f"gem_episodic memory pass produced no gradient for {name}")
+                    refreshed[name] = gradient
+                memories.append(flatten_gradients(refreshed, order))
+        finally:
+            # Whatever happened above, the current-task gradient must be the
+            # one the optimizer sees.
+            for shard in iter_shards(self.training_model):
+                shard.zero_grad_buffer()
+            unflatten_into(current, live, order)
+
+        self.gem_projection_calls += 1
+        stats = violation_stats(current, memories)
+        if any(entry["dot"] < 0 for entry in stats["constraints"]):
+            self.gem_violation_calls += 1
+        self._gem_last_stats = stats
+
+        projected = project_global_gradient(
+            current,
+            memories,
+            margin=float(self.args.continual_gem_margin),
+            eps=float(self.args.continual_gem_eps),
+        )
+        if projected is not current:
+            unflatten_into(projected, live, order)
+
     def before_optimizer_step(self, current_step: int):
+        if self.method == "gem_episodic" and self.task != "wiki":
+            self._gem_episodic_project()
+            return
         trace_enabled = self.method == "trace_gem" or bool(
             getattr(self.args, "continual_capture_trace_terminal", False)
         )
@@ -397,6 +525,28 @@ class ContinualController:
                 "calls": self._penalty_calls,
                 "last_value": float(self._last_penalty.float().cpu().item()),
             }
+        if self.method == "gem_episodic" and self.task != "wiki":
+            if self.gem_projection_calls == 0:
+                raise RuntimeError("gem_episodic never recomputed an episodic-memory gradient")
+            self.audit["gem_episodic"] = {
+                "projection_calls": self.gem_projection_calls,
+                "violation_calls": self.gem_violation_calls,
+                "violation_fraction": self.gem_violation_calls / max(self.gem_projection_calls, 1),
+                "past_tasks": len(self.gem_memory_iterators),
+                "margin": float(self.args.continual_gem_margin),
+                "eps": float(self.args.continual_gem_eps),
+                "last_step_stats": self._gem_last_stats,
+            }
+            save_sidecar(
+                self._state_dir("gem_episodic"),
+                "gem_episodic",
+                self.task,
+                {
+                    "projection_calls": self.gem_projection_calls,
+                    "violation_calls": self.gem_violation_calls,
+                    "past_tasks": len(self.gem_memory_iterators),
+                },
+            )
         if self.method == "olora":
             self.audit["olora_adapter_norms"] = adapter_slot_norms(
                 self.model, self.layer_start, self.layer_end
@@ -410,6 +560,7 @@ class ContinualController:
                     "rank": int(self.args.continual_olora_rank),
                     "alpha": float(self.args.continual_olora_alpha),
                     "orth_lambda": float(self.args.continual_olora_orth_lambda),
+                    "l2_lambda": float(getattr(self.args, "continual_olora_l2_lambda", 0.0)),
                 },
             )
         self._write_audit("final.json")
@@ -427,6 +578,20 @@ def configure_continual_learning(model, args, training_model=None) -> bool:
 
 def continual_loss_penalty():
     return None if _CONTROLLER is None else _CONTROLLER.loss_penalty()
+
+
+def continual_attach_gem_episodic_context(forward_step_func, memory_iterators):
+    """Hand the episodic-memory iterators to the controller (gem_episodic only)."""
+    if _CONTROLLER is None:
+        return False
+    if _CONTROLLER.method != "gem_episodic":
+        return False
+    _CONTROLLER.attach_gem_episodic_context(forward_step_func, memory_iterators)
+    return True
+
+
+def continual_method_name():
+    return None if _CONTROLLER is None else _CONTROLLER.method
 
 
 def continual_before_optimizer_step(current_step: int):
