@@ -25,6 +25,11 @@ TRACE=/home/seonghyeonnoh/yemokoo/30_flame_agent/LLM-continual-learning/trace
 LLMCL=$TRACE/implementations/llmcl_benchmark
 PY=$TRACE/.venv-runtime/bin/python
 BASELINE=/data2/seonghyeonnoh/LLM-continual-learning-runs/trace/v3_replay1to1/v3_new_replay1to1_st_top1
+# argv source: the baseline run's train.command.txt if that run exists on this host,
+# otherwise the verbatim copy committed next to this script (same file, 2026-09-16).
+BASELINE_CMD=${BASELINE_CMD:-$BASELINE/train.command.txt}
+[ -f "$BASELINE_CMD" ] || BASELINE_CMD=$(dirname "${BASH_SOURCE[0]}")/baseline_train.command.txt
+[ -f "$BASELINE_CMD" ] || { echo "[ERROR] no baseline train.command.txt"; exit 2; }
 SWEEP_ROOT=${SWEEP_ROOT:-/data2/seonghyeonnoh/LLM-continual-learning-runs/trace/rank_sweep_20260916}
 NAME=ours_rep_r${RANK}; [ "$SMOKE" = 1 ] && NAME=${NAME}_smoke
 OUT=$SWEEP_ROOT/$NAME
@@ -36,7 +41,7 @@ say(){ printf '[RANK-SWEEP %s] %s\n' "$(date '+%F %T')" "$*" | tee -a "$SWEEP_RO
 # ---- build argv from the baseline command, overriding only what the sweep changes
 build_argv(){
   local ngpu=$1 micro=$2
-  $PY - "$BASELINE/train.command.txt" "$RANK" "$ALPHA" "$OUT" "$ngpu" "$micro" "${PORT:-29881}" "$SMOKE" <<'PYEOF'
+  $PY - "$BASELINE_CMD" "$RANK" "$ALPHA" "$OUT" "$ngpu" "$micro" "${PORT:-29881}" "$SMOKE" <<'PYEOF'
 import sys
 cmd, rank, alpha, out, ngpu, micro, port, smoke = sys.argv[1:]
 toks = open(cmd).read().split()
@@ -55,7 +60,7 @@ PYEOF
 
 if [ "$CHECK" = 1 ]; then
   echo "== argv diff vs Table-1 baseline (4 GPUs assumed) =="
-  diff <(tr ' ' '\n' < $BASELINE/train.command.txt | sed -n '/main_Ours_LoRA_MoE.py/,$p') \
+  diff <(tr ' ' '\n' < $BASELINE_CMD | sed -n '/main_Ours_LoRA_MoE.py/,$p') \
        <(build_argv 4 8 | tr ' ' '\n' | sed -n '/main_Ours_LoRA_MoE.py/,$p') || true
   exit 0
 fi
@@ -64,7 +69,7 @@ GPUS=${GPUS:?GPUS required, e.g. 0,1,2,3}
 NGPU=$(awk -F, '{print NF}' <<< "$GPUS")
 MICRO=$((GLOBAL_BATCH / NGPU))
 (( MICRO * NGPU == GLOBAL_BATCH )) || { echo "[ERROR] $NGPU GPUs cannot make global batch $GLOBAL_BATCH"; exit 2; }
-mkdir -p $OUT $SWEEP_ROOT
+mkdir -p $OUT $SWEEP_ROOT $OWN
 for g in ${GPUS//,/ }; do echo $$ > $OWN/$g; done
 release(){ for g in ${GPUS//,/ }; do [ "$(cat $OWN/$g 2>/dev/null)" = "$$" ] && rm -f $OWN/$g; done; }
 trap release EXIT
