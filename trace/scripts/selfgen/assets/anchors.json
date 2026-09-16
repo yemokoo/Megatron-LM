@@ -1,0 +1,34 @@
+{
+ "0": {
+  "task": "C-STANCE",
+  "anchor": "判断以下文本对指定对象的态度，选择一项：A.支持，B.反对，C.中立。输出A，B或者C。\n文本：\n"
+ },
+ "1": {
+  "task": "FOMC",
+  "anchor": "What is the monetary policy stance for the following text? A. dovish, B. hawkish, C. neutral. Choose one from A, B and C.\nText:\n"
+ },
+ "2": {
+  "task": "MeetingBank",
+  "anchor": "Write a summary of the following meeting transcripts.\nMeeting transcripts:\n"
+ },
+ "3": {
+  "task": "Py150",
+  "anchor": "<s> "
+ },
+ "4": {
+  "task": "ScienceQA",
+  "anchor": "Choose an answer for the following question and give your reasons.\n\nQuestion:\n"
+ },
+ "5": {
+  "task": "NumGLUE-cm",
+  "anchor": "Solve the following math problem.\nQuestion:\n"
+ },
+ "6": {
+  "task": "NumGLUE-ds",
+  "anchor": "Solve the following math problem.\nQuestion:\n"
+ },
+ "7": {
+  "task": "20Minuten",
+  "anchor": "Provide a simplified version of the following paragraph in German.\n\nParagraph:\n"
+ }
+}

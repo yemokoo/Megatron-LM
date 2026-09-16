@@ -26,6 +26,9 @@ PY=$TRACE/.venv-runtime/bin/python
 BASE=/data2/seonghyeonnoh/LLM-continual-learning-models/Llama-3.1-8B-Instruct
 DATA=/data2/seonghyeonnoh/LLM-continual-learning-data/flamedata2.data2-verified-backup/trace
 SG=/data2/seonghyeonnoh/LLM-continual-learning-runs/trace/selfgen_v3_20260829
+# anchor assets (anchors.json, anchor_hist_{cm,ds,py150}.json): fall back to the copy
+# committed in scripts/selfgen/assets when the 08-29 probe run is not on this host
+[ -f "$SG/anchors.json" ] || SG="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/assets"
 RUN=${RUN:-/data2/seonghyeonnoh/LLM-continual-learning-runs/trace/selfgen_cl_fix2_20260901}
 OUT=$RUN/model; GEN=$RUN/gen; LOG=$RUN/logs
 mkdir -p "$OUT" "$GEN" "$LOG"
