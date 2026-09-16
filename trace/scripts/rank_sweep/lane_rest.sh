@@ -15,6 +15,7 @@ for st in $STEPS; do
   export TAB1_LIFELONG_KD=1.5 TAB1_LIFELONG_SHARED=attn TAB1_LIFELONG_TRAIN_SHARED=1   # Table-1 Lifelong-MoE values
   say "step $i: $m r$r"
   if [ "$m" = slora ]; then RANK=$r GPUS=$GPUS PORT=$((PORT_BASE+i)) MICRO=$micro bash $D/run_slora_rank.sh || say "$m r$r failed; continuing"
+  elif [ "$m" = ewc_lamfix ]; then METHOD=ewc RANK=$r GPUS=$GPUS PORT=$((PORT_BASE+i)) MICRO=$micro NAME_SUFFIX=_lamfix bash $D/run_tab1_rank.sh || say "$m r$r failed; continuing"
   else METHOD=$m RANK=$r GPUS=$GPUS PORT=$((PORT_BASE+i)) MICRO=$micro bash $D/run_tab1_rank.sh || say "$m r$r failed; continuing"; fi
 done
 say "lane done"
