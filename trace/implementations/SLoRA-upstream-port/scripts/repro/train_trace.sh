@@ -111,7 +111,7 @@ for index in "${!TASKS[@]}"; do
     --bf16 True
     --use_peft True
     --lora_r "${SLORA_LORA_R:-64}"
-    --lora_alpha 128
+    --lora_alpha "${SLORA_LORA_ALPHA:-128}"
     --deepspeed "${ROOT}/scripts/zero2.json"
     --model_name_or_path "${MODEL_PATH}"
     --model "${MODEL_FAMILY}"
