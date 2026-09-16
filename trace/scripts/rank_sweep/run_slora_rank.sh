@@ -2,7 +2,7 @@
 # S-LoRA-Pre LoRA-rank (DoF) sweep on TRACE, fixed merge scaling (builder.py 2026-09-14),
 # alpha = 2r (same ratio as the r64 Table-1 run and as the Ours sweep).
 # Recipe = tab1_slora_r64_scalefix: lr 2e-4, global batch 64, seed 2025, epochs 5,3,7,5,3,5,5,7.
-#   usage: RANK=16 GPUS=0,1,2,3 bash run_slora_rank.sh          # train (orders 1-8) + sparse-15 eval + lm-eval
+#   usage: RANK=16 GPUS=0,1,2,3 bash run_slora_rank.sh          # train (orders 1-8) + sparse-15 eval (TRACE only, no general benchmarks)
 #          RANK=256 GPUS=4,5,6,7 MICRO=8 bash run_slora_rank.sh # micro 8 x 4 x accum 2 = 64 (memory)
 #   GPU count must divide 64 with micro in {8,16}: 2 -> 16x2x2, 4 -> 16x4x1 (or 8x4x2), 8 -> 8x8x1.
 set -uo pipefail
@@ -39,9 +39,4 @@ for g in "${G[@]}"; do
 done
 erc=0; for p in "${pids[@]}"; do wait $p || erc=1; done
 say "$NAME eval exit=$erc"
-export HF_HOME=/data2/seonghyeonnoh/huggingface HF_DATASETS_CACHE=/data2/seonghyeonnoh/LLM-continual-learning-data/lmeval_datasets HF_DATASETS_OFFLINE=1 HF_DATASETS_TRUST_REMOTE_CODE=1 TOKENIZERS_PARALLELISM=false SLORA_MERGE=fixed
-CUDA_VISIBLE_DEVICES=${G[0]} $W/../lmeval-venv/bin/python $W/run_lmeval_trace.py --ckpt $PRE --out $W/tab1_mmlu/$NAME --tasks mmlu --batch_size 16 > $W/tab1_mmlu/$NAME.log 2>&1 &
-p1=$!
-CUDA_VISIBLE_DEVICES=${G[1]} $W/../lmeval-venv/bin/python $W/run_lmeval_trace.py --ckpt $PRE --out $W/tab1_gsm8k_piqa/$NAME --tasks gsm8k,piqa --batch_size 16 > $W/tab1_gsm8k_piqa/$NAME.log 2>&1 &
-wait $p1 $!
-say "$NAME lm-eval done: $(grep -m1 '^|mmlu ' $W/tab1_mmlu/$NAME.log | tr -s ' ') $(grep -E '^\|(gsm8k|piqa) ' $W/tab1_gsm8k_piqa/$NAME.log | tr -s ' ' | tr '\n' ' ')"
+# general benchmarks (MMLU/GSM8K/PIQA) intentionally NOT run for the rank sweep -- TRACE only

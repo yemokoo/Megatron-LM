@@ -2,7 +2,7 @@
 # Table-1 baseline (ewc | seq_lora | olora ...) LoRA-rank sweep on TRACE, alpha = 2r.
 # Same recipe as tab1_fixed_20260913 (lr 2e-4, global 64, seed 2025, all7 targets,
 # EWC lambda 400 online / fisher 1000): only TAB1_RANK/TAB1_ALPHA/output change.
-#   usage: METHOD=ewc RANK=16 GPUS=0,1,2,3 bash run_tab1_rank.sh   # train -> sparse-15 -> lm-eval
+#   usage: METHOD=ewc RANK=16 GPUS=0,1,2,3 bash run_tab1_rank.sh   # train -> sparse-15 eval (TRACE only, no general benchmarks)
 set -uo pipefail
 METHOD=${METHOD:?ewc|seq_lora|olora}; RANK=${RANK:?}; ALPHA=${ALPHA:-$((RANK*2))}; GPUS=${GPUS:?}
 ROOT=/home/seonghyeonnoh/yemokoo/30_flame_agent/LLM-continual-learning/trace
@@ -29,9 +29,4 @@ fi
 say "$NAME eval start"
 ( cd $ROOT && $PY scripts/run_tab1_sparse15.py --evaluator evaluate_tab1.py --method $NAME --run-dir $RUN --gpus $GPUS --py150-batch 8 --meetingbank-batch 1 ) > $SWEEP/logs/$NAME.eval.log 2>&1
 say "$NAME eval exit=$? $( $PY -c "import json;d=json.load(open('$RUN/sparse15_summary.json'));print('AA %.2f F %.2f'%(d['final_average'],-d['BWT']))" 2>/dev/null )"
-export HF_HOME=/data2/seonghyeonnoh/huggingface HF_DATASETS_CACHE=/data2/seonghyeonnoh/LLM-continual-learning-data/lmeval_datasets HF_DATASETS_OFFLINE=1 HF_DATASETS_TRUST_REMOTE_CODE=1 TOKENIZERS_PARALLELISM=false
-CUDA_VISIBLE_DEVICES=${G[0]} $W/../lmeval-venv/bin/python $W/run_lmeval_trace.py --ckpt $RUN/7 --out $W/tab1_mmlu/$NAME --tasks mmlu --batch_size 16 > $W/tab1_mmlu/$NAME.log 2>&1 &
-p1=$!
-CUDA_VISIBLE_DEVICES=${G[1]} $W/../lmeval-venv/bin/python $W/run_lmeval_trace.py --ckpt $RUN/7 --out $W/tab1_gsm8k_piqa/$NAME --tasks gsm8k,piqa --batch_size 16 > $W/tab1_gsm8k_piqa/$NAME.log 2>&1 &
-wait $p1 $!
-say "$NAME lm-eval done: $(grep -m1 '^|mmlu ' $W/tab1_mmlu/$NAME.log | tr -s ' ') $(grep -E '^\|(gsm8k|piqa) ' $W/tab1_gsm8k_piqa/$NAME.log | tr -s ' ' | tr '\n' ' ')"
+# general benchmarks (MMLU/GSM8K/PIQA) intentionally NOT run for the rank sweep -- TRACE only
