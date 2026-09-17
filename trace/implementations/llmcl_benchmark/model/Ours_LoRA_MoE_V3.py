@@ -46,6 +46,11 @@ V3_NEW_TRAINING_VERSIONS = frozenset({
     "v3_new_kd200", "v3_new_recency_p2", "v3_new_hmse_kd200"})
 V3_META_NAME = "lora_moe_meta.json"
 ATTENTION_TARGETS = ("q", "k", "v", "o")
+# Round-directory suffix for the 2-phase arm's pre-router-retune checkpoint.
+# Acquisition (diagonal) cells are scored here so plasticity is measured
+# before the router correction; the plain round directory stays the model the
+# next task continues from.
+PREPHASE2_SUFFIX = "_prephase2"
 
 
 @dataclass
@@ -1021,14 +1026,25 @@ class Ours_LoRA_MoE_V3(Ours_LoRA_MoE_V2):
             old_expert_count, old_expert_count + args.experts_per_task))
 
         primary_loader = self.train_task_list[task]
+        # KD-off means the expansion KD-init step does not happen at all: no
+        # KD stream is even built, so there are no KD forwards, no KD
+        # optimizer updates, and no kd_init role in training_workload.json.
+        kd_init_enabled = getattr(args, "ablation_kd_init", "on") == "on"
+        if not kd_init_enabled and old_expert_count > 0:
+            print_rank_0(
+                f"{task} [ablation] kd_init=off: skipping the expansion "
+                "KD-init step; new experts start from their random init",
+                args.global_rank)
         if args.training_version in V3_NEW_TRAINING_VERSIONS:
-            kd_loader = self._build_v2_kd_loader(
-                i_task, primary_loader, epochs)
+            kd_loader = (
+                self._build_v2_kd_loader(i_task, primary_loader, epochs)
+                if kd_init_enabled else None)
             replay_loader = self._build_v2_replay_loader(
                 i_task, primary_loader, epochs)
             kd_epochs = self._v2_kd_epochs(epochs)
         else:
-            kd_loader = self._build_v2_memory_loader(i_task, role="kd")
+            kd_loader = (self._build_v2_memory_loader(i_task, role="kd")
+                         if kd_init_enabled else None)
             replay_loader = self._build_v2_memory_loader(
                 i_task, role="replay")
             kd_epochs = 1
@@ -1039,6 +1055,13 @@ class Ours_LoRA_MoE_V3(Ours_LoRA_MoE_V2):
             self._run_v2_kd_init(
                 kd_loader, old_expert_count, new_indices, device, task,
                 kd_epochs=kd_epochs)
+
+        if getattr(args, "ablation_phase_mode", "1phase") == "2phase":
+            self._run_v3_two_phase_task(
+                task, i_task, epochs, device, primary_loader, replay_loader,
+                old_expert_count, new_indices)
+            self._finalize_gradient_replay_memory(task)
+            return
 
         hidden_mse_teacher = None
         if (replay_loader is not None
@@ -1080,8 +1103,9 @@ class Ours_LoRA_MoE_V3(Ours_LoRA_MoE_V2):
 
     def _run_v3_primary_epochs(
             self, dataloader, epochs, device, phase_name,
-            task=None, i_task=None):
+            task=None, i_task=None, frozen_router_prefix=None):
         args = self.args
+        prefix_count, prefix_rows = frozen_router_prefix or (0, None)
         total_steps = epochs * len(dataloader)
         progress = tqdm(
             total=total_steps, leave=True, disable=args.global_rank != 0)
@@ -1128,17 +1152,186 @@ class Ours_LoRA_MoE_V3(Ours_LoRA_MoE_V2):
                             f"loss={loss.detach().float().item():.4f}",
                             refresh=False)
                 if should_step:
+                    if prefix_rows is not None:
+                        self._freeze_old_router_row_update(
+                            self.raw_model, prefix_rows, prefix_count)
                     trainable = [parameter for parameter in
                                  self.raw_model.parameters()
                                  if parameter.requires_grad]
                     torch.nn.utils.clip_grad_norm_(trainable, 1.0)
                     self.optimizer.step()
+                    if prefix_rows is not None:
+                        self._freeze_old_router_row_update(
+                            self.raw_model, prefix_rows, prefix_count)
                     self.lr_scheduler.step()
                     self.optimizer.zero_grad(set_to_none=True)
                     self._count_workload_update()
             if task is not None and i_task is not None:
                 self._run_epoch_probe(task, i_task, epoch, device)
         progress.close()
+
+    def _run_v3_two_phase_task(
+            self, task, i_task, epochs, device, primary_loader, replay_loader,
+            old_expert_count, new_indices):
+        """Ablation arm: learn the task, then retune the router separately.
+
+        Phase 1 trains only the freshly added experts and their single new
+        router row -- every previously learned row is held bit-identical, so
+        the checkpoint saved between the phases measures plasticity with no
+        router correction yet.  Phase 2 freezes all experts and retunes the
+        whole router on the same replay stream the 1-phase arm interleaves
+        (one pass per primary epoch), so the two arms differ in *when* the
+        replay gradient lands, not in how much replay they see.
+        """
+        args = self.args
+        if self._joint_replay_objective() != "lm":
+            raise ValueError(
+                "the 2-phase ablation arm supports only the lm replay "
+                f"objective, got {self._joint_replay_objective()!r}")
+        if getattr(args, "ablation_phase2_memory", "past_only") != "past_only":
+            raise NotImplementedError(
+                "only past_only phase-2 memory is implemented; "
+                "include_current would change the replay set the 1-phase arm "
+                "sees and is therefore not a clean phase-mode ablation")
+        old_router_rows = (
+            self._snapshot_old_router_rows(self.raw_model, old_expert_count)
+            if old_expert_count > 0 else None)
+
+        self._set_phase_gradient_accumulation(
+            args.batch_by_task[task], f"{task} v3 phase1")
+        self._set_grad_ckpt(
+            replay_loader is not None
+            or task in getattr(args, "ckpt_tasks", set()))
+        freeze_v3_experts(self.raw_model, new_indices)
+        freeze_v3_routers(self.raw_model, True)
+        self._reinit_engine(self._optimizer_update_count(
+            primary_loader, epochs))
+        self._run_v3_primary_epochs(
+            primary_loader, epochs, device,
+            f"{task} [v3 phase1 new-expert+new-router-row]",
+            task=task, i_task=i_task,
+            frozen_router_prefix=(
+                (old_expert_count, old_router_rows)
+                if old_router_rows is not None else None))
+        self.save_model(f"{i_task}{PREPHASE2_SUFFIX}")
+
+        self._phase2_router_updates = 0
+        if replay_loader is None:
+            print_rank_0(
+                f"{task} [v3 phase2] skipped: no prior replay memory",
+                args.global_rank)
+            return
+        self._set_grad_ckpt(True)
+        freeze_v3_experts(self.raw_model, None)
+        freeze_v3_routers(self.raw_model, True)
+        self._set_phase_gradient_accumulation(
+            getattr(replay_loader, "batch_size", 1) or 1,
+            f"{task} v3 phase2 router retune")
+        self._reinit_engine(self._optimizer_update_count(
+            replay_loader, epochs))
+        self._run_v3_router_retune_epochs(
+            replay_loader, epochs, device,
+            f"{task} [v3 phase2 router-only retune]")
+
+    def _run_v3_router_retune_epochs(
+            self, memory_loader, epochs, device, phase_name):
+        """Router-only replay phase: every router row trains, experts frozen.
+
+        The replay forward goes through the DDP wrapper (unlike the 1-phase
+        joint branch, which relies on the paired new-task backward to
+        synchronize gradients), so each optimizer update averages the loss
+        over exactly the records assigned to it across ranks.
+        """
+        args = self.args
+        if getattr(memory_loader, "batch_size", 1) != 1:
+            raise ValueError(
+                "router retune expects a batch-size-one replay loader, got "
+                f"{getattr(memory_loader, 'batch_size', None)}")
+        accum = max(1, args.gradient_accumulation_steps)
+        forward_batch = max(1, int(
+            getattr(args, "v2_replay_forward_batch_size", 1) or 1))
+        coefficient = float(args.v2_joint_replay_loss_coeff)
+        expected_updates = self._optimizer_update_count(memory_loader, epochs)
+        is_v3_new = getattr(
+            args, "training_version", "v3") in V3_NEW_TRAINING_VERSIONS
+        progress = tqdm(
+            total=epochs * len(memory_loader), leave=True,
+            disable=args.global_rank != 0)
+        self.optimizer.zero_grad(set_to_none=True)
+        completed_updates = 0
+        consumed_local_samples = 0
+        self.model.train()
+        for epoch in range(epochs):
+            if is_v3_new:
+                self._set_v2_replay_memory_sampler_pass(memory_loader, epoch)
+            elif hasattr(getattr(memory_loader, "sampler", None), "set_epoch"):
+                memory_loader.sampler.set_epoch(0)
+            window = []
+            steps = len(memory_loader)
+            for step, source_batch in enumerate(memory_loader):
+                window.append(source_batch)
+                if len(window) < accum and step + 1 < steps:
+                    continue
+                local_count = len(window)
+                chunks = [window[start:start + forward_batch]
+                          for start in range(0, local_count, forward_batch)]
+                for chunk_index, chunk in enumerate(chunks):
+                    is_last_chunk = chunk_index + 1 == len(chunks)
+                    merged = self._merge_replay_batches(chunk)
+                    self._count_workload_batch(
+                        "router_replay_phase2", merged)
+                    batch = dict(merged)
+                    batch.pop("sources", None)
+                    batch = to_device(batch, device)
+                    labels = batch.pop("labels")
+                    sync = (
+                        self.model.no_sync()
+                        if isinstance(self.model, DDP) and not is_last_chunk
+                        else nullcontext())
+                    with sync, self._suppress_replay_router_losses():
+                        set_v3_router_token_mask(
+                            self.raw_model, batch.get("attention_mask"))
+                        try:
+                            outputs = self.model(**batch, use_cache=False)
+                            sample_losses = self._per_sample_causal_lm_losses(
+                                outputs.logits, labels)
+                            loss = (coefficient * sample_losses.sum()
+                                    / local_count)
+                            loss.backward()
+                        finally:
+                            set_v3_router_token_mask(self.raw_model, None)
+                consumed_local_samples += local_count
+                trainable = [parameter for parameter in
+                             self.raw_model.parameters()
+                             if parameter.requires_grad]
+                torch.nn.utils.clip_grad_norm_(trainable, 1.0)
+                self.optimizer.step()
+                self.lr_scheduler.step()
+                self.optimizer.zero_grad(set_to_none=True)
+                self._count_workload_update()
+                completed_updates += 1
+                if args.global_rank == 0:
+                    progress.update(local_count)
+                    progress.set_description(
+                        f"{phase_name} e{epoch + 1} u{completed_updates} "
+                        f"loss={loss.detach().float().item():.4f}",
+                        refresh=False)
+                window = []
+        progress.close()
+        expected_local_samples = epochs * len(memory_loader)
+        if consumed_local_samples != expected_local_samples:
+            raise RuntimeError(
+                "V3 phase-2 replay exposure mismatch: "
+                f"{consumed_local_samples}/{expected_local_samples}")
+        if completed_updates != expected_updates:
+            raise RuntimeError(
+                "V3 phase-2 optimizer updates "
+                f"{completed_updates}/{expected_updates}")
+        self._phase2_router_updates = completed_updates
+        print_rank_0(
+            f"{phase_name} complete: {consumed_local_samples} local replay "
+            f"exposures over {completed_updates} router-only updates",
+            args.global_rank)
 
     def _run_v2_kd_init(self, dataloader, old_expert_count, new_indices,
                         device, task, kd_epochs=1):
@@ -1652,6 +1845,21 @@ def save_v3_meta(model, output_dir, args, trainer=None):
         "num_experts": layer.num_experts,
         "experts_per_task": args.experts_per_task,
         "router_position": "post_input_layernorm_pre_self_attention",
+        "ablation": {
+            "phase_mode": getattr(args, "ablation_phase_mode", "1phase"),
+            "kd_init": getattr(args, "ablation_kd_init", "on"),
+            "replay_source": getattr(args, "ablation_replay_source", "real"),
+            "phase2_memory": getattr(
+                args, "ablation_phase2_memory", "past_only"),
+            "selfgen_root": os.environ.get("SELFGEN_ROOT") or None,
+            "prephase2_checkpoint_suffix": (
+                PREPHASE2_SUFFIX
+                if getattr(args, "ablation_phase_mode", "1phase") == "2phase"
+                else None),
+            "phase2_router_updates": (
+                getattr(trainer, "_phase2_router_updates", None)
+                if trainer is not None else None),
+        },
         "training_profile": {
             "format": args.train_format,
             "chat_template_source": getattr(

@@ -226,6 +226,34 @@ def parse_args():
                              'v3_new_top4: the same V3-new architecture and '
                              'schedule with four rank-16 experts per task and '
                              'normalized top-4 dispatch.')
+    # --- ablation switches (V3 only; defaults reproduce the published arm) ---
+    parser.add_argument(
+        '--ablation_phase_mode', choices=['1phase', '2phase'],
+        default='1phase',
+        help='1phase: new-task LM and router replay share every optimizer '
+             'update (published Ours). 2phase: train the new expert plus its '
+             'single new router row, checkpoint, then retune the whole router '
+             'on the same replay stream. Both arms see the same replay '
+             'exposures; only the timing differs.')
+    parser.add_argument(
+        '--ablation_kd_init', choices=['on', 'off'], default='on',
+        help='on: run the expansion KD-init pass before each task (published '
+             'Ours). off: skip it, so the new expert starts from its random '
+             'init. Recorded in the checkpoint meta and provable from the '
+             'absence of the kd_init role in training_workload.json.')
+    parser.add_argument(
+        '--ablation_replay_source', choices=['real', 'selfgen'],
+        default='real',
+        help='Declares which replay memory this run is supposed to use. '
+             'real refuses to start when SELFGEN_ROOT is set, selfgen refuses '
+             'to start unless scripts/selfgen/train_selfgen.py has patched '
+             'the replay source -- the failure mode this guards is a selfgen '
+             'arm silently training on real data.')
+    parser.add_argument(
+        '--ablation_phase2_memory', choices=['past_only', 'include_current'],
+        default='past_only',
+        help='2phase only. past_only keeps the phase-2 replay set identical '
+             'to what the 1-phase arm replays (strictly past tasks).')
     parser.add_argument('--experts_per_task', type=int, default=4,
                         help='New FFN LoRA experts added per task; V3 adds the '
                              'same number of QKVO experts at the same time.')
@@ -421,6 +449,67 @@ def resolve_training_version_defaults(args):
     # scalar command-seed change alone does not replace or reject those files.
     if uses_v2_new and args.replay_subset_seed < 0:
         args.replay_subset_seed = args.seed
+    validate_ablation_switches(args)
+    return args
+
+
+def ablation_contract(args):
+    """The ablation switches a resumed chain must not silently change."""
+    return {
+        "phase_mode": getattr(args, "ablation_phase_mode", "1phase"),
+        "kd_init": getattr(args, "ablation_kd_init", "on"),
+        "replay_source": getattr(args, "ablation_replay_source", "real"),
+        "phase2_memory": getattr(
+            args, "ablation_phase2_memory", "past_only"),
+    }
+
+
+def validate_ablation_switches(args):
+    """Refuse configurations where an ablation switch would not do what it says.
+
+    Every check here exists because the corresponding mistake is silent: a
+    selfgen arm that trains on real data, a 2-phase flag on an architecture
+    that has no phase-2 path, or hidden-MSE replay whose teacher the KD-off
+    arm never builds.
+    """
+    phase_mode = getattr(args, "ablation_phase_mode", "1phase")
+    replay_source = getattr(args, "ablation_replay_source", "real")
+    kd_init = getattr(args, "ablation_kd_init", "on")
+    selfgen_root = os.environ.get("SELFGEN_ROOT", "").strip()
+    if phase_mode == "2phase":
+        if args.training_version not in V3_TRAINING_VERSIONS:
+            raise ValueError(
+                "--ablation_phase_mode 2phase is implemented for V3 training "
+                f"versions only, got {args.training_version!r}")
+        if args.v2_joint_replay_objective != "lm":
+            raise ValueError(
+                "--ablation_phase_mode 2phase requires "
+                "--v2_joint_replay_objective lm, got "
+                f"{args.v2_joint_replay_objective!r}")
+    if replay_source == "selfgen" and not selfgen_root:
+        raise ValueError(
+            "--ablation_replay_source selfgen requires SELFGEN_ROOT and the "
+            "scripts/selfgen/train_selfgen.py entry point; without them the "
+            "run would train on the real replay memory instead")
+    if replay_source == "real" and selfgen_root:
+        raise ValueError(
+            "--ablation_replay_source real refuses to run with SELFGEN_ROOT "
+            f"set ({selfgen_root!r}); pass --ablation_replay_source selfgen "
+            "or unset the variable")
+    if kd_init == "off" and args.v2_joint_replay_objective == "hidden_mse":
+        raise ValueError(
+            "hidden-MSE replay snapshots its teacher right after KD-init, so "
+            "--ablation_kd_init off cannot be combined with it")
+    if kd_init == "off" and args.v2_kd_loss_coeff != 0:
+        # One source of truth: the V2-new sampler-pass validator asserts that
+        # KD consumed its passes whenever the coefficient is positive, so an
+        # arm that skips KD-init must also carry coefficient 0. Forcing it
+        # here keeps the flag, the loss contract, and the saved metadata from
+        # telling three different stories.
+        print(
+            "[ablation] kd_init=off -> forcing --v2_kd_loss_coeff "
+            f"{args.v2_kd_loss_coeff} -> 0", flush=True)
+        args.v2_kd_loss_coeff = 0.0
     return args
 
 
@@ -1107,6 +1196,14 @@ def main():
         actual_replay = actual.get("replay_memory", {})
         mismatches.update(metadata_contract_mismatches(
             expected_replay, actual_replay, "replay_memory"))
+        actual_ablation = actual.get("ablation")
+        if args.training_version in V3_TRAINING_VERSIONS and actual_ablation:
+            # A chained arm (selfgen rounds resume one task at a time) must
+            # keep every ablation switch fixed for the whole run. Checkpoints
+            # written before the switches existed carry no block and are
+            # resumed under the defaults they were trained with.
+            mismatches.update(metadata_contract_mismatches(
+                ablation_contract(args), actual_ablation, "ablation"))
         if args.training_version in (
                 "v1_expert_first", "v2", "v2_new", "v2_new_top4",
                 "v2_5", "v3", "v3_new", "v3_new_top4"):

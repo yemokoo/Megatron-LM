@@ -221,6 +221,21 @@ def make_jobs(
     return jobs, complete_cells
 
 
+def checkpoint_dir_for(
+    cell: Cell, run_dir: Path, diagonal_suffix: str = "") -> Path:
+    """Resolve the checkpoint a cell is scored from.
+
+    The plain round directory is the model the next task continued from. The
+    2-phase ablation arm also writes a pre-router-retune checkpoint per round;
+    scoring the diagonal (acquisition) cells there measures plasticity before
+    the router correction, while the final row stays on the continued model.
+    """
+    name = str(cell.round_id - 1)
+    if diagonal_suffix and TASKS.index(cell.task) == cell.round_id - 1:
+        name += diagonal_suffix
+    return run_dir / name
+
+
 def build_eval_command(
     job: Job,
     run_dir: Path,
@@ -230,10 +245,12 @@ def build_eval_command(
     batch: int,
     python: Path,
     trace_generation_stops: bool = False,
+    diagonal_suffix: str = "",
 ) -> list[str]:
     command = [
         str(python), "-u", "evaluate_Ours_LoRA_MoE.py",
-        "--checkpoint_dir", str(run_dir / str(job.cell.round_id - 1)),
+        "--checkpoint_dir", str(
+            checkpoint_dir_for(job.cell, run_dir, diagonal_suffix)),
         "--base_model_name_or_path", str(model_path),
         "--data_path", str(data_root),
         "--inference_tasks", job.cell.task,
@@ -470,6 +487,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--status-file", default=None,
         help="Default RUN_DIR/evaluation/optimized_status.tsv.")
+    parser.add_argument(
+        "--diagonal-checkpoint-suffix",
+        default=os.environ.get("SPARSE15_DIAGONAL_CKPT_SUFFIX", ""),
+        help="Score diagonal (acquisition) cells from "
+             "RUN_DIR/<round><suffix> instead of RUN_DIR/<round>. Use "
+             "_prephase2 for the 2-phase ablation arm.")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--no-collect", action="store_true")
     parser.add_argument(
@@ -553,13 +576,16 @@ def main() -> int:
             command = build_eval_command(
                 job, run_dir, model_path, data_root, output_dir,
                 task_batch(job.cell.task, args), python,
-                args.trace_generation_stops)
+                args.trace_generation_stops,
+                args.diagonal_checkpoint_suffix)
             print(f"[DRY-RUN] {job.label}: {shlex.join(command)}", flush=True)
         print(f"[DRY-RUN] {len(jobs)} GPU jobs", flush=True)
         return 0
 
-    for round_id in {cell.round_id for cell in cells}:
-        checkpoint = run_dir / str(round_id - 1) / "lora_moe_meta.json"
+    for cell in cells:
+        checkpoint = (
+            checkpoint_dir_for(cell, run_dir, args.diagonal_checkpoint_suffix)
+            / "lora_moe_meta.json")
         if not checkpoint.is_file():
             raise SystemExit(f"missing checkpoint metadata: {checkpoint}")
 
@@ -620,7 +646,8 @@ def main() -> int:
                 command = build_eval_command(
                     job, run_dir, model_path, data_root, output_dir,
                     task_batch(job.cell.task, args), python,
-                    args.trace_generation_stops)
+                    args.trace_generation_stops,
+                    args.diagonal_checkpoint_suffix)
                 env = os.environ.copy()
                 env.update(common_env)
                 env["CUDA_VISIBLE_DEVICES"] = str(gpu)
