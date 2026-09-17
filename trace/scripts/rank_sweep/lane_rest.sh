@@ -12,6 +12,11 @@ i=0
 for st in $STEPS; do
   m=${st%%:*}; r=${st##*:}; i=$((i+1))
   micro=$([ "$r" -ge 256 ] && echo 8 || echo 16)
+  # Table-1 Lifelong-MoE = tab3_lifelong_kd1.5: method lifelong_moe (FFN experts + shared
+  # attn LoRA, KD 1.5, micro 8 -- mb16 OOMs). lifelong_moe_attn (experts on all 7
+  # projections) has no free projection for the shared path and is refused by _run_tab1.sh.
+  [ "$m" = lifelong_moe_attn ] && m=lifelong_moe
+  [ "$m" = lifelong_moe ] && micro=8
   export TAB1_LIFELONG_KD=1.5 TAB1_LIFELONG_SHARED=attn TAB1_LIFELONG_TRAIN_SHARED=1   # Table-1 Lifelong-MoE values
   say "step $i: $m r$r"
   if [ "$m" = slora ]; then RANK=$r GPUS=$GPUS PORT=$((PORT_BASE+i)) MICRO=$micro bash $D/run_slora_rank.sh || say "$m r$r failed; continuing"
