@@ -39,6 +39,7 @@ TASKS = [
     "C-STANCE", "FOMC", "MeetingBank", "Py150",
     "ScienceQA", "NumGLUE-cm", "NumGLUE-ds", "20Minuten",
 ]
+CANONICAL_TASKS = list(TASKS)
 DEFAULT_SHARDED_TASKS = {"MeetingBank", "Py150", "ScienceQA"}
 PROGRESS_RE = re.compile(
     r"(?P<pct>\d{1,3})%\|[^\r\n]*?\|\s*(?P<done>\d+)/(?P<total>\d+)")
@@ -493,6 +494,15 @@ def parse_args() -> argparse.Namespace:
         help="Score diagonal (acquisition) cells from "
              "RUN_DIR/<round><suffix> instead of RUN_DIR/<round>. Use "
              "_prephase2 for the 2-phase ablation arm.")
+    parser.add_argument(
+        "--task-order",
+        default=os.environ.get("SPARSE15_TASK_ORDER", ""),
+        help=("Comma-separated training order, when the run did not use the "
+              "canonical TRACE sequence (e.g. the reversed-order HP "
+              "sensitivity cell).  Round r's diagonal cell and the checkpoint "
+              "index both follow this order.  Must be a permutation of the "
+              "eight TRACE tasks."),
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--no-collect", action="store_true")
     parser.add_argument(
@@ -505,8 +515,23 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def set_task_order(order: list) -> None:
+    """Re-point the module-level TASKS at a different training order.
+
+    Every cell/checkpoint/score helper reads the module global, so mutating it
+    in place is enough; replacing the binding would leave stale references.
+    """
+    if sorted(order) != sorted(CANONICAL_TASKS):
+        raise SystemExit(
+            f"--task-order must be a permutation of {CANONICAL_TASKS}, got {order}")
+    TASKS[:] = order
+
+
 def main() -> int:
     args = parse_args()
+    if args.task_order:
+        set_task_order([item.strip() for item in args.task_order.split(",") if item.strip()])
+        print(f"[sparse15] task order: {' -> '.join(TASKS)}", flush=True)
     if not args.run_dir:
         raise SystemExit("--run-dir or OURS_LORAMOE_OUTPUT_ROOT is required")
     if not args.method:

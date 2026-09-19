@@ -37,6 +37,86 @@ from utils.utils import print_rank_0, to_device
 
 
 V3_ARCHITECTURE = "shared_router_qkvo_ffn"
+
+# ---------------------------------------------------------------------------
+# Expert dispatch mode.
+#
+# "loop" (default, unchanged): one gather + two small GEMMs + one scatter per
+# expert that any token in the batch selected.  Per-token FLOPs are exactly
+# top-k experts -- a token never pays for an expert it did not select -- but
+# the loop length is the batch-wide UNION of selected experts, so with k = 8
+# over 64 experts it runs ~64 times per projection (7 projections x 32 layers
+# = ~14k tiny kernels per forward).  That is launch-bound overhead, not extra
+# arithmetic.
+#
+# "dense": stack every expert's LoRA pair and evaluate them as two big GEMMs
+# in rank space, zeroing the unselected experts' rank blocks with the routing
+# weights.  Kernel count stops depending on the expert count.  It does pay
+# arithmetic for unselected experts: the rank-space width is
+# num_experts * r, which for this study is 8 tasks x (E * rank = 64) = 512 at
+# round 7 for EVERY cell -- i.e. ~25% on top of a 4096-wide projection, the
+# same cost whether E is 1 or 8.
+#
+# Numerically the two agree up to floating-point summation order, with one
+# deliberate difference: "loop" draws an independent LoRA-input dropout mask
+# per (expert, token) while "dense" draws one per token and shares it across
+# that token's k experts.  For k = 1 (the rank-64 baseline) the two are the
+# same draw; for k > 1 it is the difference between k independent masks and
+# one shared mask on the same input.  With --lora_moe_dropout 0 they are
+# equivalent up to summation order; scripts/hp_sensitivity/check_dispatch_equivalence.py
+# asserts that.
+EXPERT_DISPATCH_DEFAULT = os.environ.get("V3_EXPERT_DISPATCH", "loop")
+EXPERT_DISPATCH_MODES = ("loop", "dense")
+if EXPERT_DISPATCH_DEFAULT not in EXPERT_DISPATCH_MODES:
+    raise ValueError(
+        f"V3_EXPERT_DISPATCH must be one of {EXPERT_DISPATCH_MODES}, "
+        f"got {EXPERT_DISPATCH_DEFAULT!r}")
+
+
+def expert_dispatch_mode():
+    return EXPERT_DISPATCH_DEFAULT
+
+
+def set_expert_dispatch_mode(mode):
+    """Process-wide switch; used by the equivalence check and the runners."""
+    global EXPERT_DISPATCH_DEFAULT
+    if mode not in EXPERT_DISPATCH_MODES:
+        raise ValueError(f"unknown dispatch mode {mode!r}")
+    EXPERT_DISPATCH_DEFAULT = mode
+
+
+def routing_weight_matrix(context, num_experts, dtype):
+    """Dense [tokens, num_experts] routing weights (0 where not selected).
+
+    Residual rows (ids >= num_experts) and padded tokens are dropped, exactly
+    as ``active_expert_ids``/``routes_for`` drop them in the loop path.
+    """
+    indices = context.expert_indices
+    weights = context.expert_weights.to(dtype)
+    keep = indices < num_experts
+    if context.valid_token_mask is not None:
+        keep = keep & context.valid_token_mask.reshape(-1, 1)
+    matrix = weights.new_zeros((indices.shape[0], num_experts))
+    # scatter_add_ with zeroed values: a masked slot contributes 0 even when
+    # its clamped column collides with a legitimately selected expert.
+    matrix.scatter_add_(
+        1, indices.clamp(0, num_experts - 1),
+        torch.where(keep, weights, weights.new_zeros(())))
+    return matrix
+
+
+def _dense_lora_delta(flat_inputs, pairs, weight_matrix, out_features):
+    """sum_e w_e(token) * B_e A_e dropout(x) as two GEMMs in rank space."""
+    rank = pairs[0].A.shape[0]
+    scaling = pairs[0].scaling
+    dropout = pairs[0].dropout
+    a_all = torch.cat([pair.A for pair in pairs], dim=0)        # [n*r, in]
+    b_all = torch.cat([pair.B for pair in pairs], dim=1)        # [out, n*r]
+    hidden = dropout(flat_inputs) @ a_all.t()                   # [T, n*r]
+    hidden = hidden * weight_matrix.repeat_interleave(
+        rank, dim=1).to(hidden.dtype)
+    return (hidden @ b_all.t()) * scaling
+
 V3_NEW_TRAINING_VERSIONS = frozenset({
     "v3_new", "v3_new_top4", "v3_new_replay40", "v3_new_hidden_mse_full",
     "v3_new_replay1to1", "v3_new_hidden_mse_1to1",
@@ -326,6 +406,13 @@ class RoutedLoRALinear(nn.Module):
             raise ValueError(
                 "attention projection token count does not match shared routing: "
                 f"{flat_inputs.shape[0]} != {context.expert_indices.shape[0]}")
+        if expert_dispatch_mode() == "dense" and context.num_experts > 0:
+            pairs = [self.experts[i] for i in range(context.num_experts)]
+            weight_matrix = routing_weight_matrix(
+                context, context.num_experts, flat_inputs.dtype)
+            flat_delta = _dense_lora_delta(
+                flat_inputs, pairs, weight_matrix, self.out_features)
+            return output + flat_delta.reshape_as(output)
         flat_delta = output.new_zeros((flat_inputs.shape[0], self.out_features))
         for expert_index in context.active_expert_ids():
             expert = self.experts[expert_index]
@@ -397,6 +484,25 @@ class RoutedLoRAMLP(nn.Module):
             raise ValueError(
                 "FFN token count does not match shared routing: "
                 f"{flat_inputs.shape[0]} != {context.expert_indices.shape[0]}")
+        dense = expert_dispatch_mode() == "dense" and context.num_experts > 0
+        if dense:
+            # One routing-weight matrix serves gate/up/down: the router runs
+            # once per layer, so all three projections share the same weights.
+            weight_matrix = routing_weight_matrix(
+                context, context.num_experts, flat_inputs.dtype)
+            experts = [self.experts[i] for i in range(context.num_experts)]
+            gate = gate + _dense_lora_delta(
+                flat_inputs, [e["gate"] for e in experts], weight_matrix,
+                gate.shape[-1]).reshape_as(gate)
+            up = up + _dense_lora_delta(
+                flat_inputs, [e["up"] for e in experts], weight_matrix,
+                up.shape[-1]).reshape_as(up)
+            intermediate = self.activation(gate) * up
+            output = self.base_mlp.down_proj(intermediate)
+            flat_intermediate = intermediate.reshape(-1, intermediate.shape[-1])
+            return output + _dense_lora_delta(
+                flat_intermediate, [e["down"] for e in experts],
+                weight_matrix, output.shape[-1]).reshape_as(output)
         flat_gate_delta = gate.new_zeros(
             (flat_inputs.shape[0], gate.shape[-1]))
         flat_up_delta = up.new_zeros((flat_inputs.shape[0], up.shape[-1]))
@@ -1344,8 +1450,30 @@ class Ours_LoRA_MoE_V3(Ours_LoRA_MoE_V2):
         self._set_grad_ckpt(True)
         freeze_v3_experts(self.raw_model, new_indices)
         freeze_v3_routers(self.raw_model, True)
-        total_microsteps = kd_epochs * len(dataloader)
-        updates = self._optimizer_update_count(dataloader, kd_epochs)
+        accum = max(1, args.gradient_accumulation_steps)
+        full_microsteps = kd_epochs * len(dataloader)
+        full_updates = self._optimizer_update_count(dataloader, kd_epochs)
+        # KD-init budget as a fraction of the task's own training steps.  The
+        # KD stream and the primary stream carry the same samples-per-pass and
+        # the same pass count, so full_updates equals the task's phase-1
+        # update count and the fraction is literally "x% of this task's
+        # training steps".  Round up to a whole accumulation window so the
+        # step never stops with gradients pending in a half-filled window.
+        fraction = float(getattr(args, "v3_kd_init_step_fraction", 1.0))
+        if not 0.0 < fraction <= 1.0:
+            raise ValueError(
+                f"KD-init step fraction must be in (0, 1], got {fraction}")
+        total_microsteps = full_microsteps
+        updates = full_updates
+        if fraction < 1.0:
+            updates = max(1, math.ceil(full_updates * fraction))
+            total_microsteps = min(full_microsteps, updates * accum)
+            print_rank_0(
+                f"{task} [v3 KD-init] step fraction {fraction:g}: "
+                f"{updates}/{full_updates} optimizer updates "
+                f"({total_microsteps}/{full_microsteps} microsteps); the rest "
+                "of the KD stream is not visited",
+                args.global_rank)
         self._reinit_engine(
             updates,
             learning_rate=args.v2_kd_learning_rate or args.learning_rate)
@@ -1359,8 +1487,12 @@ class Ours_LoRA_MoE_V3(Ours_LoRA_MoE_V2):
         completed_updates = 0
         consumed_local_samples = 0
         for kd_epoch in range(kd_epochs):
+            if completed_microsteps >= total_microsteps:
+                break
             self._set_v2_kd_memory_sampler_pass(dataloader, kd_epoch)
             for step, source_batch in enumerate(dataloader):
+                if completed_microsteps >= total_microsteps:
+                    break
                 completed_microsteps += 1
                 consumed_local_samples += int(
                     source_batch["input_ids"].shape[0])
@@ -1428,6 +1560,19 @@ class Ours_LoRA_MoE_V3(Ours_LoRA_MoE_V2):
             # Tiny unit loaders may expose only a set_epoch stub. Production
             # distributed samplers always define their exact local length.
             expected_local_samples = consumed_local_samples
+        if fraction < 1.0:
+            # A truncated run visits a prefix of the stream, so the contract
+            # becomes "no more than one full pass"; the exact budget is
+            # asserted on the microstep/update counts below.
+            if consumed_local_samples > expected_local_samples:
+                raise RuntimeError(
+                    "V3 KD truncated run consumed more than the full stream: "
+                    f"{consumed_local_samples}/{expected_local_samples}")
+            expected_local_samples = consumed_local_samples
+            print_rank_0(
+                f"{task} [v3 KD-init] truncated: {completed_updates} updates, "
+                f"{consumed_local_samples} local sample exposures",
+                args.global_rank)
         if completed_microsteps != total_microsteps:
             raise RuntimeError(
                 f"V3 KD microsteps {completed_microsteps}/{total_microsteps}")
@@ -1844,6 +1989,18 @@ def save_v3_meta(model, output_dir, args, trainer=None):
         "routing_weight_mode": router.routing_weight_mode,
         "num_experts": layer.num_experts,
         "experts_per_task": args.experts_per_task,
+        # Which expert-dispatch path produced these weights (see
+        # EXPERT_DISPATCH_DEFAULT): "loop" and "dense" agree up to
+        # summation order and, with dropout > 0, the LoRA-input dropout
+        # draw, so the checkpoint should say which one ran.
+        "expert_dispatch": expert_dispatch_mode(),
+        # Training order actually consumed by this run.  --dataset_name may
+        # reorder (or reverse) the canonical TRACE sequence, and nothing else
+        # in the checkpoint records it, so the order axis of the HP
+        # sensitivity study is unverifiable without this field.
+        "dataset_order": list(
+            getattr(args, "resolved_dataset_order", None) or []),
+        "stop_after_task": getattr(args, "stop_after_task", "") or None,
         "router_position": "post_input_layernorm_pre_self_attention",
         "ablation": {
             "phase_mode": getattr(args, "ablation_phase_mode", "1phase"),
@@ -1898,6 +2055,8 @@ def save_v3_meta(model, output_dir, args, trainer=None):
             "kd_learning_rate": args.v2_kd_learning_rate,
             "kd_chunk_tokens": args.v2_kd_chunk_tokens,
             "kd_token_scope": args.v2_kd_token_scope,
+            "kd_init_step_fraction": float(
+                getattr(args, "v3_kd_init_step_fraction", 1.0)),
             "joint_replay_loss_coeff": args.v2_joint_replay_loss_coeff,
             "joint_replay_objective": str(getattr(
                 args, "v2_joint_replay_objective", "lm")),
@@ -1962,6 +2121,8 @@ def save_v3_meta(model, output_dir, args, trainer=None):
             "kd_learning_rate": args.v2_kd_learning_rate,
             "kd_chunk_tokens": args.v2_kd_chunk_tokens,
             "kd_token_scope": args.v2_kd_token_scope,
+            "kd_init_step_fraction": float(
+                getattr(args, "v3_kd_init_step_fraction", 1.0)),
             "joint_replay_loss_coeff": args.v2_joint_replay_loss_coeff,
             "joint_replay_objective": str(getattr(
                 args, "v2_joint_replay_objective", "lm")),

@@ -249,7 +249,11 @@ def check_replay_source(run: Path, rounds: int, expect: str, logs,
         r"\[selfgen\] replay/KD for ([\w-]+): (\d+) generated records", text)
     tasks = {task for task, _ in hits}
     counts = {int(count) for _, count in hits}
-    expected_tasks = set(TASKS[:max(1, rounds - 1)])
+    order = TASKS
+    meta0 = run / "0" / "lora_moe_meta.json"
+    if meta0.is_file():
+        order = json.load(meta0.open()).get("dataset_order") or TASKS
+    expected_tasks = set(order[:max(1, rounds - 1)])
     missing = expected_tasks - tasks
     report.add(PASS if hits and not missing else FAIL,
                "selfgen replay records used",

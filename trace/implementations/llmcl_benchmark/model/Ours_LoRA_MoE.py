@@ -3771,7 +3771,16 @@ class Ours_LoRA_MoE_V2_New(Ours_LoRA_MoE_V2):
         # validated against what it asked for rather than against the primary
         # schedule it deliberately no longer follows.
         expected_kd = set(range(int(self._v2_kd_epochs(primary_epochs))))
-        if self.args.v2_kd_loss_coeff > 0 and kd_passes != expected_kd:
+        kd_fraction = float(getattr(self.args, "v3_kd_init_step_fraction", 1.0))
+        # A truncated KD-init (fraction < 1) deliberately stops before some
+        # passes are ever started, so it only owes a contiguous prefix of
+        # expected_kd, not the full set.
+        kd_ok = (
+            kd_passes == expected_kd
+            or (kd_fraction < 1.0
+                and kd_passes == set(range(len(kd_passes)))
+                and kd_passes.issubset(expected_kd)))
+        if self.args.v2_kd_loss_coeff > 0 and not kd_ok:
             raise RuntimeError(
                 f"V2-new KD sampler passes {kd_passes}/{expected_kd}")
         # Per-pass orders can only match while KD and replay draw the same

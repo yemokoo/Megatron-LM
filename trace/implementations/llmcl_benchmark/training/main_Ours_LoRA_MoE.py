@@ -364,6 +364,15 @@ def parse_args():
              'pass. 0 keeps KD tied to --v2_new_active_memory_cap, which is the '
              'historical behaviour and makes KD grow whenever replay does.')
     parser.add_argument(
+        '--v3_kd_init_step_fraction', type=float, default=1.0,
+        help=('Fraction of the task\'s own training steps spent on the '
+              'expansion KD-init step. 1.0 (default) is the historical '
+              'behaviour: the KD stream has the same samples-per-pass and '
+              'pass count as the primary stream, so KD-init runs exactly as '
+              'many optimizer updates as the task\'s training. 0.2 stops it '
+              'after 20%% of them, rounded up to a whole accumulation '
+              'window. Applies to relaxed V3-new versions only.'))
+    parser.add_argument(
         '--v2_kd_epochs', type=int, default=0,
         help='v2_new relaxed versions only: KD-init passes over the memory '
              'stream. 0 derives it from the primary epoch count (3/5/7).')
@@ -656,6 +665,8 @@ def v1_expert_first_v2_metadata_contract(args):
         "kd_active_stream_samples_per_pass": args.v2_new_active_memory_cap,
         "kd_active_stream_passes": "primary_epochs_times_multiplier",
         "kd_pass_multiplier": args.v2_kd_pass_multiplier,
+        "kd_init_step_fraction": float(
+            getattr(args, "v3_kd_init_step_fraction", 1.0)),
         "router_ft_schedule": "post_expert_training_router_only",
         "router_ft_seen_memory_exposures": args.v2_new_active_memory_cap,
     }
@@ -953,6 +964,10 @@ def main():
         list(AllDatasetName)
         if dataset_argument == "all" or dataset_argument[0] == "all"
         else list(dataset_argument))
+    # Publish the resolved order so save_v3_meta can record it (the order axis
+    # of the HP sensitivity study is otherwise invisible in the checkpoint).
+    args.resolved_dataset_order = [
+        str(getattr(name, "value", name)) for name in datasets]
     if not 0.0 < args.past_task_ratio <= 1.0:
         raise ValueError("--past_task_ratio must be in (0, 1]")
     if (not args.gradient_accumulation_steps
@@ -989,6 +1004,16 @@ def main():
                 "router replay is assigned per sample at every optimizer step")
         if args.v2_kd_temperature <= 0:
             raise ValueError("v2 KD temperature must be positive")
+        if not 0.0 < args.v3_kd_init_step_fraction <= 1.0:
+            raise ValueError(
+                "--v3_kd_init_step_fraction must be in (0, 1], got "
+                f"{args.v3_kd_init_step_fraction}")
+        if (args.v3_kd_init_step_fraction != 1.0
+                and uses_fixed_v2_new_contract(args.training_version)):
+            raise ValueError(
+                "the published V2-new contract fixes KD-init to the primary "
+                "schedule; --v3_kd_init_step_fraction needs a relaxed "
+                "training version")
         if args.v2_kd_pass_multiplier < 1:
             raise ValueError("v2 KD pass multiplier must be positive")
         if (not uses_v2_new_memory(args.training_version)
