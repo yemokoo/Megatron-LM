@@ -49,8 +49,9 @@ declare -A HIST=( [NumGLUE-cm]="$SG/anchor_hist_cm.json" [NumGLUE-ds]="$SG/ancho
                   [Py150]="$SG/anchor_hist_py150.json" )
 declare -A PFX=( [NumGLUE-cm]=$'Solve the following math problem.\nQuestion:\n'
                  [NumGLUE-ds]=$'Solve the following math problem.\nQuestion:\n' )
-declare -A CHUNK=( [MeetingBank]=240 [Py150]=440 [ScienceQA]=640 [NumGLUE-cm]=640
-                   [C-STANCE]=640 [FOMC]=640 [NumGLUE-ds]=640 )
+# 8 chunks per task so generation spreads over every GPU
+declare -A CHUNK=( [MeetingBank]=80 [Py150]=80 [ScienceQA]=80 [NumGLUE-cm]=80
+                   [C-STANCE]=80 [FOMC]=80 [NumGLUE-ds]=80 )
 ORDER=(MeetingBank Py150 ScienceQA NumGLUE-cm C-STANCE FOMC NumGLUE-ds)
 say() { printf '[GEN-ARM %s] %s\n' "$(date '+%F %T')" "$*" | tee -a "$ROOT/progress.log"; }
 

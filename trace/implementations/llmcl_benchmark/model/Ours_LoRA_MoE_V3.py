@@ -1695,6 +1695,11 @@ class Ours_LoRA_MoE_V3(Ours_LoRA_MoE_V2):
             primary_sampler = getattr(primary_loader, "sampler", None)
             if hasattr(primary_sampler, "set_epoch"):
                 primary_sampler.set_epoch(epoch)
+            # A resumed process arrives here in eval mode (from_pretrained) when
+            # KD-init is skipped; the epoch probe only restores train mode at
+            # the end of each epoch, so epoch 0 would run without dropout,
+            # router losses or gradient checkpointing.
+            self.model.train()
             epoch_primary_tokens = 0
             epoch_replay_tokens = 0
             epoch_replay_steps = 0
