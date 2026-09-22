@@ -137,6 +137,21 @@ class DataCollator:
         return model_inputs
 
 
+# When set (list of token ids), any sample that starts with exactly these ids gets its labels
+# only from the position after them (the fixed chat-template header is never a prediction
+# target).  Samples that do not start with them are unaffected.  Set by scripts/residual/
+# train_residual_v3_split_bosguard.py (HEADER_NO_LOSS=1); None keeps full-sequence labels.
+HEADER_LABEL_MASK_IDS = None
+
+
+def _header_label_starts(samples):
+    hdr = HEADER_LABEL_MASK_IDS
+    if not hdr:
+        return None
+    H = len(hdr)
+    return [H if list(s[:H]) == list(hdr) else 0 for s in samples]
+
+
 def _right_pad_full_labels(tokenizer, samples, sources, label_starts=None):
     """Right-pad token IDs and label either the full sequence or a suffix."""
     if tokenizer.pad_token_id is None:
@@ -149,7 +164,7 @@ def _right_pad_full_labels(tokenizer, samples, sources, label_starts=None):
     attention_mask = torch.zeros_like(input_ids)
     labels = torch.full_like(input_ids, -100)
     if label_starts is None:
-        label_starts = [0] * len(samples)
+        label_starts = _header_label_starts(samples) or [0] * len(samples)
     if len(label_starts) != len(samples):
         raise ValueError("label_starts must match the sample count")
     for row, values in enumerate(samples):
@@ -210,7 +225,8 @@ class SLoRATraceDataCollator:
         del return_tensors
         encoded = [self._encode(instance) for instance in batch]
         samples = [values for values, _ in encoded]
-        label_starts = [start for _, start in encoded]
+        # "full" -> None so the optional header label mask (HEADER_LABEL_MASK_IDS) applies
+        label_starts = None if self.label_scope == "full" else [start for _, start in encoded]
         return _right_pad_full_labels(
             self.tokenizer, samples,
             [instance["prompt"] for instance in batch], label_starts)

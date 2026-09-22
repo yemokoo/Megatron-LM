@@ -145,6 +145,20 @@ def load_router_tuned(out_dir, tokenizer, base, device="cuda", dtype=torch.bfloa
     return model, {**v3meta, **meta}
 
 
+def load_v3_any_checkpoint(checkpoint_dir, tokenizer, base, device="cuda",
+                           dtype=torch.bfloat16, device_map=None):
+    """Stock V3 loader, or the residual-aware one when the checkpoint was
+    trained with a residual row from task 0 (its meta carries residual_expert)."""
+    V3 = _v3()
+    with open(os.path.join(checkpoint_dir, V3.V3_META_NAME)) as f:
+        meta = json.load(f)
+    if "residual_expert" in meta:
+        return load_v3_residual_checkpoint(checkpoint_dir, tokenizer, base,
+                                           device=device, dtype=dtype)
+    return V3.load_v3_checkpoint(checkpoint_dir, tokenizer, base, device=device,
+                                 dtype=dtype, device_map=device_map)
+
+
 def load_v3_residual_checkpoint(checkpoint_dir, tokenizer, base, device="cuda",
                                 dtype=torch.bfloat16):
     """Load a V3 checkpoint trained WITH a residual expert from task 0

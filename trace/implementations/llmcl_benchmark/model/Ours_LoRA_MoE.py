@@ -3612,7 +3612,17 @@ class Ours_LoRA_MoE_V2_New(Ours_LoRA_MoE_V2):
         stored_counts = [
             len(self._ensure_fixed_task_subset(task)) for task in task_names]
         persistent = self._v2_new_persistent_samples_per_task()
-        if any(count != persistent for count in stored_counts):
+        allow_short = os.environ.get("SELFGEN_ALLOW_SHORT", "0") == "1"
+        if allow_short:
+            # a self-generated replay pool that came in under the target count (e.g. a task whose
+            # generation yield was too low to reach `persistent`) is expected and not a drift bug;
+            # only an OVER-count (more stored than the contract) still indicates a real problem.
+            over = [(t, c) for t, c in zip(task_names, stored_counts) if c > persistent]
+            if over:
+                raise RuntimeError(
+                    "V2-new persistent-memory count drift (over target): "
+                    f"{over}, expected_each<={persistent}")
+        elif any(count != persistent for count in stored_counts):
             raise RuntimeError(
                 "V2-new persistent-memory count drift: "
                 f"stored={stored_counts}, expected_each={persistent}")
@@ -3621,7 +3631,10 @@ class Ours_LoRA_MoE_V2_New(Ours_LoRA_MoE_V2):
         unique_cap = int(unique_cap)
         active_counts = self._allocate_bounded_equal_task_prefixes(
             stored_counts, unique_cap)
-        expected_active = min(unique_cap, persistent * len(task_names))
+        if allow_short:
+            expected_active = min(unique_cap, sum(min(persistent, c) for c in stored_counts))
+        else:
+            expected_active = min(unique_cap, persistent * len(task_names))
         if sum(active_counts) != expected_active:
             raise RuntimeError(
                 "V2-new active-memory allocation mismatch: "

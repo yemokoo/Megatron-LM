@@ -106,9 +106,17 @@ def lower_triangle_cells() -> list[Cell]:
     ]
 
 
+def diagonal7_cells() -> list[Cell]:
+    """The seven acquisition cells only, no final row -- for a run whose
+    final row is scored separately (a post-hoc residual-expert arm)."""
+    return sparse15_cells()[:7]
+
+
 def cells_for_mode(mode: str) -> list[Cell]:
     if mode == "sparse15":
         return sparse15_cells()
+    if mode == "diagonal7":
+        return diagonal7_cells()
     if mode == "lower_triangle":
         return lower_triangle_cells()
     raise ValueError(f"unknown matrix mode: {mode}")
@@ -261,7 +269,7 @@ def build_eval_command(
         "--max_prompt_len", "0",
         "--max_ans_len", "1024",
         "--no-task_generation_limits",
-        "--slora_conv_mode", "llama3",
+        "--slora_conv_mode", os.environ.get("SPARSE15_CONV_MODE", "llama3"),
         "--per_device_eval_batch_size", str(batch),
         "--temperature", "0",
     ]
@@ -273,6 +281,10 @@ def build_eval_command(
         ])
     if trace_generation_stops:
         command.append("--trace_generation_stops")
+    # extra evaluator flags, e.g. the bos_guard switches for header-guarded checkpoints
+    extra = os.environ.get("SPARSE15_EVAL_EXTRA_ARGS", "").strip()
+    if extra:
+        command.extend(shlex.split(extra))
     return command
 
 
@@ -438,7 +450,7 @@ def parse_args() -> argparse.Namespace:
         "--method", default=os.environ.get("SPARSE15_METHODS"),
         help="Method label passed to collect_results.py.")
     parser.add_argument(
-        "--matrix-mode", choices=("sparse15", "lower_triangle"),
+        "--matrix-mode", choices=("sparse15", "diagonal7", "lower_triangle"),
         default=os.environ.get("TRACE_MATRIX_MODE", "sparse15"),
         help="Evaluate the publication sparse-15 cells or all 36 lower-"
              "triangular cells.")
@@ -561,7 +573,7 @@ def main() -> int:
             "--model-path/SLORA_LLAMA31_PATH missing and run.env has no model_path")
     model_path = Path(model_value).resolve()
     default_status_name = (
-        "optimized_status.tsv" if args.matrix_mode == "sparse15"
+        "optimized_status.tsv" if args.matrix_mode in ("sparse15", "diagonal7")
         else "optimized_lower_triangle_status.tsv")
     status_path = Path(args.status_file).resolve() if args.status_file else (
         run_dir / "evaluation" / default_status_name)
@@ -572,7 +584,7 @@ def main() -> int:
     print(
         f"[OPT-QUEUE] run={run_dir} method={args.method} "
         f"matrix_mode={args.matrix_mode} cells={len(cells)} gpus={gpus} "
-        f"protocol=max_new1024/no_task_limits/llama3/greedy "
+        f"protocol=max_new1024/no_task_limits/{os.environ.get('SPARSE15_CONV_MODE', 'llama3')}/greedy "
         f"exact_stop_markers={int(args.trace_generation_stops)} "
         f"sharded={sorted(sharded_tasks)} shards={num_shards} "
         f"complete_cells={len(complete_cells)} pending_jobs={len(jobs)}",
@@ -819,17 +831,21 @@ def main() -> int:
         raise RuntimeError(
             f"{args.matrix_mode} cells still incomplete: {missing}")
 
-    if not args.no_collect and args.matrix_mode == "sparse15":
+    if not args.no_collect and args.matrix_mode in ("sparse15", "diagonal7"):
+        # diagonal7 has no final row, so collect_results must accept a partial
+        # matrix; it still fills diagonal_scores_rounds_1_to_7.
+        force_partial = bool(missing) or args.matrix_mode == "diagonal7"
         summary_name = (
-            "sparse15_partial_summary.json" if missing
+            "diagonal7_summary.json" if args.matrix_mode == "diagonal7"
+            else "sparse15_partial_summary.json" if missing
             else "sparse15_summary.json")
         collect = [
             str(python), "-u", str(ROOT / "scripts/collect_results.py"),
-            "--method", args.method, "--model", "llama31", "--sparse-15",
+            "--method", args.method, "--model", os.environ.get("SPARSE15_MODEL_LABEL", "llama31"), "--sparse-15",
             "--run-dir", str(run_dir), "--family", "paper_baseline",
             "--output", str(run_dir / summary_name),
         ]
-        if missing:
+        if force_partial:
             collect.append("--allow-partial")
         print(f"[COLLECT] {shlex.join(collect)}", flush=True)
         subprocess.run(collect, cwd=ROOT, check=True)

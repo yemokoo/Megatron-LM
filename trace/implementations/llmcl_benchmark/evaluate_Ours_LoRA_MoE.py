@@ -84,7 +84,7 @@ def parse_args():
     p.add_argument("--max_prompt_len", type=int, default=1024,
                    help="Prompt cutoff; 0 disables truncation like released SLoRA eval.")
     p.add_argument(
-        "--slora_conv_mode", choices=["none", "llama3", "qwen"],
+        "--slora_conv_mode", choices=["none", "llama3", "llama3_template", "qwen", "qwen3"],
         default="none",
         help="Format evaluation inputs exactly like released SLoRA TRACE eval.")
     p.add_argument("--max_ans_len", type=int, default=512)
@@ -107,6 +107,12 @@ def parse_args():
     p.add_argument("--with_sari", action=argparse.BooleanOptionalAction,
                    default=True,
                    help="Compute offline local SARI for 20Minuten (default: on).")
+    p.add_argument("--bos_guard", action="store_true",
+                   help="install scripts/residual/bos_guard on the loaded V3 model (must match training)")
+    p.add_argument("--guard_header", action="store_true",
+                   help="with --bos_guard: also guard the fixed chat-template header")
+    p.add_argument("--guard_decision", choices=("nn", "end_header", "none"), default="nn",
+                   help="header guard decision token (see scripts/bos_token/train_bos_token.py)")
     p.add_argument("--limit", type=int, default=None,
                    help="Debug: only evaluate the first N samples per task.")
     p.add_argument("--limit_frac", type=float, default=None,
@@ -141,7 +147,11 @@ def parse_args():
     return p.parse_args()
 
 
+_TEMPLATE_TOK = None
+
+
 def load_eval_tokenizer(model_name_or_path, slora_conv_mode):
+    global _TEMPLATE_TOK
     if slora_conv_mode == "none":
         return load_hf_tokenizer(model_name_or_path, fast_tokenizer=True)
     # Released SLoRA builder uses the slow AutoTokenizer, preserves an existing
@@ -153,6 +163,7 @@ def load_eval_tokenizer(model_name_or_path, slora_conv_mode):
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
     tokenizer.padding_side = "left"
+    _TEMPLATE_TOK = tokenizer
     return tokenizer
 
 
@@ -166,6 +177,16 @@ def format_slora_trace_eval_prompt(prompt, task, conv_mode):
         suffix = ("\n\nSolve the math problem and output only the final answer. "
                   "Do not include any explanation, reasoning, or extra words.")
     user_text = prompt + suffix
+    if conv_mode == "llama3_template":
+        # exactly the training-time framing (SLoRATraceDataCollator: apply_chat_template with the
+        # default system prompt -> includes the Cutting Knowledge/Today Date lines) so a header
+        # guard trained on that header matches at evaluation time.  The template text starts with
+        # one <|begin_of_text|>; the collator tokenizes it with add_special_tokens=True which adds a
+        # second one, and generate_predictions below does the same for this mode.
+        return _TEMPLATE_TOK.apply_chat_template(
+            [{"role": "system", "content": "You are a helpful assistant."},
+             {"role": "user", "content": user_text}],
+            tokenize=False, add_generation_prompt=True)
     if conv_mode == "llama3":
         return (
             "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n"
@@ -174,12 +195,17 @@ def format_slora_trace_eval_prompt(prompt, task, conv_mode):
             + user_text
             + "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
         )
-    if conv_mode == "qwen":
-        return (
+    if conv_mode in ("qwen", "qwen3"):
+        text = (
             "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
             "<|im_start|>user\n" + user_text + "<|im_end|>\n"
             "<|im_start|>assistant\n"
         )
+        # Qwen3 think-off: the chat template renders every trained assistant
+        # turn with an empty think block, so generation must start after it.
+        if conv_mode == "qwen3":
+            text += "<think>\n\n</think>\n\n"
+        return text
     return prompt
 
 
@@ -194,7 +220,7 @@ def generate_predictions(model, tokenizer, prompts, args, device):
         eot_id = tokenizer.convert_tokens_to_ids("<|eot_id|>")
         if isinstance(eot_id, int) and eot_id >= 0:
             stop_token_ids.append(eot_id)
-    elif args.slora_conv_mode == "qwen":
+    elif args.slora_conv_mode in ("qwen", "qwen3"):
         stop_token_ids = [tokenizer.eos_token_id]
     stop_strings = None
     if args.trace_generation_stops:
@@ -407,10 +433,26 @@ def main():
             with open(meta_path, encoding="utf-8") as handle:
                 checkpoint_meta = json.load(handle)
             if checkpoint_meta.get("architecture") == V3_ARCHITECTURE:
-                model, meta = load_v3_checkpoint(
-                    ckpt_dir, tok,
-                    base_model_name_or_path=args.base_model_name_or_path,
+                # picks the residual-aware loader for checkpoints trained
+                # with a residual row from task 0 (scripts/residual/)
+                sys.path.insert(0, os.path.join(
+                    os.path.dirname(os.path.abspath(__file__)),
+                    "..", "..", "scripts", "residual"))
+                from residual_expert import load_v3_any_checkpoint
+                model, meta = load_v3_any_checkpoint(
+                    ckpt_dir, tok, args.base_model_name_or_path,
                     device=device, dtype=dtype, device_map=device_map)
+                if args.bos_guard:
+                    import bos_guard
+                    if args.guard_header:
+                        sys.path.insert(0, os.path.join(
+                            os.path.dirname(os.path.abspath(__file__)),
+                            "..", "..", "scripts", "bos_token"))
+                        from train_bos_token import install_header_guard
+                        install_header_guard(model, tok, args.guard_decision)
+                    else:
+                        bos_guard.install_bos_guard(model)
+                    print(f"bos_guard ON header={args.guard_header} decision={args.guard_decision}", flush=True)
             else:
                 model, meta = load_lora_moe_checkpoint(
                     ckpt_dir, tok,

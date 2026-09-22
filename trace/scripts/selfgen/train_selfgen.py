@@ -63,8 +63,11 @@ class GeneratedRecords(Dataset):
                 raise ValueError(f"malformed generated record in {path}: {list(r)}")
         if limit is not None:
             if len(records) < limit:
-                raise ValueError(
-                    f"{path} has {len(records)} generated records, need {limit}")
+                if os.environ.get("SELFGEN_ALLOW_SHORT", "0") == "1":
+                    print(f"[selfgen] {path}: only {len(records)} generated records (< {limit}); using all of them", flush=True)
+                else:
+                    raise ValueError(
+                        f"{path} has {len(records)} generated records, need {limit}")
             records = records[:limit]
         if not records:
             raise ValueError(f"no generated records in {path}")

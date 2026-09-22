@@ -39,12 +39,11 @@ sys.path.insert(0, str(IMPL))
 
 from model.Ours_LoRA_MoE_V3 import (                          # noqa: E402
     load_v3_checkpoint, shared_router_layers)
-from transformers import AutoTokenizer                        # noqa: E402
+from transformers import AutoConfig, AutoTokenizer            # noqa: E402
 
-CHAT_HEADER = (
-    "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n"
-    "You are a helpful assistant.<|eot_id|>"
-    "<|start_header_id|>user<|end_header_id|>\n\n")
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from chat_profile import chat_profile                         # noqa: E402
+
 TASKS = ["C-STANCE", "FOMC", "MeetingBank", "Py150", "ScienceQA",
          "NumGLUE-cm", "NumGLUE-ds", "20Minuten"]
 
@@ -181,9 +180,14 @@ def main():
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
     tokenizer.padding_side = "left"
+    profile = chat_profile(tokenizer, AutoConfig.from_pretrained(
+        args.base_model, local_files_only=True).model_type)
+    print(f"[v3bos] chat profile {profile.name}", flush=True)
 
     print(f"[v3bos] loading {args.checkpoint}", flush=True)
-    model, meta = load_v3_checkpoint(
+    sys.path.insert(0, str(REPO / "scripts" / "residual"))
+    from residual_expert import load_v3_any_checkpoint   # residual-from-task-0 aware
+    model, meta = load_v3_any_checkpoint(
         args.checkpoint, tokenizer, args.base_model, device="cuda", dtype=torch.bfloat16)
     model.eval()
     num_experts = meta["num_experts"]
@@ -236,9 +240,9 @@ def main():
     elif args.mode == "bos_token":
         base_prompt = bos_token_name
     elif args.mode == "anchor":
-        base_prompt = CHAT_HEADER + args.prefix_text
+        base_prompt = profile.header + args.prefix_text
     else:                                    # chat, or force-from-chat
-        base_prompt = CHAT_HEADER
+        base_prompt = profile.header
 
     # One prompt, or a per-sequence anchor drawn from a histogram.  Sequences are
     # grouped by their anchor so every batch has a single prompt length (no padding).
@@ -259,10 +263,7 @@ def main():
                  args.prefix_text if args.mode == "anchor" else "")]
     print(f"[v3bos] base prompt: {base_prompt!r}", flush=True)
 
-    eos_ids = [tokenizer.eos_token_id]
-    eot = tokenizer.convert_tokens_to_ids("<|eot_id|>")
-    if isinstance(eot, int) and eot >= 0:
-        eos_ids.append(eot)
+    eos_ids = list(profile.stop_token_ids)
 
     all_rows, t0, done = [], time.time(), 0
     prompt_len = None

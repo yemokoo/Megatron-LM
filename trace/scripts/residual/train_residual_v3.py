@@ -77,6 +77,17 @@ def residual_forward(self, hidden_states):
     if self._residual_log_alpha != 0.0:
         res_logit = res_logit + self._residual_log_alpha
     logits = torch.cat([expert_logits, res_logit], dim=-1)
+    logit_bias = getattr(self, "_logit_bias", None)
+    if logit_bias is not None:                 # task-conditioning bias (bos_token/train_bos_token.py)
+        positions = getattr(self, "_logit_bias_positions", None)   # callable -> flat bool mask or None
+        if positions is None:
+            logits = logits + logit_bias.to(logits.dtype)
+        else:
+            pos = positions()                  # None: no flagged position in this forward -> bias off
+            if pos is not None:
+                # torch.where, not multiplication: a -inf mask entry times a 0 position weight is NaN
+                pos = pos.to(logits.device).bool()[:, None]
+                logits = torch.where(pos, logits + logit_bias.to(logits.dtype), logits)
     total = real + 1
     k = min(self.top_k, total)
     topk_logits, topk_indices = logits.topk(k, dim=-1)

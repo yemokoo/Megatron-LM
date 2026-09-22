@@ -1585,6 +1585,15 @@ class Ours_LoRA_MoE_V3(Ours_LoRA_MoE_V2):
                 f"{consumed_local_samples}/{expected_local_samples}")
         progress.close()
 
+    def _after_primary_backward(self):
+        """Hook run right after the joint-phase primary backward."""
+        return None
+
+    def _extra_router_replay_batches(self, primary):
+        """Extra device batches to forward router-only on each update."""
+        del primary
+        return ()
+
     @contextmanager
     def _router_only_replay(self):
         expert_parameters = _v3_expert_parameters(self.raw_model)
@@ -1739,6 +1748,7 @@ class Ours_LoRA_MoE_V3(Ours_LoRA_MoE_V2):
                         if moe_loss is not None:
                             primary_loss = primary_loss + moe_loss
                         (primary_loss / window_size).backward()
+                        self._after_primary_backward()
                 finally:
                     set_v3_router_token_mask(self.raw_model, None)
                 self._record_gradient_memory_batch(
@@ -1838,6 +1848,26 @@ class Ours_LoRA_MoE_V3(Ours_LoRA_MoE_V2):
                             finally:
                                 set_v3_router_token_mask(self.raw_model, None)
                         consumed_local_exposures += len(replay_source_chunk)
+
+                    for extra in self._extra_router_replay_batches(primary):
+                        extra = dict(extra)
+                        extra_labels = extra.pop("labels")
+                        self._count_workload_batch("router_replay_extra", extra)
+                        with (self._router_only_replay(),
+                              self._suppress_replay_router_losses()):
+                            set_v3_router_token_mask(
+                                self.raw_model, extra.get("attention_mask"))
+                            try:
+                                extra_output = self.raw_model(
+                                    **extra, use_cache=False)
+                                extra_losses = self._per_sample_causal_lm_losses(
+                                    extra_output.logits, extra_labels)
+                                # same per-sample weight as a replay record
+                                (args.v2_joint_replay_loss_coeff
+                                 * replay_loss_scale
+                                 * extra_losses.sum()).backward()
+                            finally:
+                                set_v3_router_token_mask(self.raw_model, None)
 
                     if replay_log_due:
                         if local_replay_loss_sum is None:

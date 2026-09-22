@@ -33,6 +33,7 @@ GPU_LIST=${GPU_LIST:-0,1,2,3,4,5,6,7}
 IFS=',' read -r -a GPUS <<< "$GPU_LIST"
 NGPU=${#GPUS[@]}
 PORT=${PORT:-29881}
+TRAIN_SCRIPT=${TRAIN_SCRIPT:-$TRACE/scripts/selfgen/train_selfgen.py}   # e.g. scripts/residual/train_residual_v3_split.py
 GEN_SEQS=${GEN_SEQS:-640}     # 28% over the 500-record contract, for drops
 GEN_MIN=${GEN_MIN:-500}
 MEM=${MEM:-500}
@@ -65,7 +66,7 @@ train_round() {   # t
       CUDA_VISIBLE_DEVICES="$GPU_LIST" \
       RESUME_CONTRACT_ALLOW_DRIFT=active_stream_samples_per_primary_epoch,joint_replay_active_stream_samples_per_primary_epoch \
       $PY -m torch.distributed.run --nproc_per_node="$NGPU" --master_port="$PORT" \
-      "$TRACE/scripts/selfgen/train_selfgen.py" \
+      "$TRAIN_SCRIPT" \
       --training_version v3_new_replay1to1 --model_name_or_path "$BASE" \
       --data_path "$DATA" --dataset_name all --data_output_path "$RUN/data_cache" \
       --output_dir "$OUT" --num_train_epochs 5,3,7,5,3,5,5,7 \
