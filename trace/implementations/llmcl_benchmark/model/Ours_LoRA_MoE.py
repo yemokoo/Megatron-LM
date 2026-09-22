@@ -3829,9 +3829,14 @@ class Ours_LoRA_MoE_V2_New(Ours_LoRA_MoE_V2):
                 f"V2-new KD pass multiplier must be positive: {multiplier}")
         return int(primary_epochs) * multiplier
 
+    def _v2_new_replay_exposure_cap(self):
+        """Replay exposures per primary epoch: the explicit knob when set, else the pool cap."""
+        explicit = int(getattr(self.args, "v2_new_replay_exposure_cap", 0) or 0)
+        return explicit if explicit > 0 else self._v2_new_active_memory_cap()
+
     def _joint_replay_exposure_budget(self, primary_loader, epochs):
         """Consume one exact active-memory stream per primary epoch."""
-        active_cap = self._v2_new_active_memory_cap()
+        active_cap = self._v2_new_replay_exposure_cap()
         ratio = int(getattr(
             self.args, "v2_joint_new_to_replay_ratio", 0))
         if ratio < 1:
@@ -3853,14 +3858,17 @@ class Ours_LoRA_MoE_V2_New(Ours_LoRA_MoE_V2):
                     f"samples/epoch={samples_per_epoch}, active_memory_cap="
                     f"{active_cap}, ratio={ratio}:1, expected={expected_new}")
         else:
-            # Relaxed profile: the replay stream size is set directly by the
-            # active-memory cap, and the ratio is reported rather than pinned.
-            # One exact stream per primary epoch is still consumed, so replay
-            # exposure stays cap x epochs and remains resume-reproducible.
+            # Relaxed profile: the replay stream size is the exposure cap
+            # (--v2_new_replay_exposure_cap, or the active-memory cap when it is
+            # not set), and the ratio is reported rather than pinned.  One exact
+            # stream per primary epoch is consumed, so replay exposure stays
+            # cap x epochs and remains resume-reproducible.  Keeping the
+            # exposure cap fixed while the pool cap varies is what lets a
+            # replay-size ablation hold the replay compute constant.
             if int(samples_per_epoch) < active_cap:
                 raise ValueError(
                     "relaxed V2-new replay needs primary samples/epoch >= "
-                    f"active_memory_cap: {samples_per_epoch} < {active_cap}")
+                    f"replay exposure cap: {samples_per_epoch} < {active_cap}")
         return active_cap * int(epochs)
 
     def _expected_joint_replay_exposures(
@@ -3870,7 +3878,7 @@ class Ours_LoRA_MoE_V2_New(Ours_LoRA_MoE_V2):
             # Relaxed profile: replay is cap-driven, so derive the expected
             # exposure from the stream actually scheduled instead of the
             # nominal ratio.
-            return self._v2_new_active_memory_cap() * int(epochs)
+            return self._v2_new_replay_exposure_cap() * int(epochs)
         del epochs
         if consumed_global_new_exposures % replay_ratio != 0:
             raise RuntimeError(

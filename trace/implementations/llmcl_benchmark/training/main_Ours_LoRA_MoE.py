@@ -242,6 +242,14 @@ def parse_args():
              'init. Recorded in the checkpoint meta and provable from the '
              'absence of the kd_init role in training_workload.json.')
     parser.add_argument(
+        "--v2_new_replay_exposure_cap", type=int, default=0,
+        help=("Relaxed V2-new only: total replay exposures per primary epoch. "
+              "0 keeps the legacy behaviour of deriving it from "
+              "--v2_new_active_memory_cap, which ties the replay compute to "
+              "the pool size.  Set it to hold the replay budget fixed while "
+              "the unique pool varies (replay-size ablation): every record is "
+              "then simply repeated fewer times as the pool grows."))
+    parser.add_argument(
         '--ablation_replay_source', choices=['real', 'selfgen'],
         default='real',
         help='Declares which replay memory this run is supposed to use. '
