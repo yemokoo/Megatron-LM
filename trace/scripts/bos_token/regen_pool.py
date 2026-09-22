@@ -44,16 +44,21 @@ def main():
     dest = Path(a.dest); dest.mkdir(parents=True, exist_ok=True)
     ov = json.load(open(a.overrides)) if a.overrides and Path(a.overrides).exists() else {}
     jobs = []
+    per_task_map = ov.get("per_task", {}) if isinstance(ov.get("per_task"), dict) else {}
     for j in range(a.num_tasks):
         task = TASKS[j]; long = CAP[task] >= 1024
+        # a task only needs enough samples to reach the target after dedupe, and the yields differ a
+        # lot (C-STANCE ~99% unique, Py150 ~62%), so generating the same count everywhere wastes the
+        # most expensive tasks' time; overrides["per_task"][task] sets it per task
+        per_task = int(per_task_map.get(task, a.per_task))
         # long-output tasks are split much finer so no single piece becomes the tail of the round
         shards = a.long_shards if long else a.shards
-        per_shard = a.per_task // shards
+        per_shard = per_task // shards
         for k in range(shards):
             out = dest / task / f"records.part{k}.jsonl"
             if out.exists() and out.stat().st_size > 0:
                 continue
-            n = per_shard + (a.per_task - per_shard * shards if k == shards - 1 else 0)
+            n = per_shard + (per_task - per_shard * shards if k == shards - 1 else 0)
             batch_a = int(ov.get("long_batch_a", 96)) if long else int(ov.get("short_batch_a", per_shard))
             batch_b = int(ov.get("long_batch_b", 48)) if long else int(ov.get("short_batch_b", per_shard))
             jobs.append({"cost": COST[task], "task_index": j, "task": task, "shard": k,
