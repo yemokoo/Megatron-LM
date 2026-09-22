@@ -3809,7 +3809,12 @@ class Ours_LoRA_MoE_V2_New(Ours_LoRA_MoE_V2):
                         f"{pass_index}: {kd_digest} != {replay_digest}")
 
     def _workload_replay_exposure_budget(self, epochs):
-        return self._v2_new_active_memory_cap() * int(epochs)
+        # The declared budget must follow the stream the run actually consumes,
+        # i.e. the exposure cap (--v2_new_replay_exposure_cap when set), not the
+        # pool cap.  Otherwise a run that holds replay compute fixed while the
+        # pool grows records a budget it never spends, and
+        # scripts/ablation/verify_ablation_run.py flags the parity check.
+        return self._v2_new_replay_exposure_cap() * int(epochs)
 
     def _v2_kd_epochs(self, primary_epochs):
         # An epoch boundary is intentional: 1,000 samples at global batch 64
