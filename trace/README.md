@@ -15,6 +15,7 @@ The current Korean runbook and one-command launchers are:
 - `EXPERIMENTS.md` for the implementation/change index and live experiment log
 - `docs/RUNBOOK_KO.md`
 - `docs/PORTABILITY_KO.md` for moving the project to a new server
+- `docs/RTX_PRO_6000_TRACE_PROMPT_KO.md` for the 8-GPU Blackwell v1 self-generation runs
 - `scripts/run_experiment.sh` for one method
 - `scripts/run_suite.sh` for the legacy SLoRA/TRACE method matrix
 - `scripts/baselines/README_KO.md` and `scripts/baselines/<model>/<method>.sh`
