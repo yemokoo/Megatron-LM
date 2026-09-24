@@ -60,6 +60,12 @@ from model import Ours_LoRA_MoE_V3 as V3       # noqa: E402
 BOS_TASK = "__backbone_bos__"
 BOS_JSONL = os.environ.get("RESIDUAL_BOS_JSONL") or str(
     HERE / "assets" / "backbone_bos_500.jsonl")
+NEW_EXPERT_INIT = os.environ.get(
+    "RESIDUAL_NEW_EXPERT_INIT", "copy_router_zero_b").strip()
+if NEW_EXPERT_INIT not in {"copy_router_zero_b", "random_router_zero_b"}:
+    raise ValueError(
+        "RESIDUAL_NEW_EXPERT_INIT must be copy_router_zero_b or "
+        f"random_router_zero_b, got {NEW_EXPERT_INIT!r}")
 Trainer = V3.Ours_LoRA_MoE_V3_New
 
 
@@ -75,6 +81,11 @@ def add_experts_from_residual(model, count):
     layers = V3.shared_router_layers(model)
     old = layers[0].num_experts if layers else 0
     _prev_add_experts(model, count)          # grows + attaches the residual
+    # random_router_zero_b keeps the stock init (random router row, A random,
+    # B zero), i.e. the original Ours expansion; only copy_router_zero_b
+    # overrides the new row.
+    if NEW_EXPERT_INIT != "copy_router_zero_b":
+        return
     for layer in layers:
         router = layer.shared_expert_router
         with torch.no_grad():
@@ -188,7 +199,8 @@ _prev_train_one_task = Trainer.train_one_task
 
 def train_one_task(self, task, i_task, epochs):
     args = self.args
-    if getattr(args, "ablation_kd_init", "on") != "off":
+    kd_init = getattr(args, "ablation_kd_init", "on")
+    if NEW_EXPERT_INIT == "copy_router_zero_b" and kd_init != "off":
         raise ValueError("residual-split training replaces KD-init with the "
                          "zero-B expert init: pass --ablation_kd_init off")
     if getattr(args, "ablation_phase_mode", "1phase") != "1phase":
@@ -214,7 +226,9 @@ def save_meta_split(model, output_dir, args, trainer=None):
         meta = json.load(handle)
     meta["residual_expert"].update({
         "variant": "split_gradient",
-        "new_row_init": "copy_of_residual_row",
+        "new_row_init": (
+            "copy_of_residual_row" if NEW_EXPERT_INIT == "copy_router_zero_b"
+            else "pytorch_linear_random"),
         "new_expert_init": "lora_A_random_B_zero",
         "primary_routing": "residual_masked_out",
         "primary_gradient_rows": "all_but_residual",

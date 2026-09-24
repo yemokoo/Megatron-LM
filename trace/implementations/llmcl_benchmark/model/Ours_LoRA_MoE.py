@@ -3653,9 +3653,14 @@ class Ours_LoRA_MoE_V2_New(Ours_LoRA_MoE_V2):
                         if role == "replay" else None))
         if not task_names:
             return None
-        active_cap = self._v2_new_active_memory_cap()
+        # The pool cap sizes the *unique* records; the exposure cap sizes one
+        # stream, i.e. how many replay forwards a primary epoch spends.  They
+        # are the same number unless --v2_new_replay_exposure_cap separates
+        # them, and the stream must follow the exposure cap or the joint loop
+        # consumes a non-integer number of passes per epoch.
         exposure_samples = (self._v2_new_kd_exposure_samples()
-                            if role == "kd" else active_cap)
+                            if role == "kd"
+                            else self._v2_new_replay_exposure_cap())
         memory_batch_size = self.args.v2_memory_batch_size or 1
         if role == "kd":
             memory_batch_size = (
@@ -3688,7 +3693,8 @@ class Ours_LoRA_MoE_V2_New(Ours_LoRA_MoE_V2):
         # KD and replay are drawn from one stream, so their identity order
         # must match -- unless the run deliberately gives KD a shorter one, in
         # which case KD is a prefix of a different length and cannot match.
-        if (self._v2_new_kd_exposure_samples() == active_cap
+        if (self._v2_new_kd_exposure_samples()
+                == self._v2_new_replay_exposure_cap()
                 and len(set(round_signatures.values())) != 1):
             raise RuntimeError(
                 "V2-new KD/replay active streams do not have literal "
@@ -3749,7 +3755,7 @@ class Ours_LoRA_MoE_V2_New(Ours_LoRA_MoE_V2):
         # match, so the invariant only applies while the two are the same size.
         streams_are_shared = (
             self._v2_new_kd_exposure_samples()
-            == self._v2_new_active_memory_cap())
+            == self._v2_new_replay_exposure_cap())
         if streams_are_shared and other is not None and other["sha256"] != digest:
             raise RuntimeError(
                 "V2-new KD/replay sampler order mismatch at round/pass "
@@ -3799,7 +3805,7 @@ class Ours_LoRA_MoE_V2_New(Ours_LoRA_MoE_V2):
         # Per-pass orders can only match while KD and replay draw the same
         # stream; a run that shortens KD breaks that by construction.
         if (self._v2_new_kd_exposure_samples()
-                == self._v2_new_active_memory_cap()):
+                == self._v2_new_replay_exposure_cap()):
             for pass_index in kd_passes & replay_passes:
                 kd_digest = registry["kd"][pass_index]["sha256"]
                 replay_digest = registry["replay"][pass_index]["sha256"]

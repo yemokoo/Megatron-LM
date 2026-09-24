@@ -38,6 +38,15 @@ REPLAY_SOURCE=${REPLAY_SOURCE:-selfgen}
 ANCHORS=$TRACE/scripts/selfgen/assets/anchors.json
 DEC=none
 GEN_PER_TASK=${GEN_PER_TASK:-1000}
+# replay size knobs: PERSIST_PER_TASK records per source, pool cap = sources x that count,
+# EXPOSURE_CAP replay forwards per primary epoch (held fixed across ratios so only
+# diversity varies).  Defaults reproduce the original 500/5000/5000 chain.
+PERSIST_PER_TASK=${PERSIST_PER_TASK:-500}
+POOL_CAP=${POOL_CAP:-5000}
+EXPOSURE_CAP=${EXPOSURE_CAP:-5000}
+NEW_EXPERT_INIT=${RESIDUAL_NEW_EXPERT_INIT:-copy_router_zero_b}
+KD_INIT=${KD_INIT:-off}
+KD_INIT_STEP_FRACTION=${KD_INIT_STEP_FRACTION:-1.0}
 GPUS=${GPUS:-0,1,2,3,4,5,6,7}
 NGPU=$(awk -F, '{print NF}' <<< "$GPUS")
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True OMP_NUM_THREADS=6 MKL_NUM_THREADS=6 TOKENIZERS_PARALLELISM=false
@@ -71,13 +80,14 @@ train_round(){   # t
   local task=${TASKS[$t]} port=$((29970+t))
   [ -f "$R/model/$t/lora_moe_meta.json" ] && return 0
   local -a resume=(); [ "$t" -gt 0 ] && resume=(--resume_checkpoint "$R/model/$((t-1))")
-  say "train round $t ($task): header guard ($DEC) + header loss OFF, replay=$REPLAY_SOURCE, GPUs=$GPUS"
+  say "train round $t ($task): header guard ($DEC) + header loss OFF, replay=$REPLAY_SOURCE, init=$NEW_EXPERT_INIT, kd_init=$KD_INIT@$KD_INIT_STEP_FRACTION, GPUs=$GPUS"
   local -a src_env=()
   if [ "$REPLAY_SOURCE" = selfgen ]; then
     src_env=(SELFGEN_ROOT="$R/gen/round_$t" SELFGEN_CURRENT_TASK="$task" SELFGEN_ALLOW_SHORT=1)
   fi
   ( cd "$IMPL" && env "${src_env[@]}" CUDA_VISIBLE_DEVICES=$GPUS \
       BOS_GUARD_HEADER=1 BOS_GUARD_DECISION=$DEC HEADER_NO_LOSS=1 \
+      RESIDUAL_NEW_EXPERT_INIT=$NEW_EXPERT_INIT \
       RESUME_CONTRACT_ALLOW_DRIFT=active_stream_samples_per_primary_epoch,joint_replay_active_stream_samples_per_primary_epoch \
       $PY -m torch.distributed.run --nproc_per_node=$NGPU --master_port=$port \
       "$TRACE/scripts/residual/train_residual_v3_split_bosguard.py" \
@@ -102,11 +112,13 @@ train_round(){   # t
       --v2_joint_replay_objective lm --v2_hidden_mse_loss_coeff 1.0 \
       --v2_joint_new_to_replay_ratio 1 --v2_kd_loss_coeff 1.0 \
       --v2_kd_pass_multiplier 1 --v2_kd_temperature 1.0 --v2_kd_learning_rate 0 \
+      --v3_kd_init_step_fraction "$KD_INIT_STEP_FRACTION" \
       --v2_kd_chunk_tokens 256 --v2_kd_token_scope nonpad \
-      --v2_new_active_memory_cap 5000 --v2_new_persistent_samples_per_task 500 \
+      --v2_new_active_memory_cap $POOL_CAP --v2_new_persistent_samples_per_task $PERSIST_PER_TASK \
+      --v2_new_replay_exposure_cap $EXPOSURE_CAP \
       --v3_epoch_probe_samples 64 --tokenized_train_cache_dir "$CACHE" \
       --disable_training_flop_counter --stop_after_task "$task" \
-      --ablation_phase_mode 1phase --ablation_kd_init off --ablation_replay_source "$REPLAY_SOURCE" \
+      --ablation_phase_mode 1phase --ablation_kd_init "$KD_INIT" --ablation_replay_source "$REPLAY_SOURCE" \
       "${resume[@]}" ) > "$R/logs/train_r$t.log" 2>&1
   [ -f "$R/model/$t/lora_moe_meta.json" ] || { say "EVENT: STEP_FAILED train_r$t"; exit 1; }
   say "round $t ($task) trained"
