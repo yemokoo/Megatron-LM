@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -33,7 +34,8 @@ from chat_profile import chat_profile, clean                    # noqa: E402
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--checkpoint", required=True)
-    p.add_argument("--base-model", default="/data2/seonghyeonnoh/LLM-continual-learning-models/Llama-3.1-8B-Instruct")
+    p.add_argument("--base-model", default=os.environ.get(
+        "SLORA_LLAMA31_PATH", "/data2/seonghyeonnoh/LLM-continual-learning-models/Llama-3.1-8B-Instruct"))
     p.add_argument("--stage-a", required=True, help="directory written by bos_sample_v3.py")
     p.add_argument("--out", required=True, help="records.jsonl path")
     p.add_argument("--max-answer-tokens", type=int, default=256)

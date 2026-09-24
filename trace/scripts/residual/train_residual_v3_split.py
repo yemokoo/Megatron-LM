@@ -54,7 +54,9 @@ os.environ.setdefault("RESIDUAL_RAMP_FRAC", "0")
 import torch                                   # noqa: E402
 from torch.utils.data import Dataset           # noqa: E402
 
+from contextlib import contextmanager         # noqa: E402
 import train_residual_v3 as TR                 # noqa: E402  installs the residual patches
+import mass_reservoir as MR                    # noqa: E402
 from model import Ours_LoRA_MoE_V3 as V3       # noqa: E402
 
 BOS_TASK = "__backbone_bos__"
@@ -80,6 +82,9 @@ _prev_add_experts = V3.add_v3_experts
 def add_experts_from_residual(model, count):
     layers = V3.shared_router_layers(model)
     old = layers[0].num_experts if layers else 0
+    if MR.ACTIVE.enabled:
+        _add_experts_mass_reservoir(model, count, old)
+        return
     _prev_add_experts(model, count)          # grows + attaches the residual
     # random_router_zero_b keeps the stock init (random router row, A random,
     # B zero), i.e. the original Ours expansion; only copy_router_zero_b
@@ -91,6 +96,33 @@ def add_experts_from_residual(model, count):
         with torch.no_grad():
             router.router.weight[old:old + count].copy_(
                 router.residual_router.weight.expand(count, -1))
+
+
+def _add_experts_mass_reservoir(model, count, old):
+    """New task: new rows := clone(r_res) (task 0 keeps the stock random row), alpha 1 -> 0,
+    with an old-task probe before/after to verify the forward is unchanged.  A rebuild
+    (resume / checkpoint load) only grows the structure; the state dict supplies the rows."""
+    exp = MR.EXPANDING
+    probe = exp.get("probe") if (exp["on"] and old > 0) else None
+    before = MR.run_probe(model, probe) if probe is not None else None
+    _prev_add_experts(model, count)          # grows + residual + reservoir row
+    if not exp["on"]:
+        return
+    if old > 0:
+        MR.copy_reservoir_into_rows(model, old, count)
+    MR.set_alpha(model, 0.0)
+    if before is None:
+        return
+    report = MR.compare_probes(before, MR.run_probe(model, probe))
+    if exp.get("rank0"):
+        MR.write_json(exp["path"], report)
+        sm = report["summary"]
+        print(f"[mres] expansion check round {exp['round']}: denominator rel diff max "
+              f"{sm['denominator_rel_diff_max']:.2e}, Top-K change (margin-ok tokens) "
+              f"{sm['topk_change_rate_margin_ok_max']:.4f}, Top-K change (all) "
+              f"{sm['topk_change_rate_all_max']:.4f}, margin-satisfied min "
+              f"{sm['margin_satisfied_rate_min']:.4f}, hidden rel L2 max {sm['hidden_rel_l2_max']:.2e}, "
+              f"logits max abs diff {sm['logits_max_abs_diff']:.2e}", flush=True)
 
 
 V3.add_v3_experts = add_experts_from_residual
@@ -106,11 +138,20 @@ _prev_begin_batch = Trainer._begin_gradient_memory_batch
 
 def _begin_gradient_memory_batch(self):
     TR._set_log_alpha(self.raw_model, float("-inf"))
+    if MR.ACTIVE.enabled:
+        warm = bool(getattr(self, "_mres_in_warmup", lambda: False)())
+        MR.set_flag(self.raw_model, "_mres_primary", True)       # reservoir out of the denominator
+        MR.set_flag(self.raw_model, "_mres_force_new", warm)     # warm-up: new expert only
+        MR.enable_stats(self.raw_model, "primary_warmup" if warm else "primary")
     return _prev_begin_batch(self)
 
 
 def _after_primary_backward(self):
     TR._set_log_alpha(self.raw_model, 0.0)
+    if MR.ACTIVE.enabled:
+        MR.set_flag(self.raw_model, "_mres_primary", False)
+        MR.set_flag(self.raw_model, "_mres_force_new", False)
+        MR.disable_stats(self.raw_model)
     for layer in V3.shared_router_layers(self.raw_model):
         residual = getattr(layer.shared_expert_router, "residual_router", None)
         if residual is not None and residual.weight.grad is not None:
@@ -125,11 +166,65 @@ def _extra_router_replay_batches(self, primary):
     source (each record also carries the replay per-sample loss scale).
     """
     per_rank = max(1, int(primary["input_ids"].shape[0]) // int(self._router_ft_sources))
-    return ({key: value[:per_rank] if torch.is_tensor(value) else value
-             for key, value in primary.items()},)
+    return _CurrentSlices(self, ({key: value[:per_rank] if torch.is_tensor(value) else value
+                                  for key, value in primary.items()},))
+
+
+class _CurrentSlices(tuple):
+    """The current-task router-FT slice(s); iterating marks the trainer so the mass-reservoir
+    margin can tell the current slice from replay (MRES_MARGIN_CURRENT)."""
+
+    def __new__(cls, trainer, items):
+        obj = super().__new__(cls, items)
+        obj._trainer = trainer
+        return obj
+
+    def __iter__(self):
+        self._trainer._mres_current_slice = True
+        try:
+            yield from super().__iter__()
+        finally:
+            self._trainer._mres_current_slice = False
 
 
 Trainer._begin_gradient_memory_batch = _begin_gradient_memory_batch
+
+# ------------------------------- mass reservoir: router-correction margin + stats
+_prev_router_only_replay = Trainer._router_only_replay
+_stock_per_sample_losses = Trainer._per_sample_causal_lm_losses
+
+
+@contextmanager
+def _router_only_replay_mres(self):
+    with _prev_router_only_replay(self):
+        if not MR.ACTIVE.enabled:
+            yield
+            return
+        MR.set_flag(self.raw_model, "_mres_margin", True)
+        MR.enable_stats(self.raw_model, "router_ft")
+        try:
+            yield
+        finally:
+            MR.set_flag(self.raw_model, "_mres_margin", False)
+            MR.disable_stats(self.raw_model)
+            for router in MR.routers(self.raw_model):
+                router._mres_margin_buf.clear()
+
+
+def _per_sample_losses_mres(self, logits, labels, ignore_index=-100):
+    losses = _stock_per_sample_losses(logits, labels, ignore_index)
+    if not MR.ACTIVE.enabled:
+        return losses
+    margin = MR.pop_margin_per_sample(self.raw_model, logits.shape[0])
+    if margin is None:
+        return losses
+    if getattr(self, "_mres_current_slice", False) and not MR.ACTIVE.margin_current:
+        return losses
+    return losses + MR.ACTIVE.margin_weight * margin.to(losses.dtype)
+
+
+Trainer._router_only_replay = _router_only_replay_mres
+Trainer._per_sample_causal_lm_losses = _per_sample_losses_mres
 Trainer._after_primary_backward = _after_primary_backward
 Trainer._extra_router_replay_batches = _extra_router_replay_batches
 
@@ -211,7 +306,32 @@ def train_one_task(self, task, i_task, epochs):
         print(f"[residual-split] round {i_task}: router-FT sources={self._router_ft_sources} "
               f"(past tasks + BoS); primary reuse per rank = {max(1, local // self._router_ft_sources)}"
               f"/{local}", flush=True)
-    return _prev_train_one_task(self, task, i_task, epochs)
+    if not MR.ACTIVE.enabled:
+        return _prev_train_one_task(self, task, i_task, epochs)
+    MR.EXPANDING.update(on=True, round=i_task, rank0=_rank0(args), probe=None,
+                        path=os.path.join(args.output_dir, f"mres_expansion_check_round{i_task}.json"))
+    if i_task > 0:
+        MR.EXPANDING["probe"] = _old_task_probe(self, i_task)
+    try:
+        return _prev_train_one_task(self, task, i_task, epochs)
+    finally:
+        MR.EXPANDING.update(on=False, probe=None)
+
+
+def _old_task_probe(self, i_task):
+    """First batch of the previous task's loader, on device; the global RNG is restored so
+    the probe does not shift the new expert's initialisation or the data order."""
+    prev = list(self.train_task_list)[i_task - 1]
+    cpu, cuda = torch.get_rng_state(), (torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None)
+    try:
+        batch = next(iter(self.train_task_list[prev]))
+    finally:
+        torch.set_rng_state(cpu)
+        if cuda is not None:
+            torch.cuda.set_rng_state_all(cuda)
+    device = next(self.raw_model.parameters()).device
+    return {k: v.to(device) for k, v in batch.items()
+            if torch.is_tensor(v) and k in ("input_ids", "attention_mask", "labels")}
 
 
 Trainer.train_one_task = train_one_task

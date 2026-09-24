@@ -167,6 +167,13 @@ def collect_paper_baseline(
     return matrix
 
 
+def git_identity_or_unavailable(repo: Path) -> dict:
+    try:
+        return git_identity(repo)
+    except (FileNotFoundError, subprocess.CalledProcessError) as exc:   # e.g. no git in the container
+        return {"unavailable": f"{type(exc).__name__}: {exc}"}
+
+
 def git_identity(repo: Path) -> dict:
     head = subprocess.check_output(
         ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True
@@ -293,7 +300,7 @@ def main() -> int:
             "family": family,
             "method": args.method,
             "model": args.model,
-            "code": git_identity(repo),
+            "code": git_identity_or_unavailable(repo),
             "run_dir": str(run_dir.resolve()),
             "data": "TRACE LLM-CL-Benchmark_5000; 5,000 train records per task",
         },

@@ -8,7 +8,7 @@ Outputs: docs.jsonl (raw text + parsed turns + flags), text.jsonl (user turn
 only, {"anchor": "", "text": ...} so answer_pass_v3_fix.py can run stage B on it),
 stats.json.
 """
-import argparse, json, re, sys, time
+import argparse, json, os, re, sys, time
 from pathlib import Path
 import numpy as np, torch
 from transformers import StoppingCriteria, StoppingCriteriaList
@@ -33,7 +33,8 @@ ASST_HDR = "<|start_header_id|>assistant<|end_header_id|>\n\n"
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--checkpoint", required=True)
-    p.add_argument("--base-model", default="/data2/seonghyeonnoh/LLM-continual-learning-models/Llama-3.1-8B-Instruct")
+    p.add_argument("--base-model", default=os.environ.get(
+        "SLORA_LLAMA31_PATH", "/data2/seonghyeonnoh/LLM-continual-learning-models/Llama-3.1-8B-Instruct"))
     p.add_argument("--bos-token-file", default="", help="v1: bos_token.pt; prompt becomes that single token")
     p.add_argument("--last-bias-file", default="", help="v2: last_bias.pt; prompt stays the BOS run")
     p.add_argument("--all-layer-bias-file", default="", help="v3: all_layer_bias.pt; prompt stays the BOS run")

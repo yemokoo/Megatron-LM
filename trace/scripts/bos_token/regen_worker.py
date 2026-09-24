@@ -31,7 +31,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--checkpoint", required=True); ap.add_argument("--dest", required=True)
     ap.add_argument("--queue", required=True); ap.add_argument("--worker", required=True)
-    ap.add_argument("--base-model", default="/data2/seonghyeonnoh/LLM-continual-learning-models/Llama-3.1-8B-Instruct")
+    ap.add_argument("--base-model", default=os.environ.get(
+        "SLORA_LLAMA31_PATH", "/data2/seonghyeonnoh/LLM-continual-learning-models/Llama-3.1-8B-Instruct"))
     ap.add_argument("--anchor-json", default=str(REPO / "scripts/selfgen/assets/anchors.json"))
     ap.add_argument("--guard-decision", default="none")
     ap.add_argument("--temperature", type=float, default=1.0); ap.add_argument("--top-p", type=float, default=0.95)

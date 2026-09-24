@@ -14,7 +14,7 @@ lm_head, experts and routers are never touched.  Training documents are the
 exact SLoRA chat documents used for TRACE training, with the leading BOS run
 replaced by the new token, and a full-document LM loss.
 """
-import argparse, json, math, sys, time
+import argparse, json, math, os, sys, time
 from pathlib import Path
 import numpy as np, torch
 from torch import nn
@@ -31,7 +31,8 @@ from transformers import AutoTokenizer                        # noqa: E402
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--checkpoint", required=True)
-    p.add_argument("--base-model", default="/data2/seonghyeonnoh/LLM-continual-learning-models/Llama-3.1-8B-Instruct")
+    p.add_argument("--base-model", default=os.environ.get(
+        "SLORA_LLAMA31_PATH", "/data2/seonghyeonnoh/LLM-continual-learning-models/Llama-3.1-8B-Instruct"))
     p.add_argument("--train-json", required=True)
     p.add_argument("--eval-json", required=True)
     p.add_argument("--eval-num", type=int, default=200)

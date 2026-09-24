@@ -38,6 +38,8 @@ REPLAY_SOURCE=${REPLAY_SOURCE:-selfgen}
 ANCHORS=$TRACE/scripts/selfgen/assets/anchors.json
 DEC=none
 GEN_PER_TASK=${GEN_PER_TASK:-1000}
+V1_ANCHOR_PREFIX_CHARS=${V1_ANCHOR_PREFIX_CHARS:-0}; export V1_ANCHOR_PREFIX_CHARS   # v1 filter: 0 = exact anchor, N = first N chars
+GEN_PROTOCOL=${GEN_PROTOCOL:-pool}   # selfgen only: pool (regen_pool.py, label-normalise + dedupe) | v1 (regen_queue_v1.py, v1_1000 chain)
 # replay size knobs: PERSIST_PER_TASK records per source, pool cap = sources x that count,
 # EXPOSURE_CAP replay forwards per primary epoch (held fixed across ratios so only
 # diversity varies).  Defaults reproduce the original 500/5000/5000 chain.
@@ -48,8 +50,12 @@ NEW_EXPERT_INIT=${RESIDUAL_NEW_EXPERT_INIT:-copy_router_zero_b}
 KD_INIT=${KD_INIT:-off}
 KD_INIT_STEP_FRACTION=${KD_INIT_STEP_FRACTION:-1.0}
 GPUS=${GPUS:-0,1,2,3,4,5,6,7}
+EPOCHS=${EPOCHS:-5,3,7,5,3,5,5,7}
+LAST_ROUND=${LAST_ROUND:-7}                  # < 7: stop after that round, no sparse15
+ROUTING_WEIGHT_MODE=${ROUTING_WEIGHT_MODE:-straight_through_topk}   # mass reservoir: full_softmax
 NGPU=$(awk -F, '{print NF}' <<< "$GPUS")
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True OMP_NUM_THREADS=6 MKL_NUM_THREADS=6 TOKENIZERS_PARALLELISM=false
+case "$GEN_PROTOCOL" in pool|v1) ;; *) echo "GEN_PROTOCOL must be pool or v1" >&2; exit 2 ;; esac
 case "$REPLAY_SOURCE" in selfgen|real) ;; *) echo "REPLAY_SOURCE must be selfgen or real" >&2; exit 2 ;; esac
 mkdir -p "$R/model" "$R/gen/round_0" "$R/cond" "$R/logs"
 say(){ printf '[CHAIN %s] %s\n' "$(date '+%F %T')" "$*" | tee -a "$R/chain.log"; }
@@ -75,33 +81,32 @@ SEEDEOF
   say "model/0 seeded from $SEED_CKPT"
 fi
 
-train_round(){   # t
-  local t=$1
+train_once(){   # t gc(0|1)
+  local t=$1 gc=$2
   local task=${TASKS[$t]} port=$((29970+t))
-  [ -f "$R/model/$t/lora_moe_meta.json" ] && return 0
   local -a resume=(); [ "$t" -gt 0 ] && resume=(--resume_checkpoint "$R/model/$((t-1))")
-  say "train round $t ($task): header guard ($DEC) + header loss OFF, replay=$REPLAY_SOURCE, init=$NEW_EXPERT_INIT, kd_init=$KD_INIT@$KD_INIT_STEP_FRACTION, GPUs=$GPUS"
+  local -a gc_args=(); [ "$gc" = 1 ] && gc_args=(--gradient_checkpointing)
   local -a src_env=()
   if [ "$REPLAY_SOURCE" = selfgen ]; then
     src_env=(SELFGEN_ROOT="$R/gen/round_$t" SELFGEN_CURRENT_TASK="$task" SELFGEN_ALLOW_SHORT=1)
   fi
   ( cd "$IMPL" && env "${src_env[@]}" CUDA_VISIBLE_DEVICES=$GPUS \
       BOS_GUARD_HEADER=1 BOS_GUARD_DECISION=$DEC HEADER_NO_LOSS=1 \
-      RESIDUAL_NEW_EXPERT_INIT=$NEW_EXPERT_INIT \
+      RESIDUAL_NEW_EXPERT_INIT=$NEW_EXPERT_INIT GRAD_CKPT=$gc \
       RESUME_CONTRACT_ALLOW_DRIFT=active_stream_samples_per_primary_epoch,joint_replay_active_stream_samples_per_primary_epoch \
       $PY -m torch.distributed.run --nproc_per_node=$NGPU --master_port=$port \
       "$TRACE/scripts/residual/train_residual_v3_split_bosguard.py" \
       --training_version v3_new_replay1to1 --model_name_or_path "$BASE" \
       --data_path "$DATA" --dataset_name all --data_output_path "$R/data_cache" \
-      --output_dir "$R/model" --num_train_epochs 5,3,7,5,3,5,5,7 \
+      --output_dir "$R/model" --num_train_epochs "$EPOCHS" \
       --per_device_train_batch_size 8 --gradient_accumulation_steps 1 \
       --per_device_eval_batch_size 4 --max_prompt_len 1024 --max_ans_len 512 \
       --max_train_len 1024 --learning_rate 2e-4 --weight_decay 0 \
       --adam_beta1 0.9 --adam_beta2 0.999 --adam_epsilon 1e-8 \
       --train_format slora_chat_full --lr_scheduler_type cosine \
-      --num_warmup_steps 0 --warmup_ratio 0.03 --gradient_checkpointing \
+      --num_warmup_steps 0 --warmup_ratio 0.03 "${gc_args[@]}" \
       --experts_per_task 1 --lora_moe_rank 64 --lora_moe_alpha 128 \
-      --lora_moe_dropout 0.05 --top_k 1 --routing_weight_mode straight_through_topk \
+      --lora_moe_dropout 0.05 --top_k 1 --routing_weight_mode "$ROUTING_WEIGHT_MODE" \
       --moe_aux_loss_coeff 0.01 --moe_z_loss_coeff 0.001 --seed 2025 \
       --replay_subset_ratio 0.1 --replay_distribution equal_task \
       --replay_recency_power 1.0 --replay_subset_seed 2025 \
@@ -120,6 +125,19 @@ train_round(){   # t
       --disable_training_flop_counter --stop_after_task "$task" \
       --ablation_phase_mode 1phase --ablation_kd_init "$KD_INIT" --ablation_replay_source "$REPLAY_SOURCE" \
       "${resume[@]}" ) > "$R/logs/train_r$t.log" 2>&1
+}
+
+train_round(){   # t : GRAD_CKPT=0 trains without checkpointing; an OOM retries the round with it on
+  local t=$1 gc=${GRAD_CKPT:-1}
+  local task=${TASKS[$t]} log=$R/logs/train_r$t.log
+  [ -f "$R/model/$t/lora_moe_meta.json" ] && return 0
+  say "train round $t ($task): header guard ($DEC) + header loss OFF, replay=$REPLAY_SOURCE, init=$NEW_EXPERT_INIT, kd_init=$KD_INIT@$KD_INIT_STEP_FRACTION, GPUs=$GPUS, grad ckpt $gc"
+  train_once "$t" "$gc"
+  if [ ! -f "$R/model/$t/lora_moe_meta.json" ] && [ "$gc" = 0 ] && grep -qE "OutOfMemoryError|CUDA out of memory" "$log"; then
+    mv "$log" "$log.oom_gc0"
+    say "round $t ($task): OOM without grad ckpt -> retrying the round with it on"
+    train_once "$t" 1
+  fi
   [ -f "$R/model/$t/lora_moe_meta.json" ] || { say "EVENT: STEP_FAILED train_r$t"; exit 1; }
   say "round $t ($task) trained"
 }
@@ -262,10 +280,68 @@ PYEOF
   say "SOFT round $t / $task: $(tail -1 "$dest/select.log")"
 }
 
-for t in 0 1 2 3 4 5 6 7; do
-  [ "$t" -gt 0 ] && [ "$REPLAY_SOURCE" = selfgen ] && gen_round "$t"
+gen_round_v1(){   # t : v1 protocol (gen_doc + answer_pass_v3_fix, anchor filter, no dedup) -- the v1_1000 chain's regen
+  local t=$1
+  local ckpt=$R/model/$((t-1)) dest=$R/gen/round_$t
+  local nexp; nexp=$($PY -c "import json;print(json.load(open('$ckpt/lora_moe_meta.json'))['num_experts'])")
+  local per=$((GEN_PER_TASK / 8)) j task k
+  local pending=0
+  for j in $(seq 0 $((t-1))); do [ -f "$dest/${TASKS[$j]}/records.jsonl" ] || pending=1; done
+  [ "$pending" = 1 ] || return 0
+  say "regen round $t: tasks 0..$((t-1)) from model/$((t-1)) (forced \\n\\n routing, $GEN_PER_TASK docs/task, v1 protocol, GPUs=$GPUS)"
+  mkdir -p "$dest"
+  for j in $(seq 0 $((t-1))); do force_file "$j" "$nexp" >/dev/null; done
+  $PY "$TRACE/scripts/bos_token/regen_queue_v1.py" --checkpoint "$ckpt" --dest "$dest" \
+    --cond-dir "$R/cond" --num-experts "$nexp" --round "$t" --num-tasks "$t" \
+    --default-per-task "$GEN_PER_TASK" --gpus "$GPUS" \
+    --guard-decision "$DEC" > "$dest/regen_queue.log" 2>&1 || { say "EVENT: STEP_FAILED regen round $t"; exit 1; }
+  for j in $(seq 0 $((t-1))); do
+    task=${TASKS[$j]}
+    [ -f "$dest/$task/records.jsonl" ] && continue
+    cat "$dest/$task"/records.part*.jsonl > "$dest/$task/records.all.jsonl"
+    $PY - "$dest/$task" "$j" "$ANCHORS" "$GEN_PER_TASK" <<'PYEOF' > "$dest/$task/select.log" 2>&1
+import json, os, re, sys, glob, random
+d, j, anchors_path, req = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+anchor = json.load(open(anchors_path))[j]["anchor"]
+strict = {"0": r"\n?(.+?)\n对象：\n(.+?)\n态度：$", "1": r"\n?(.+?)\nStance:$"}.get(j)
+pat = re.compile(r"^" + re.escape(anchor.rstrip("\n")) + strict, re.S) if strict else None
+rows = [json.loads(l) for l in open(f"{d}/records.all.jsonl")]
+prefix_chars = int(os.environ.get("V1_ANCHOR_PREFIX_CHARS", "0"))   # 0 = exact v1 anchor match
+head = anchor.rstrip("\n")[:prefix_chars] if prefix_chars > 0 else anchor.rstrip("\n")
+keep = []                      # drop only broken records (structure / no answer); no dedup, no length cut
+for r in rows:
+    p, a = r["prompt"], r["answer"].strip()
+    if pat:
+        if not pat.match(p) or a not in ("A", "B", "C"): continue
+    else:
+        if not a: continue
+        if not p.startswith(head):   # head = full anchor (v1) or its first V1_ANCHOR_PREFIX_CHARS characters
+            if j == "3":   # Py150 only: its anchor is the dataset's literal "<s> " marker, not task
+                p = anchor.rstrip("\n") + p   # structure -- restore it instead of dropping the record
+                r = {**r, "prompt": p}
+            else:
+                continue
+    keep.append(r)
+docs = [json.loads(l) for f in sorted(glob.glob(f"{d}/stageA.s*/docs.jsonl")) for l in open(f)]
+st = {"requested": req, "docs": len(docs), "starts_with_anchor": sum(1 for x in docs if x["starts_with_anchor"]),
+      "stageB": len(rows), "passed": len(keep), "unique": len({r["prompt"] for r in keep}), "yield": round(len(keep) / req, 4),
+      "anchor_prefix_chars": prefix_chars, "passed_exact_anchor": sum(r["prompt"].startswith(anchor.rstrip("\n")) for r in keep)}
+random.Random(0).shuffle(keep); keep = keep[:500]
+with open(f"{d}/records.jsonl", "w") as fh:
+    for r in keep: fh.write(json.dumps({"prompt": r["prompt"], "answer": r["answer"]}, ensure_ascii=False) + "\n")
+st["selected"] = len(keep)
+json.dump(st, open(f"{d}/select_stats.json", "w"), indent=1); print(json.dumps(st))
+PYEOF
+    say "regen round $t / $task: $(tail -1 "$dest/$task/select.log")"
+    [ -s "$dest/$task/records.jsonl" ] || { say "EVENT: STEP_FAILED select $task round $t (no usable records)"; exit 1; }
+  done
+}
+
+for t in $(seq 0 "$LAST_ROUND"); do
+  [ "$t" -gt 0 ] && [ "$REPLAY_SOURCE" = selfgen ] && { if [ "$GEN_PROTOCOL" = v1 ]; then gen_round_v1 "$t"; else gen_round "$t"; fi; }
   train_round "$t"
 done
+[ "$LAST_ROUND" -lt 7 ] && { say "EVENT: ALL_DONE (stopped after round $LAST_ROUND, no sparse15)"; exit 0; }
 
 # sparse15 evaluation with the guard on
 if [ ! -f "$R/model/sparse15_summary.json" ]; then

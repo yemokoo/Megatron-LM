@@ -42,7 +42,20 @@ sys.path.insert(0, str(IMPL))
 import torch                                   # noqa: E402
 import torch.nn.functional as F                # noqa: E402
 
+# torch>=2.6 defaults torch.load to weights_only=True, which rejects the pickled
+# PromptDataset that upstream TRACE create_prompt_dataset() caches and reloads.
+_stock_torch_load = torch.load
+
+
+def _torch_load_weights_only_default_false(*args, **kwargs):
+    kwargs.setdefault("weights_only", False)
+    return _stock_torch_load(*args, **kwargs)
+
+
+torch.load = _torch_load_weights_only_default_false
+
 from model import Ours_LoRA_MoE_V3 as V3       # noqa: E402
+import mass_reservoir as MR                    # noqa: E402  (inert unless MRES_ENABLE=1)
 
 RAMP_FRAC = float(os.environ.get("RESIDUAL_RAMP_FRAC", "0.2"))
 SECOND_CHOICE = os.environ.get("RESIDUAL_SECOND_CHOICE", "1") == "1"
@@ -70,6 +83,8 @@ def attach_residual(model):
 def residual_forward(self, hidden_states):
     if getattr(self, "residual_router", None) is None:
         return _stock_router_forward(self, hidden_states)
+    if MR.enabled(self):
+        return MR.router_forward(self, hidden_states, V3)
     real = self._active_count()
     flat_hidden = hidden_states.reshape(-1, hidden_states.shape[-1])
     expert_logits = self.router(flat_hidden)[..., :real]
@@ -140,11 +155,20 @@ def freeze_routers_with_residual(model, trainable):
         rr = getattr(layer.shared_expert_router, "residual_router", None)
         if rr is not None:
             rr.weight.requires_grad = trainable
+        mr = getattr(layer.shared_expert_router, "mres_reservoir", None)
+        if mr is not None:
+            mr.weight.requires_grad = trainable
 
 
 V3.freeze_v3_routers = freeze_routers_with_residual
 
 Trainer = V3.Ours_LoRA_MoE_V3_New
+
+if os.environ.get("GRAD_CKPT") == "0":
+    # The trainer forces checkpointing whenever replay is present; this is a pure
+    # memory/compute trade (identical weights), so allow turning it off on large GPUs.
+    _stock_set_grad_ckpt = Trainer._set_grad_ckpt
+    Trainer._set_grad_ckpt = lambda self, enable: _stock_set_grad_ckpt(self, False)
 _stock_snapshot = V3.Ours_LoRA_MoE_V3._snapshot_old_router_rows
 _stock_restore = V3.Ours_LoRA_MoE_V3._freeze_old_router_row_update
 
@@ -172,6 +196,8 @@ for cls in (V3.Ours_LoRA_MoE_V3, Trainer):
 
 if RESIDUAL_KEY not in V3.Ours_LoRA_MoE_V3.save_key_substrings:
     V3.Ours_LoRA_MoE_V3.save_key_substrings.append(RESIDUAL_KEY)
+if MR.RESERVOIR_KEY not in V3.Ours_LoRA_MoE_V3.save_key_substrings:
+    V3.Ours_LoRA_MoE_V3.save_key_substrings.append(MR.RESERVOIR_KEY)
 
 
 # ------------------------------------------------------ task hook + ramp
@@ -191,6 +217,7 @@ def add_experts_and_residual(model, count):
     # every growth (fresh task or --resume_checkpoint rebuild) keeps a residual
     _stock_add_experts(model, count)
     attach_residual(model)
+    MR.attach(model)                # no-op unless the mass reservoir is enabled
 
 
 V3.add_v3_experts = add_experts_and_residual
@@ -203,6 +230,27 @@ def train_one_task(self, task, i_task, epochs):
     finally:
         self._residual_ramp_pending = False
         _set_log_alpha(self.raw_model, 0.0)
+        if MR.ACTIVE.enabled:
+            _finish_mres_task(self, task, i_task)
+
+
+def _finish_mres_task(self, task, i_task):
+    """Task end: alpha = 1 (the reservoir is ready for the next expansion); dump stats."""
+    MR.set_alpha(self.raw_model, 1.0)
+    MR.set_flag(self.raw_model, "_mres_force_new", False)
+    MR.set_flag(self.raw_model, "_mres_primary", False)
+    MR.disable_stats(self.raw_model)
+    summary = MR.summarize(self.raw_model)
+    if self.args.global_rank in (0, -1):
+        MR.write_json(os.path.join(self.args.output_dir, f"mres_stats_round{i_task}.json"),
+                      {"task": task, "round": i_task, "alpha_end": 1.0, "passes": summary,
+                       "rows": MR.row_report(self.raw_model),
+                       "schedule": getattr(self, "_mres_schedule", None)})
+        for pass_name, rows in summary.items():
+            viol = sum(r["violation"] for r in rows) / max(1, len(rows))
+            newr = sum(r["new_rate"] for r in rows) / max(1, len(rows))
+            print(f"[mres] round {i_task} {pass_name}: margin violation {viol:.4f} "
+                  f"new-expert top1 {newr:.4f}", flush=True)
 
 
 def reinit_engine(self, num_training_steps, learning_rate=None):
@@ -225,6 +273,59 @@ def reinit_engine(self, num_training_steps, learning_rate=None):
         if self.args.global_rank == 0:
             print(f"[residual] task-0 ramp over {ramp_updates}/{num_training_steps} updates",
                   flush=True)
+    if MR.ACTIVE.enabled:
+        _install_mres_schedule(self, num_training_steps)
+
+
+MRES_LOG_EVERY = int(os.environ.get("MRES_LOG_EVERY", "50"))
+
+
+def _install_mres_schedule(self, total):
+    """alpha: 0 through the warm-up, then linear to 1 at the last update; warm-up flags."""
+    cfg = MR.ACTIVE
+    warm = MR.warmup_updates(total, cfg.warmup_frac)
+    state = {"step": 0, "total": total, "warmup": warm}
+    self._mres_schedule = state
+    MR.set_alpha(self.raw_model, 0.0)
+    sched_step, opt_step = self.lr_scheduler.step, self.optimizer.step
+
+    def in_warmup():
+        return state["step"] < state["warmup"]
+
+    def optimizer_step(*a, **k):
+        if in_warmup() and cfg.warmup_freeze_router:
+            # warm-up: only the new expert (LoRA + its router row) moves; old rows, skip and
+            # r_res keep their values (fresh AdamW moments are zero, so a zero grad is no update)
+            for router in MR.routers(self.raw_model):
+                n = router.router.weight.shape[0]
+                if router.router.weight.grad is not None:
+                    router.router.weight.grad[:n - 1].zero_()
+                for p in (router.residual_router.weight, router.mres_reservoir.weight):
+                    if p.grad is not None:
+                        p.grad.zero_()
+        return opt_step(*a, **k)
+
+    def scheduler_step(*a, **k):
+        out = sched_step(*a, **k)
+        state["step"] += 1
+        MR.set_alpha(self.raw_model, MR.alpha_schedule(state["step"], total, warm))
+        if self.args.global_rank in (0, -1) and MRES_LOG_EVERY and state["step"] % MRES_LOG_EVERY == 0:
+            rows = MR.summarize(self.raw_model, reset=False).get("router_ft", [])
+            if rows:
+                mean = lambda key: sum(r[key] for r in rows) / len(rows)
+                print(f"[mres] step {state['step']}/{total} alpha {MR.alpha_of(self.raw_model):.3f} "
+                      f"warmup {in_warmup()} router-FT: violation {mean('violation'):.4f} "
+                      f"z_res {mean('z_res'):.3f} thr {mean('threshold'):.3f} "
+                      f"res_mass {mean('res_mass'):.4f} new {mean('new_rate'):.4f} "
+                      f"skip {mean('skip_rate'):.4f}", flush=True)
+        return out
+
+    self.optimizer.step = optimizer_step
+    self.lr_scheduler.step = scheduler_step
+    self._mres_in_warmup = in_warmup
+    if self.args.global_rank in (0, -1):
+        print(f"[mres] schedule: {total} updates, warm-up {warm} (forced new expert, alpha 0), "
+              f"refill alpha 0->1 over the remaining {total - warm}", flush=True)
 
 
 Trainer.train_one_task = train_one_task
@@ -244,6 +345,8 @@ def save_meta_with_residual(model, output_dir, args, trainer=None):
     meta["residual_expert"] = {"count": 1, "init": "zeros", "ramp_frac_task0": RAMP_FRAC,
                                "second_choice": SECOND_CHOICE,
                                "state_key": RESIDUAL_KEY.strip(".") + ".weight"}
+    if MR.ACTIVE.enabled:
+        meta[MR.META_KEY] = MR.ACTIVE.to_meta(alpha_end=MR.alpha_of(model))
     with open(path, "w") as f:
         json.dump(meta, f, indent=2)
 

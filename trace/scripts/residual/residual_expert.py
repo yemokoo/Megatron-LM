@@ -165,6 +165,7 @@ def load_v3_residual_checkpoint(checkpoint_dir, tokenizer, base, device="cuda",
     (train_residual_v3.py).  Mirrors load_v3_checkpoint, attaching the residual
     router before the state is loaded; builds on GPU directly."""
     import train_residual_v3 as TR  # installs the router/save patches
+    import mass_reservoir as MR
     from transformers import AutoModelForCausalLM
     from utils.model.model_utils import create_hf_model
     V3 = _v3()
@@ -179,8 +180,10 @@ def load_v3_residual_checkpoint(checkpoint_dir, tokenizer, base, device="cuda",
         model, r=meta["r"], alpha=meta["alpha"], top_k=meta["top_k"],
         aux_loss_coeff=meta["aux_loss_coeff"], z_loss_coeff=meta["z_loss_coeff"],
         routing_weight_mode=meta["routing_weight_mode"], dropout=meta.get("dropout", 0.0))
+    MR.set_active(MR.config_from_meta(meta))   # mass reservoir restored from meta (off if absent)
     V3.add_v3_experts(model, meta["num_experts"])
     TR.attach_residual(model)
+    MR.attach(model)
     state = torch.load(os.path.join(checkpoint_dir, "pytorch_model.bin"),
                        map_location="cpu", weights_only=False)
     missing, unexpected = model.load_state_dict(state, strict=False)
@@ -189,5 +192,7 @@ def load_v3_residual_checkpoint(checkpoint_dir, tokenizer, base, device="cuda",
     need = [k for k in missing if any(s in k for s in V3.Ours_LoRA_MoE_V3.save_key_substrings)]
     if need:
         raise RuntimeError(f"missing grown/residual keys: {need[:5]}")
+    if MR.ACTIVE.enabled:
+        MR.set_alpha(model, float(meta[MR.META_KEY].get("alpha_end", 1.0)))
     model.to(device=device, dtype=dtype).eval()
     return model, meta
