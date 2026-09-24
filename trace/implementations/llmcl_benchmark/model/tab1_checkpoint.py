@@ -18,6 +18,7 @@ import torch
 from model.tab1_lora import (attach_olora_targets, attach_seq_lora_targets,
                              merge_olora_into_base, resolve_targets,
                              set_olora_task)
+from model.tab1_dymoe import attach_dymoe_targets, grow_dymoe_old_banks
 from model.tab1_moe import attach_shared_path, build_scope
 
 TAB1_META_NAME = "tab1_meta.json"
@@ -72,6 +73,12 @@ def load_tab1_checkpoint(checkpoint_dir: str, tokenizer,
         # a view of the metadata rather than re-listing every field here.
         scope.attach(model, _MetaArgs(meta))
         scope.add_experts(model, meta["num_experts"])
+    elif method == "dymoe":
+        attach_dymoe_targets(
+            model, resolve_targets(meta["targets"]), meta["r"], meta["alpha"],
+            meta.get("dropout", 0.0), meta["expert_num"], meta["top_k"],
+            meta["router_temperature"], meta["cosine_similarity_scale"])
+        grow_dymoe_old_banks(model, int(meta["total_expert_num"]))
     else:
         raise ValueError(f"unknown Table-1 method in metadata: {method}")
 
@@ -82,7 +89,8 @@ def load_tab1_checkpoint(checkpoint_dir: str, tokenizer,
         raise RuntimeError(f"unexpected Table-1 checkpoint keys: {unexpected[:5]}")
     adapter_missing = [key for key in missing
                        if any(fragment in key for fragment in
-                              (".lora.", ".adapters.", ".experts.", ".router."))]
+                              (".lora.", ".adapters.", ".experts.", ".router.",
+                               ".dymoe_"))]
     if adapter_missing:
         raise RuntimeError(
             f"Table-1 checkpoint is missing adapter keys: {adapter_missing[:5]}")

@@ -7,3 +7,5 @@ lifelong_moe	expansion	FFN experts + attn shared LoRA	llmcl_benchmark/model/tab1
 lifelong_moe_attn	expansion	shared-router QKVO+FFN	llmcl_benchmark/model/tab1_moe.py	ours-v3와 동일 확장; shared path 없음(모든 projection이 이미 routed)
 moe_lpr	expansion	FFN experts	llmcl_benchmark/model/tab1_moe.py	2-phase; review는 router-only, LM + gamma * 단일-expert routing CE
 moe_lpr_attn	expansion	shared-router QKVO+FFN	llmcl_benchmark/model/tab1_moe.py	ours-v3와 train param 동일하게 맞춘 MoE-LPR
+dymoe	expansion	all7 per-projection LoRA-MoE	llmcl_benchmark/model/tab1_dymoe.py	LLaVA-DyMoE(zhaoc5/DyMoE) 포트: task당 rank-4 expert 16개, cosine top-16, TAG tau0.2 + RSR exc/spe 1e-3(후반 50% ramp), task 끝에 frozen bank로 fold
+incmoelora	expansion	all7 per-projection LoRA-MoE	llmcl_benchmark/model/tab1_dymoe.py	DyMoE 논문의 IncMoELoRA 베이스라인: 같은 레이어, TAG/RSR 끔

@@ -4,7 +4,7 @@
 #   _run_tab1.sh <validate|train> <llama31|qwen25_7b> <method>
 #
 # methods: seq_lora ewc olora mtl lifelong_moe lifelong_moe_attn
-#          moe_lpr moe_lpr_attn
+#          moe_lpr moe_lpr_attn dymoe incmoelora
 #
 # Every method runs under the same contract as Ours (global batch 64, r64 /
 # alpha128 / dropout 0.05, lr 2e-4, cosine + 3% warmup, seed 2025, the
@@ -32,6 +32,7 @@ case "${METHOD}" in
   lifelong_moe_attn)               IMPL_METHOD="lifelong_moe"; MOE_SCOPE="ffn_attn" ;;
   moe_lpr)                         IMPL_METHOD="moe_lpr"; MOE_SCOPE="ffn" ;;
   moe_lpr_attn)                    IMPL_METHOD="moe_lpr"; MOE_SCOPE="ffn_attn" ;;
+  dymoe|incmoelora)                IMPL_METHOD="dymoe"; MOE_SCOPE="" ;;
   *) echo "[ERROR] unknown tab1 method: ${METHOD}" >&2; exit 2 ;;
 esac
 
@@ -164,6 +165,30 @@ case "${IMPL_METHOD}" in
     # 5 epochs x 40,000 joint records = the 200,000 samples the sequential
     # schedule consumes, so the ceiling is matched on compute too.
     TRAIN_COMMAND+=(--mtl_epochs "${TAB1_MTL_EPOCHS:-5}")
+    ;;
+  dymoe)
+    # LLaVA-DyMoE (zhaoc5/DyMoE scripts/Train/*.sh): per task 16 rank-4
+    # experts (TAB1_RANK 64 split 16 ways) on all seven projections, top-16
+    # cosine routing at T=0.01, TAG tau=0.2, RSR exc=spe=1e-3 at T=0.1 ramped
+    # in over the second half of each task. incmoelora = the paper's
+    # IncMoELoRA baseline: the same layer with TAG and RSR switched off.
+    if [[ "${METHOD}" == "incmoelora" ]]; then
+      DYMOE_TAG_DEFAULT=0; DYMOE_EXC_DEFAULT=0; DYMOE_SPE_DEFAULT=0
+    else
+      DYMOE_TAG_DEFAULT=1; DYMOE_EXC_DEFAULT=1e-3; DYMOE_SPE_DEFAULT=1e-3
+    fi
+    TRAIN_COMMAND+=(
+      --dymoe_variant "${METHOD}"
+      --dymoe_experts_per_task "${TAB1_DYMOE_EXPERTS:-16}"
+      --dymoe_top_k "${TAB1_DYMOE_TOP_K:-16}"
+      --dymoe_router_temperature "${TAB1_DYMOE_ROUTER_T:-0.01}"
+      --dymoe_cosine_scale "${TAB1_DYMOE_COSINE_SCALE:-1.0}"
+      --dymoe_tag "${TAB1_DYMOE_TAG:-${DYMOE_TAG_DEFAULT}}"
+      --dymoe_conflict_ratio "${TAB1_DYMOE_TAU:-0.2}"
+      --dymoe_exc_coeff "${TAB1_DYMOE_EXC:-${DYMOE_EXC_DEFAULT}}"
+      --dymoe_spe_coeff "${TAB1_DYMOE_SPE:-${DYMOE_SPE_DEFAULT}}"
+      --dymoe_rsr_temperature "${TAB1_DYMOE_RSR_T:-0.1}"
+      --dymoe_rsr_start_fraction "${TAB1_DYMOE_RSR_START:-0.5}")
     ;;
 esac
 

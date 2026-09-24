@@ -171,7 +171,7 @@ def adapter_parameter_count(model: nn.Module) -> Dict[str, int]:
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     adapter = 0
     for module in model.modules():
-        if isinstance(module, LoRAPair):
+        if isinstance(module, LoRAPair) or getattr(module, "_tab1_adapter", False):
             adapter += module.parameter_count
         elif isinstance(module, nn.Linear) and getattr(
                 module, "_tab1_router", False):

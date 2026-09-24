@@ -12,6 +12,8 @@ under, so a Table-1 difference is a method difference.
   mtl            joint training on all eight tasks (the ceiling)
   lifelong_moe   grow experts, freeze old experts/router rows, distil
   moe_lpr        grow experts, then router-only review with routing CE
+  dymoe          LLaVA-DyMoE: per-projection expert banks, TAG + RSR
+                 (--dymoe_variant incmoelora = the paper's no-TAG/no-RSR baseline)
 
 ``--moe_scope`` selects the FFN-only or shared QKVO+FFN expansion for the two
 MoE rows, so each can be reported at Ours' trainable-parameter count.
@@ -52,11 +54,14 @@ from model.tab1_baselines import TAB1_TRAINERS
 from model.tab1_lora import (attach_olora_targets, attach_seq_lora_targets,
                              adapter_parameter_count, resolve_targets)
 from model.tab1_moe import TAB1_MOE_TRAINERS, attach_shared_path
+from model.tab1_dymoe import (DyMoETab1, attach_dymoe_targets,
+                              grow_dymoe_old_banks)
 
 ALL_TASKS = ["C-STANCE", "FOMC", "MeetingBank", "Py150", "ScienceQA",
              "NumGLUE-cm", "NumGLUE-ds", "20Minuten"]
 LORA_METHODS = {"seq_lora", "ewc", "olora", "mtl"}
 MOE_METHODS = {"lifelong_moe", "moe_lpr"}
+DYMOE_METHODS = {"dymoe"}
 
 
 def csv_strings(value):
@@ -82,7 +87,8 @@ def tokenizer_source_fingerprint(model_path):
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--method", required=True,
-                        choices=sorted(LORA_METHODS | MOE_METHODS))
+                        choices=sorted(LORA_METHODS | MOE_METHODS
+                                       | DYMOE_METHODS))
     parser.add_argument("--model_name_or_path", required=True)
     parser.add_argument("--data_path", required=True)
     parser.add_argument("--dataset_name", type=csv_strings, default=["all"])
@@ -248,7 +254,30 @@ def parse_args():
     # updates. Expressed as a fraction it transfers to TRACE, where each task
     # has a different step count; a fixed step number would not.
     parser.add_argument("--lpr_review_fraction", type=float, default=0.2)
-    return parser.parse_args()
+
+    # LLaVA-DyMoE. Defaults are the upstream scripts/Train/*.sh values; rank,
+    # alpha and dropout come from --lora_rank/--lora_alpha/--lora_dropout, and
+    # --lora_rank is split evenly over the experts (64 / 16 = rank-4 experts).
+    parser.add_argument("--dymoe_variant", default="dymoe",
+                        choices=["dymoe", "incmoelora"],
+                        help="incmoelora is the paper's IncMoELoRA baseline: "
+                             "the same layer with TAG off and RSR at zero.")
+    parser.add_argument("--dymoe_experts_per_task", type=int, default=16)
+    parser.add_argument("--dymoe_top_k", type=int, default=16)
+    parser.add_argument("--dymoe_router_temperature", type=float, default=0.01)
+    parser.add_argument("--dymoe_cosine_scale", type=float, default=1.0)
+    parser.add_argument("--dymoe_tag", type=int, default=1)
+    parser.add_argument("--dymoe_conflict_ratio", type=float, default=0.2)
+    parser.add_argument("--dymoe_exc_coeff", type=float, default=1e-3)
+    parser.add_argument("--dymoe_spe_coeff", type=float, default=1e-3)
+    parser.add_argument("--dymoe_rsr_temperature", type=float, default=0.1)
+    parser.add_argument("--dymoe_rsr_start_fraction", type=float, default=0.5)
+    args = parser.parse_args()
+    if args.method == "dymoe" and args.dymoe_variant == "incmoelora" and (
+            args.dymoe_tag or args.dymoe_exc_coeff or args.dymoe_spe_coeff):
+        parser.error("--dymoe_variant incmoelora requires --dymoe_tag 0 "
+                     "--dymoe_exc_coeff 0 --dymoe_spe_coeff 0")
+    return args
 
 
 # Official O-LoRA passes no target_modules to LoraConfig, so PEFT's Llama
@@ -291,6 +320,8 @@ def resume_state(model, args):
     if args.method in MOE_METHODS:
         from model.tab1_moe import build_scope
         build_scope(args.moe_scope).add_experts(model, meta["num_experts"])
+    elif args.method in DYMOE_METHODS:
+        grow_dymoe_old_banks(model, int(meta["total_expert_num"]))
     elif args.method == "olora":
         from model.tab1_lora import set_olora_task
         set_olora_task(model, int(meta.get("current_task", last)))
@@ -369,6 +400,19 @@ def attach_layout(model, args):
                 args.lora_dropout)
         print_rank_0(f"[layout] {args.method}: {wrapped} projections on "
                      f"{args.lora_targets}", args.global_rank)
+        return model
+
+    if args.method in DYMOE_METHODS:
+        wrapped = attach_dymoe_targets(
+            model, resolve_targets(args.lora_targets), args.lora_rank,
+            args.lora_alpha, args.lora_dropout, args.dymoe_experts_per_task,
+            args.dymoe_top_k, args.dymoe_router_temperature,
+            args.dymoe_cosine_scale)
+        print_rank_0(
+            f"[layout] {args.dymoe_variant}: {wrapped} projections on "
+            f"{args.lora_targets}, {args.dymoe_experts_per_task} experts x "
+            f"rank {args.lora_rank // args.dymoe_experts_per_task} per task",
+            args.global_rank)
         return model
 
     # MoE rows: the shared path, if any, must be wrapped before the expert
@@ -539,8 +583,12 @@ def main():
     train_task_list, eval_task_list, test_task_list, joint_loader = (
         build_loaders(args, tokenizer, model, manifest))
 
-    trainer_class = (TAB1_TRAINERS[args.method] if args.method in LORA_METHODS
-                     else TAB1_MOE_TRAINERS[args.method])
+    if args.method in LORA_METHODS:
+        trainer_class = TAB1_TRAINERS[args.method]
+    elif args.method in DYMOE_METHODS:
+        trainer_class = DyMoETab1
+    else:
+        trainer_class = TAB1_MOE_TRAINERS[args.method]
     trainer = trainer_class(model, tokenizer, None, train_task_list,
                             eval_task_list, test_task_list, args)
     if joint_loader is not None:
