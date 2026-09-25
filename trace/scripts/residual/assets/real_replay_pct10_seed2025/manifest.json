@@ -1,0 +1,71 @@
+{
+ "description": "real replay memory shared by every real-replay mres ablation arm: 500 records/task (10% of train.json), seed 2025, build_real_replay_subsets.py pct10",
+ "seed": 2025,
+ "records_per_task": 500,
+ "tasks": {
+  "C-STANCE": {
+   "file": "task_0_C-STANCE.json",
+   "task_index": 0,
+   "indices_sha256": "70e440d6625a7f0775d6ada562c48902ebabb77f2efb2b6dc683249bf7d4e2d5",
+   "file_sha256": "8d5d506df4278ef44dad5c63d0c6c3451ab13c02bed8ebad8087dbb216b01f70",
+   "train_json_sha256": "a67441f42a1c6e346868c969c05ffb7969425e0e89c36e4e3c5f757489437d46",
+   "train_json_records": 5000
+  },
+  "FOMC": {
+   "file": "task_1_FOMC.json",
+   "task_index": 1,
+   "indices_sha256": "6309b9f258e871be89119ac9a1977be8b2870e1397786c79eac0954cd3e600bb",
+   "file_sha256": "88ffec172c70ca77e21299d33a4f6d79af152bb9229b5e914ba024b9b75088da",
+   "train_json_sha256": "0b27cfac6d0f209a5758e88ead315e4734b95f6e926d78903ae299aea3185a0e",
+   "train_json_records": 5000
+  },
+  "MeetingBank": {
+   "file": "task_2_MeetingBank.json",
+   "task_index": 2,
+   "indices_sha256": "552300e985ce1046465f67d1a3992a308d6c61c8c9661472a5ace13ad45c6c6b",
+   "file_sha256": "cda0cccda998ceccfa07ac07665d2df39f32c477cfb83031570d8cb107cf73ec",
+   "train_json_sha256": "1157e590ba5f2dfb845a993fb7ee7b87adfb6fcad8eaedb67a8259cfd28d1134",
+   "train_json_records": 5000
+  },
+  "Py150": {
+   "file": "task_3_Py150.json",
+   "task_index": 3,
+   "indices_sha256": "d7f99d7a212770367dd27f62f9e092c85f478fbd3d49123d8e26437a5e46bbba",
+   "file_sha256": "e6e1292baf6fdfd2766820bb046bc83f31fc92820c9e797da70681fb09f4adce",
+   "train_json_sha256": "315b14e628ae95ffbfda3e778e77004bdcab2c79c2e462700dffaa42bf0ebdbf",
+   "train_json_records": 5000
+  },
+  "ScienceQA": {
+   "file": "task_4_ScienceQA.json",
+   "task_index": 4,
+   "indices_sha256": "9c6d3b9331b2be147dc586a0b0932da0e69e36b1837e58d4bf77975831722a8d",
+   "file_sha256": "ccc9f680bf1e70568ad68d44320ad5240067f9d1931bd8836f14b9ba17049d51",
+   "train_json_sha256": "6f74c8433ec1c3d83f97e45a76f8d1ff59006d7e2f8112523a21d97d90400dcf",
+   "train_json_records": 5000
+  },
+  "NumGLUE-cm": {
+   "file": "task_5_NumGLUE-cm.json",
+   "task_index": 5,
+   "indices_sha256": "817d7d27e900ab64fa66cb70e47fd4e8910f08f957dc856810e4df747d2a8ac3",
+   "file_sha256": "90139edbb9a32812ed6e245df970946df094f2cade9dbf79fc83921b6d4d900f",
+   "train_json_sha256": "cc14f25cd7b768efe0697e42ceafd24d8b1c8770f4aac5f8bc32abbafa977f49",
+   "train_json_records": 5000
+  },
+  "NumGLUE-ds": {
+   "file": "task_6_NumGLUE-ds.json",
+   "task_index": 6,
+   "indices_sha256": "56c3e6030fc457a1f7ec720519efaa1500a77171f3076d9c9c4593d6188ff0c6",
+   "file_sha256": "e38a52dad8e9bf671c51dfcda719866a57f83646292619fcd1af679488550544",
+   "train_json_sha256": "1d3fe0a38267fa3c3c9fdd42653dbedb90ddbf7fe05e9b78f9f3c0d6d6dc3654",
+   "train_json_records": 5000
+  },
+  "20Minuten": {
+   "file": "task_7_20Minuten.json",
+   "task_index": 7,
+   "indices_sha256": "fa2c7feaaa30276412794625b744c38809cb2f241e400fd1a426877c93c881fc",
+   "file_sha256": "1496921472f4825cc176b03a1660da5085ae218651297cb4f7d623a2de00ace0",
+   "train_json_sha256": "605ae27c447168c91f7f4fa071be06975b1b12e2a910ed7320ea7b274ae1ef18",
+   "train_json_records": 5000
+  }
+ }
+}

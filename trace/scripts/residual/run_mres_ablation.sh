@@ -63,12 +63,25 @@ json.dump(arm, open(path, "w"), indent=1)
 PY
 [ $? = 0 ] || exit 2
 
-# ---- real replay: every real arm uses one pre-sampled memory (500 records/task, seed 2025,
-# build_real_replay_subsets.py pct10) instead of each run drawing its own.  The backbone-BoS
-# pseudo task is the fixed RESIDUAL_BOS_JSONL file in every arm and is left as is.
+# ---- real replay: every real arm, on every server, uses one pre-sampled memory -- the index
+# files committed in scripts/residual/assets/real_replay_pct10_seed2025 (500 records/task, seed
+# 2025, build_real_replay_subsets.py pct10) -- instead of each run drawing its own.  The indices
+# point into each task's train.json, so that file is checked against the manifest's sha256 first.
+# The backbone-BoS pseudo task is the fixed RESIDUAL_BOS_JSONL file in every arm and is left as is.
 if [ "$REPLAY_SOURCE" = real ]; then
-  SUBSET=${REPLAY_SUBSET:-$RUN_ROOT/replay_subsets/pct10/fixed_replay_memory}
-  [ -f "$SUBSET/task_7_20Minuten.json" ] || { echo "missing pre-sampled replay $SUBSET (run build_real_replay_subsets.py --out-root $RUN_ROOT/replay_subsets)" >&2; exit 2; }
+  SUBSET=${REPLAY_SUBSET:-$TRACE/scripts/residual/assets/real_replay_pct10_seed2025}
+  [ -f "$SUBSET/task_7_20Minuten.json" ] || { echo "missing pre-sampled replay $SUBSET" >&2; exit 2; }
+  if [ -f "$SUBSET/manifest.json" ]; then
+    python3 - "$SUBSET/manifest.json" "${TRACE_DATA_ROOT:-/data2/seonghyeonnoh/LLM-continual-learning-data/flamedata2.data2-verified-backup/trace}" <<'PY' || exit 2
+import hashlib, json, sys
+man, data = json.load(open(sys.argv[1])), sys.argv[2]
+bad = [t for t, v in man["tasks"].items()
+       if hashlib.sha256(open(f"{data}/{t}/train.json", "rb").read()).hexdigest() != v["train_json_sha256"]]
+if bad:
+    sys.exit(f"train.json under {data} differs from the one the replay indices were drawn from: {bad}")
+print(f"[mres-ablation] train.json sha256 matches the replay manifest for {len(man['tasks'])} tasks")
+PY
+  fi
   mem=$RUN_DIR/model/fixed_replay_memory
   mkdir -p "$mem"
   for f in "$SUBSET"/task_*.json; do
