@@ -43,7 +43,8 @@ ablation env (defaults = the published recipe)
                                 trains the primary branch alone, then a separate router-FT pass
                                 replays exactly the same per-update router-FT batches (same
                                 replay records, same current-batch slices, same update count,
-                                fresh optimizer + LR/alpha/warm-up schedule).
+                                fresh optimizer + LR/alpha/warm-up schedule).  The pre-correction
+                                state is saved as <round>_prephase2 for the diagonal eval.
   RESIDUAL_ROUTER_FT_OBJECTIVE  lm (default) | distill: replay/BoS records in router-FT are
                                 trained with per-layer KL to the pre-expansion router instead of
                                 LM loss; the current-task slice keeps LM loss.  Mass reservoir
@@ -287,6 +288,10 @@ def _run_joint_or_posthoc(self, primary_loader, memory_loader, epochs, device, p
         self._joint_branches = ("primary",)
         _prev_joint_epochs(self, primary_loader, memory_loader, epochs, device,
                            f"{phase_name} [posthoc 1/2: primary only]", task=task, i_task=i_task)
+        if i_task is not None:
+            # the acquisition point: new task learned, router not yet corrected.  sparse15 scores
+            # the diagonal cells from here (SPARSE15_DIAGONAL_CKPT_SUFFIX=_prephase2)
+            self.save_model(f"{i_task}{V3.PREPHASE2_SUFFIX}")
         if _rank0(self.args):
             print(f"[residual-split] post-hoc router correction: {updates} router-only updates "
                   f"(= the joint arm's update count)", flush=True)

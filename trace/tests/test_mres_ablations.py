@@ -303,6 +303,8 @@ def _loop_harness(model, *, n_primary=12, batch=2, n_replay=18, sources=2, lr=1e
     trainer._count_workload_batch = lambda *a, **k: None
     trainer._count_workload_update = lambda: None
     trainer._run_epoch_probe = lambda *a, **k: None
+    trainer.saved = []
+    trainer.save_model = trainer.saved.append
     trainer.steps = 0
 
     def reinit(updates=None):
@@ -397,6 +399,8 @@ class PostHoc(Base):
         self.assertEqual(t_h.steps, 2 * 2 * len(pl))              # primary pass + router pass
         self.assertEqual(t_h.reinit_calls, [2 * len(pl)])          # one fresh engine, same length
         self.assertIsNone(t_h._joint_branches)
+        self.assertEqual(t_h.saved, ["1_prephase2"])               # pre-correction checkpoint
+        self.assertEqual(t_j.saved, [])
 
     def test_branch_gradients(self):
         # primary-only never touches r_res / skip; router-only never touches the experts

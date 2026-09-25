@@ -9,7 +9,8 @@
 #   ARM=no_margin   margin loss weight lambda -> 0 (MRES_LAMBDA=0; margin stats still logged)
 #   ARM=posthoc     joint router correction -> post-hoc: the task trains the primary branch
 #                   alone, then a router-only pass replays exactly the joint arm's per-update
-#                   router-FT batches (same records, same current slices, same update count)
+#                   router-FT batches (same records, same current slices, same update count);
+#                   <round>_prephase2 = pre-correction checkpoint, used for the diagonal scores
 #   ARM=distill     router-FT objective on replay/BoS records: LM -> per-layer KL to the
 #                   pre-expansion router (RESIDUAL_DISTILL_PAD=row: zero teacher row per new
 #                   expert; prob: zero teacher probability); current-task slice keeps LM
@@ -40,7 +41,9 @@ case "$ARM" in
   main_real)  ;;
   random_row) MRES_NEW_ROW=random ;;
   no_margin)  MRES_LAMBDA=0 ;;
-  posthoc)    RESIDUAL_ROUTER_FT_TIMING=posthoc ;;
+  posthoc)    RESIDUAL_ROUTER_FT_TIMING=posthoc
+              # diagonal (acquisition) score = right after the new task, before the router correction
+              export SPARSE15_DIAGONAL_CKPT_SUFFIX=_prephase2 ;;
   distill)    RESIDUAL_ROUTER_FT_OBJECTIVE=distill ;;
   *) echo "unknown ARM=$ARM" >&2; exit 2 ;;
 esac
@@ -52,7 +55,7 @@ import json, os, sys
 keys = ["REPLAY_SOURCE", "GEN_PROTOCOL", "V1_ANCHOR_PREFIX_CHARS", "ROUTING_WEIGHT_MODE", "MRES_ENABLE",
         "MRES_NEW_ROW", "MRES_LAMBDA", "MRES_DELTA", "MRES_WARMUP_FRAC", "MRES_MARGIN_CURRENT",
         "MRES_WARMUP_FREEZE_ROUTER", "RESIDUAL_ROUTER_FT_TIMING", "RESIDUAL_ROUTER_FT_OBJECTIVE",
-        "RESIDUAL_DISTILL_PAD", "EPOCHS", "GPUS", "SEED_CKPT", "METHOD_NAME", "LAST_ROUND"]
+        "RESIDUAL_DISTILL_PAD", "SPARSE15_DIAGONAL_CKPT_SUFFIX", "EPOCHS", "GPUS", "SEED_CKPT", "METHOD_NAME", "LAST_ROUND"]
 arm = {"arm": sys.argv[2], "env": {k: os.environ.get(k) for k in keys}}
 path = sys.argv[1]
 if os.path.exists(path):
