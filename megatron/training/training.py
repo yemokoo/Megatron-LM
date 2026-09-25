@@ -59,6 +59,7 @@ from megatron.core.rerun_state_machine import (
 from megatron.training.initialize import initialize_megatron
 from megatron.training.initialize import write_args_to_tensorboard
 from megatron.training.initialize import set_jit_fusion_options
+from megatron.training.utils import get_ltor_masks_and_position_ids
 from megatron.training.utils import (
     get_batch_on_this_cp_rank,
     get_batch_on_this_tp_rank,
@@ -86,6 +87,7 @@ from megatron.core.transformer.shared_router_hybrid import (
     capture_shared_router_routing_maps,
 )
 from megatron.core.transformer.moe import upcycling_utils
+from megatron.core.transformer.moe import mass_reservoir
 from megatron.core.transformer.moe.router import Router, training_new_expert_quota
 from megatron.core.transformer.moe.moe_utils import track_moe_metrics
 from megatron.core.parallel_state import (
@@ -1683,6 +1685,13 @@ def _resolve_joint_replay_existing_experts(args):
         )
     boundary = moe_boundary if moe_boundary is not None else shared_boundary
     if boundary is None:
+        # expansion straight from the previous task (no KD-init checkpoint in between)
+        boundary = getattr(args, 'shared_router_hybrid_expand_from_num_experts', None)
+        if boundary is None:
+            boundary = getattr(args, 'moe_expand_from_num_experts', None)
+    if boundary is None and getattr(args, 'moe_mass_reservoir', False):
+        return None     # task 0: nothing is frozen yet, every parameter trains
+    if boundary is None:
         raise ValueError(
             'joint replay requires --moe-resume-from-num-experts or '
             '--shared-router-hybrid-resume-from-num-experts'
@@ -1708,9 +1717,10 @@ def _activate_moe_joint_replay_optimizer(model):
     if quota_min_new_slots is not None and int(quota_min_new_slots) <= 0:
         raise ValueError('--moe-joint-new-expert-quota-min-new-slots must be positive')
     _validate_joint_replay_old_data_kd(args)
-    for shard in unwrap_model(model):
-        freeze_all_but_new_moe_params(shard,num_existing_experts,
-            freeze_existing_experts=True,freeze_existing_router=False,train_dense_attention_lora=False)
+    if num_existing_experts is not None:
+        for shard in unwrap_model(model):
+            freeze_all_but_new_moe_params(shard,num_existing_experts,
+                freeze_existing_experts=True,freeze_existing_router=False,train_dense_attention_lora=False)
     kw={f.name:getattr(args,f.name) for f in dataclasses.fields(OptimizerConfig) if hasattr(args,f.name)}
     cfg=OptimizerConfig(**kw);cfg.timers=get_timers()
     opt=get_megatron_optimizer(cfg,model,None,None,1.0,use_gloo_process_groups=args.enable_gloo_process_groups)
@@ -2631,6 +2641,8 @@ def _debug_num_existing_experts(args):
 
 
 def _debug_param_kind(name):
+    if name.endswith(mass_reservoir.PARAM_NAME):
+        return 'router_reservoir'
     if name.endswith('router.weight') or name.endswith('expert_router.weight'):
         return 'router_weight'
     if name.endswith('expert_bias') and 'router' in name:
@@ -2706,7 +2718,7 @@ def _debug_expert_row_grad_sums(name, param, num_experts):
 
 def _debug_expected_rows_for_param(args, name, num_experts, num_existing_experts):
     kind = _debug_param_kind(name)
-    if kind == 'other' or num_experts is None or num_existing_experts is None:
+    if kind in ('other', 'router_reservoir') or num_experts is None or num_existing_experts is None:
         return None
 
     all_rows = list(range(num_experts))
@@ -2780,6 +2792,8 @@ def _debug_trainable_params_and_maybe_exit(model, unwrapped_model):
                 totals['trainable_parameters'] += int(param.numel())
 
             kind = _debug_param_kind(name)
+            if kind == 'router_reservoir':
+                continue
             if kind == 'other':
                 if param.requires_grad:
                     unexpected_trainable.append(
@@ -2989,6 +3003,8 @@ def setup_model_and_optimizer(model_provider_func,
         source_unwrapped_model = unwrap_model(source_model)
         for target_shard, source_shard in zip(unwrapped_model, source_unwrapped_model):
             expand_moe_model(target_shard, source_shard, args.moe_expand_from_num_experts)
+            if getattr(args, 'moe_mass_reservoir', False):
+                _mres_expansion_check(target_shard, source_shard, args, args.moe_expand_from_num_experts)
             if args.moe_train_router_only:
                 freeze_all_but_router_params(target_shard)
             elif args.moe_train_new_experts_and_router_only:
@@ -3184,6 +3200,11 @@ def setup_model_and_optimizer(model_provider_func,
             expand_moe_model(
                 target_shard, source_shard, args.shared_router_hybrid_expand_from_num_experts
             )
+            if getattr(args, 'moe_mass_reservoir', False):
+                _mres_expansion_check(
+                    target_shard, source_shard, args,
+                    args.shared_router_hybrid_expand_from_num_experts,
+                )
             if args.shared_router_hybrid_reinit_router:
                 summary = reinitialize_shared_router_params(target_shard)
                 print_rank_0(
@@ -3779,6 +3800,120 @@ def _summarize_and_log_train_router_usage(iteration, captured_router_maps):
     return metrics
 
 
+@torch.no_grad()
+def _mres_expansion_check(target, source, args, num_existing, num_sequences=8):
+    """Forward the same replay tokens through the pre-expansion model (alpha = alpha_end) and
+    the expanded one (alpha = 0) and report how exact the expansion is.
+
+    A sequence is exact only if no token changes its Top-K at any layer: attention experts make
+    later tokens depend on earlier tokens' routing.  On such sequences the logits must agree up to
+    fp32 summation-order noise of the softmax denominator."""
+    from megatron.core.datasets.indexed_dataset import IndexedDataset
+
+    mass_reservoir.configure_from_args(args)
+    seq = int(args.seq_length)
+    paths = [p for p in (args.moe_joint_replay_data_path or []) if not _is_float_str(p)]
+    ids = []
+    for prefix in paths:
+        ds = IndexedDataset(prefix, multimodal=False, mmap=True)
+        for i in range(len(ds)):
+            ids.extend(int(t) for t in ds[i])
+            if len(ids) >= num_sequences * seq:
+                break
+        if len(ids) >= num_sequences * seq:
+            break
+    if len(ids) < num_sequences * seq:
+        print_rank_0('[mres] expansion check skipped: not enough replay tokens')
+        return None
+    device = torch.cuda.current_device()
+    tokens = torch.tensor(ids[:num_sequences * seq], device=device).view(num_sequences, seq)
+    attention_mask, _, position_ids = get_ltor_masks_and_position_ids(
+        tokens, 0, False, False, False)
+    attention_mask = attention_mask < 0.5
+
+    def run(model, alpha):
+        was_training = model.training
+        model.eval()
+        mass_reservoir.STATE['alpha'] = alpha
+        mass_reservoir.set_pass('eval')
+        maps = mass_reservoir.CAPTURE['maps'] = []
+        try:
+            logits = model(tokens, position_ids, attention_mask, labels=None)
+        finally:
+            mass_reservoir.CAPTURE['maps'] = None
+        model.train(was_training)
+        return logits.float(), maps
+
+    src_logits, src_maps = run(source, mass_reservoir.STATE['alpha_end'])
+    tgt_logits, tgt_maps = run(target, 0.0)
+    mass_reservoir.STATE['alpha'] = 0.0
+    changed = torch.zeros(num_sequences * seq, dtype=torch.bool, device=device)
+    new_picked = torch.zeros_like(changed)
+    per_layer = []
+    if not src_maps or len(src_maps) != len(tgt_maps):
+        raise RuntimeError(f'[mres] expansion check captured {len(src_maps)}/{len(tgt_maps)} routing maps')
+    for m_src, m_tgt in zip(src_maps, tgt_maps):
+        m_src = m_src.bool(); m_tgt = m_tgt.bool()
+        c = (m_src != m_tgt[:, :num_existing]).any(-1) | m_tgt[:, num_existing:].any(-1)
+        # routing maps are [s*b] ordered; move to [b*s] to match tokens
+        c = c.view(seq, num_sequences).t().reshape(-1)
+        changed |= c
+        new_picked |= m_tgt[:, num_existing:].any(-1).view(seq, num_sequences).t().reshape(-1)
+        per_layer.append(round(float(c.float().mean()), 4))
+    seq_exact = ~changed.view(num_sequences, seq).any(-1)
+    if src_logits.shape[0] != num_sequences:        # [s, b, V] layout
+        src_logits = src_logits.transpose(0, 1)
+        tgt_logits = tgt_logits.transpose(0, 1)
+    diff = (src_logits - tgt_logits).abs().amax(-1)          # [b, s]
+    report = {
+        'tokens': int(changed.numel()),
+        'topk_changed_token_rate_any_layer': round(float(changed.float().mean()), 5),
+        'topk_changed_rate_per_layer': per_layer,
+        'new_expert_selected_token_rate': round(float(new_picked.float().mean()), 5),
+        'exact_sequences': f'{int(seq_exact.sum())}/{num_sequences}',
+        'max_logit_diff_exact_sequences': (float(diff[seq_exact].max()) if seq_exact.any() else None),
+        'max_logit_diff_unchanged_tokens': float(diff.reshape(-1)[~changed].max()) if (~changed).any() else None,
+        'max_logit_diff_all': float(diff.max()),
+    }
+    print_rank_0(f'[mres] expansion check {num_existing}->{args.num_experts}: {report}')
+    if torch.distributed.get_rank() == 0 and args.save:
+        os.makedirs(os.path.join(args.save, 'expansion_audit'), exist_ok=True)
+        with open(os.path.join(args.save, 'expansion_audit', 'mres_expansion_check.json'), 'w') as f:
+            json.dump(report, f, indent=2)
+    return report
+
+
+def _is_float_str(value):
+    try:
+        float(value)
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
+def _mres_begin_step(args, model):
+    """Mass reservoir: alpha schedule + warm-up flags for this update, primary pass next."""
+    if not getattr(args, '_mres_configured', False):
+        if args.mres_alpha_end is None:
+            raise ValueError('--moe-mass-reservoir needs --mres-alpha-end')
+        if not args.moe_joint_replay_lm:
+            raise ValueError('--moe-mass-reservoir needs --moe-joint-replay-lm (router-only '
+                             'correction pass that trains the reservoir margin)')
+        mass_reservoir.configure_from_args(args)
+        mass_reservoir.STATE['num_layers'] = max(1, mass_reservoir.count_routers(unwrap_model(model)))
+        args._mres_configured = True
+    num_existing = getattr(args, 'shared_router_hybrid_expand_from_num_experts', None)
+    info = mass_reservoir.begin_step(args, int(args.curr_iteration), num_existing)
+    log_interval = max(1, int(getattr(args, 'log_interval', 1) or 1))
+    if (int(args.curr_iteration) % log_interval == 0 or info['warmup'] and int(args.curr_iteration) < 3) \
+            and torch.distributed.get_rank() == 0:
+        print(f"[mres] update {args.curr_iteration}/{args.train_iters}: alpha={info['alpha']:.4f} "
+              f"warmup={info['warmup']} (warm-up updates {info['warmup_updates']}, "
+              f"new experts from {num_existing}, routers {mass_reservoir.STATE['num_layers']})",
+              flush=True)
+    mass_reservoir.set_pass('primary')
+
+
 def train_step(
     forward_step_func,
     data_iterator,
@@ -3803,6 +3938,8 @@ def train_step(
             model_chunk.zero_grad_buffer()
         optimizer.zero_grad()
 
+        if getattr(args, 'moe_mass_reservoir', False):
+            _mres_begin_step(args, model)
         # Forward pass.
         forward_backward_func = get_forward_backward_func()
         quota_value = _moe_joint_new_expert_quota(args, router_memory_iteration)
@@ -3970,6 +4107,7 @@ def train_step(
                         if replay_budget.get('mode') == 'microbatch'
                         else 1.0 / replay_batch_count
                     )
+                    mass_reservoir.set_pass('replay', args._moe_joint_replay_gradient_scale)
                     with allow_existing_router_grads():
                         if replay_budget.get('mode') == 'microbatch':
                             replay_losses.extend(forward_backward_func(
@@ -3998,6 +4136,7 @@ def train_step(
                     args._moe_joint_replay_active = False
                     args._moe_joint_replay_old_data_kd_active = False
                     args._moe_joint_replay_gradient_scale = 1.0
+                    mass_reservoir.set_pass('eval')
                     _set_moe_loss_coefficients(model,aux,z)
                 if isinstance(data_iterator, _MoeJointReplayDataIterator):
                     data_iterator.finish_old_like_pairing()
@@ -4112,6 +4251,7 @@ def train_step(
 
     # Update parameters.
 
+    mass_reservoir.set_pass('eval')
     timers('optimizer', log_level=1).start(barrier=args.barrier_with_L1_time)
     new_expert_lr_multiplier = None
     new_expert_lr = None

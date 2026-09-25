@@ -2438,6 +2438,19 @@ def _add_moe_args(parser):
                        help='Score function for MoE TopK routing. Can be "softmax" or "sigmoid".')
     group.add_argument('--moe-router-topk', type=int, default=2,
                        help='Number of experts to route to for each token. The default is 2.')
+    group.add_argument('--moe-mass-reservoir', action='store_true',
+                       help='Mass-transfer reservoir: a router row that only adds alpha*exp(z_res) to '
+                            'the pre-softmax denominator; new experts copy it at expansion.')
+    group.add_argument('--mres-alpha-end', type=float, default=None,
+                       help='Reservoir mass at the end of a task (= experts added per task).')
+    group.add_argument('--mres-delta', type=float, default=0.5,
+                       help='Margin below the K-th candidate logit.')
+    group.add_argument('--mres-lambda', type=float, default=0.1,
+                       help='Weight of the reservoir margin loss on the replay pass.')
+    group.add_argument('--mres-warmup-frac', type=float, default=0.05,
+                       help='Share of updates with new-expert-only primary routing and alpha 0.')
+    group.add_argument('--mres-no-warmup-freeze-router', action='store_true',
+                       help='Let old router rows and the reservoir update during the warm-up.')
     group.add_argument('--moe-router-pre-softmax', action='store_true',
                        help='Enable pre-softmax routing for MoE, which means softmax is before the top-k selection. By default, softmax is done after top-k.')
     group.add_argument('--moe-router-num-groups', type=int, default=None,

@@ -10,6 +10,7 @@ import torch
 from megatron.core import parallel_state
 from megatron.core.tensor_parallel import gather_from_sequence_parallel_region
 from megatron.core.transformer.module import MegatronModule
+from megatron.core.transformer.moe import mass_reservoir
 from megatron.core.transformer.moe.moe_utils import (
     MoEAuxLossAutoScaler,
     save_to_aux_losses_tracker,
@@ -310,6 +311,9 @@ class TopKRouter(Router):
             self.local_tokens_per_expert = None
             self.expert_bias = None
 
+        if getattr(self.config, 'moe_mass_reservoir', False):
+            mass_reservoir.attach(self)
+
     def sinkhorn_load_balancing(self, logits: torch.Tensor):
         """Apply sinkhorn routing to the logits tensor.
 
@@ -605,6 +609,8 @@ class TopKRouter(Router):
 
         # Apply input jitter
         input = self.apply_input_jitter(input)
+        if mass_reservoir.enabled(self):
+            return mass_reservoir.route(self, input)
         logits = self.gating(input)
 
         scores, routing_map = self.routing(logits)
