@@ -1634,6 +1634,9 @@ class Ours_LoRA_MoE_V3(Ours_LoRA_MoE_V2):
         the per-update replay assignment and every exposure check are walked
         identically in all modes, so a post-hoc router pass sees exactly the
         records and current-batch slices the joint loop would have used.
+        ``self._joint_router_update_select`` (router-only mode, optional) is a
+        predicate on the walked update index: only the selected updates forward
+        the router batches and take an optimizer step, the others are walked.
         """
         args = self.args
         branches = tuple(getattr(self, "_joint_branches", None)
@@ -1641,6 +1644,9 @@ class Ours_LoRA_MoE_V3(Ours_LoRA_MoE_V2):
         run_primary, run_router = "primary" in branches, "router" in branches
         if not (run_primary or run_router):
             raise ValueError(f"joint loop needs a branch, got {branches!r}")
+        router_select = getattr(self, "_joint_router_update_select", None)
+        if router_select is not None and run_primary:
+            raise ValueError("router update selection needs the router-only branch")
         replay_objective = self._joint_replay_objective()
         if replay_objective not in {"lm", "hidden_mse"}:
             raise ValueError(
@@ -1775,6 +1781,8 @@ class Ours_LoRA_MoE_V3(Ours_LoRA_MoE_V2):
                 replay_token_count = 0
                 global_replay_count = 0
                 replay_loss_scale = None
+                do_router = run_router and (
+                    router_select is None or router_select(global_update))
                 if should_step:
                     exposure_start, exposure_stop, local_replay_count = (
                         self._replay_exposure_assignment(
@@ -1807,12 +1815,12 @@ class Ours_LoRA_MoE_V3(Ours_LoRA_MoE_V2):
                         replay_source_batches.append(replay_source_batch)
 
                     local_replay_loss_sum = None
-                    if not run_router:
-                        # primary-only: the records are drawn (same stream
-                        # position) but not forwarded
+                    if not do_router:
+                        # primary-only / unselected router update: the records
+                        # are drawn (same stream position) but not forwarded
                         consumed_local_exposures += local_replay_count
                     for chunk_start in range(
-                            0, local_replay_count if run_router else 0,
+                            0, local_replay_count if do_router else 0,
                             replay_forward_batch_size):
                         replay_source_chunk = replay_source_batches[
                             chunk_start:
@@ -1870,7 +1878,7 @@ class Ours_LoRA_MoE_V3(Ours_LoRA_MoE_V2):
                         consumed_local_exposures += len(replay_source_chunk)
 
                     for extra in (self._extra_router_replay_batches(primary)
-                                  if run_router else ()):
+                                  if do_router else ()):
                         extra = dict(extra)
                         extra_labels = extra.pop("labels")
                         self._count_workload_batch("router_replay_extra", extra)
@@ -1926,7 +1934,7 @@ class Ours_LoRA_MoE_V3(Ours_LoRA_MoE_V2):
                             f"scale={replay_scale_text} "
                             f"budget={consumed_global_exposures}/"
                             f"{total_memory_exposures}", refresh=False)
-                if should_step:
+                if should_step and (run_primary or do_router):
                     self._manual_average_gradients(self.raw_model)
                     trainable = [parameter for parameter in
                                  self.raw_model.parameters()
@@ -1936,6 +1944,7 @@ class Ours_LoRA_MoE_V3(Ours_LoRA_MoE_V2):
                     self.lr_scheduler.step()
                     self.optimizer.zero_grad(set_to_none=True)
                     self._count_workload_update()
+                if should_step:
                     global_update += 1
 
             if args.global_rank == 0:

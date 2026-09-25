@@ -112,9 +112,18 @@ def diagonal7_cells() -> list[Cell]:
     return sparse15_cells()[:7]
 
 
+def last_acquisition_cells() -> list[Cell]:
+    """The last task on the last round only.  With --diagonal-checkpoint-suffix
+    it is scored from RUN_DIR/<last round><suffix>: the acquisition score of the
+    last task for a post-hoc arm, whose final row is scored separately."""
+    return [Cell(len(TASKS), TASKS[-1])]
+
+
 def cells_for_mode(mode: str) -> list[Cell]:
     if mode == "sparse15":
         return sparse15_cells()
+    if mode == "last_acquisition":
+        return last_acquisition_cells()
     if mode == "diagonal7":
         return diagonal7_cells()
     if mode == "lower_triangle":
@@ -240,7 +249,12 @@ def checkpoint_dir_for(
     the router correction, while the final row stays on the continued model.
     """
     name = str(cell.round_id - 1)
-    if diagonal_suffix and TASKS.index(cell.task) == cell.round_id - 1:
+    final_row_plain = os.environ.get("SPARSE15_FINAL_ROW_PLAIN", "0") == "1"
+    if (diagonal_suffix and TASKS.index(cell.task) == cell.round_id - 1
+            and not (final_row_plain and cell.round_id == len(TASKS))):
+        # SPARSE15_FINAL_ROW_PLAIN=1: the last round's cell belongs to the final
+        # row, so it stays on the continued model; the last task's acquisition
+        # score is taken separately (--matrix-mode last_acquisition).
         name += diagonal_suffix
     return run_dir / name
 
@@ -450,7 +464,7 @@ def parse_args() -> argparse.Namespace:
         "--method", default=os.environ.get("SPARSE15_METHODS"),
         help="Method label passed to collect_results.py.")
     parser.add_argument(
-        "--matrix-mode", choices=("sparse15", "diagonal7", "lower_triangle"),
+        "--matrix-mode", choices=("sparse15", "diagonal7", "lower_triangle", "last_acquisition"),
         default=os.environ.get("TRACE_MATRIX_MODE", "sparse15"),
         help="Evaluate the publication sparse-15 cells or all 36 lower-"
              "triangular cells.")

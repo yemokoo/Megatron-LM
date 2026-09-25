@@ -402,6 +402,36 @@ class PostHoc(Base):
         self.assertEqual(t_h.saved, ["1_prephase2"])               # pre-correction checkpoint
         self.assertEqual(t_j.saved, [])
 
+    def test_posthoc_router_selection_is_even(self):
+        for total, frac in ((553, 0.2), (237, 0.2), (12, 0.25), (10, 1.0)):
+            keep, select = S.posthoc_router_selection(total, frac)
+            chosen = [u for u in range(total) if select(u)]
+            self.assertEqual(len(chosen), keep)
+            self.assertEqual(keep, max(1, round(total * frac)))
+            gaps = {b - a for a, b in zip(chosen, chosen[1:])}
+            self.assertLessEqual(max(gaps, default=0) - min(gaps, default=0), 1)   # evenly spread
+
+    def test_posthoc_fraction_forwards_a_subset_of_the_joint_router_batches(self):
+        _, _, joint, pl = self._run(timing="joint")
+        saved = S.POSTHOC_ROUTER_FRAC
+        try:
+            S.POSTHOC_ROUTER_FRAC = 0.25
+            t_h, _, posthoc, _ = self._run(timing="posthoc")
+        finally:
+            S.POSTHOC_ROUTER_FRAC = saved
+        n = 2 * len(pl)
+        keep = round(n * 0.25)
+        joint_router = [r for r in joint if r[0] == "router"]
+        post_router = [r for r in posthoc if r[0] == "router"]
+        self.assertEqual([r for r in posthoc if r[0] == "primary"],
+                         [r for r in joint if r[0] == "primary"])
+        it = iter(joint_router)                                   # ordered subsequence
+        self.assertTrue(all(any(r == j for j in it) for r in post_router))
+        self.assertTrue(0 < len(post_router) < len(joint_router))
+        self.assertEqual(t_h.steps, n + keep)                     # primary N + router K updates
+        self.assertEqual(t_h.reinit_calls, [keep])                # schedules sized to K
+        self.assertIsNone(t_h._joint_router_update_select)
+
     def test_branch_gradients(self):
         # primary-only never touches r_res / skip; router-only never touches the experts
         _, m_p, _, _ = self._run(branches=("primary",))

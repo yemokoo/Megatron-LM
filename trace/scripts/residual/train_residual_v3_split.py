@@ -45,6 +45,11 @@ ablation env (defaults = the published recipe)
                                 replay records, same current-batch slices, same update count,
                                 fresh optimizer + LR/alpha/warm-up schedule).  The pre-correction
                                 state is saved as <round>_prephase2 for the diagonal eval.
+  RESIDUAL_POSTHOC_ROUTER_FRAC  posthoc only (default 1.0): the router pass takes this share of
+                                the joint arm's updates -- K = round(frac x N) updates spread
+                                evenly over the N-update walk, each with the unchanged per-update
+                                router batch (replay + BoS + current slice); LR / alpha / warm-up
+                                schedules run over K.  0.2 = router tuning on 20% of the train.
   RESIDUAL_ROUTER_FT_OBJECTIVE  lm (default) | distill: replay/BoS records in router-FT are
                                 trained with per-layer KL to the pre-expansion router instead of
                                 LM loss; the current-task slice keeps LM loss.  Mass reservoir
@@ -89,6 +94,9 @@ if ROUTER_FT_TIMING not in {"joint", "posthoc"}:
 ROUTER_FT_OBJECTIVE = os.environ.get("RESIDUAL_ROUTER_FT_OBJECTIVE", "lm").strip().lower()
 if ROUTER_FT_OBJECTIVE not in {"lm", "distill"}:
     raise ValueError(f"RESIDUAL_ROUTER_FT_OBJECTIVE must be lm or distill, got {ROUTER_FT_OBJECTIVE!r}")
+POSTHOC_ROUTER_FRAC = float(os.environ.get("RESIDUAL_POSTHOC_ROUTER_FRAC", "1.0"))
+if not 0.0 < POSTHOC_ROUTER_FRAC <= 1.0:
+    raise ValueError(f"RESIDUAL_POSTHOC_ROUTER_FRAC must be in (0, 1], got {POSTHOC_ROUTER_FRAC}")
 DISTILL_PAD = os.environ.get("RESIDUAL_DISTILL_PAD", "row").strip().lower()
 if DISTILL_PAD not in MR.DISTILL_PADS:
     raise ValueError(f"RESIDUAL_DISTILL_PAD must be one of {MR.DISTILL_PADS}, got {DISTILL_PAD!r}")
@@ -268,6 +276,12 @@ Trainer._extra_router_replay_batches = _extra_router_replay_batches
 
 
 # ------------------------------------------- post-hoc router correction (ablation)
+def posthoc_router_selection(total, frac):
+    """K = round(frac * total) update indices spread evenly over [0, total): index u is kept when
+    floor((u + 1) K / N) > floor(u K / N).  Returns (K, predicate)."""
+    keep = max(1, int(round(total * frac)))
+    return keep, (lambda u: ((u + 1) * keep) // total > (u * keep) // total)
+
 _prev_joint_epochs = Trainer._run_v2_joint_epochs
 
 
@@ -284,6 +298,7 @@ def _run_joint_or_posthoc(self, primary_loader, memory_loader, epochs, device, p
     if hidden_mse_teacher is not None:
         raise ValueError("post-hoc router correction supports the lm/distill router-FT only")
     updates = self._optimizer_update_count(primary_loader, epochs)
+    router_updates, select = posthoc_router_selection(updates, POSTHOC_ROUTER_FRAC)
     try:
         self._joint_branches = ("primary",)
         _prev_joint_epochs(self, primary_loader, memory_loader, epochs, device,
@@ -293,15 +308,18 @@ def _run_joint_or_posthoc(self, primary_loader, memory_loader, epochs, device, p
             # the diagonal cells from here (SPARSE15_DIAGONAL_CKPT_SUFFIX=_prephase2)
             self.save_model(f"{i_task}{V3.PREPHASE2_SUFFIX}")
         if _rank0(self.args):
-            print(f"[residual-split] post-hoc router correction: {updates} router-only updates "
-                  f"(= the joint arm's update count)", flush=True)
-        self._reinit_engine(updates)              # fresh AdamW + LR schedule (+ mres alpha/warm-up)
+            print(f"[residual-split] post-hoc router correction: {router_updates} router-only "
+                  f"updates = {POSTHOC_ROUTER_FRAC:g} x the joint arm's {updates} (same per-update "
+                  f"router batch, spread evenly)", flush=True)
+        self._reinit_engine(router_updates)       # fresh AdamW + LR schedule (+ mres alpha/warm-up)
         self._joint_branches = ("router",)
+        self._joint_router_update_select = None if router_updates == updates else select
         # task/i_task None: no epoch probe and no gradient-memory record for the second walk
         _prev_joint_epochs(self, primary_loader, memory_loader, epochs, device,
                            f"{phase_name} [posthoc 2/2: router only]")
     finally:
         self._joint_branches = None
+        self._joint_router_update_select = None
 
 
 Trainer._run_v2_joint_epochs = _run_joint_or_posthoc
@@ -451,6 +469,7 @@ def save_meta_split(model, output_dir, args, trainer=None):
             "copy_of_residual_row" if NEW_EXPERT_INIT == "copy_router_zero_b"
             else "pytorch_linear_random"),
         "router_ft_timing": ROUTER_FT_TIMING,
+        "posthoc_router_frac": POSTHOC_ROUTER_FRAC if ROUTER_FT_TIMING == "posthoc" else None,
         "router_ft_objective": ROUTER_FT_OBJECTIVE,
         "router_distill_pad": DISTILL_PAD if ROUTER_FT_OBJECTIVE == "distill" else None,
         "new_expert_init": "lora_A_random_B_zero",

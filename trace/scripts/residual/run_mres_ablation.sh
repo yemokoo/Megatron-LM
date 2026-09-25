@@ -42,8 +42,11 @@ case "$ARM" in
   random_row) MRES_NEW_ROW=random ;;
   no_margin)  MRES_LAMBDA=0 ;;
   posthoc)    RESIDUAL_ROUTER_FT_TIMING=posthoc
-              # diagonal (acquisition) score = right after the new task, before the router correction
-              export SPARSE15_DIAGONAL_CKPT_SUFFIX=_prephase2 ;;
+              export RESIDUAL_POSTHOC_ROUTER_FRAC=${RESIDUAL_POSTHOC_ROUTER_FRAC:-1.0}
+              # acquisition score = right after the new task, before the router correction
+              # (<round>_prephase2); final row = the corrected final model for all 8 tasks; the
+              # last task's acquisition score is scored separately after the chain (see below)
+              export SPARSE15_DIAGONAL_CKPT_SUFFIX=_prephase2 SPARSE15_FINAL_ROW_PLAIN=1 ;;
   distill)    RESIDUAL_ROUTER_FT_OBJECTIVE=distill ;;
   *) echo "unknown ARM=$ARM" >&2; exit 2 ;;
 esac
@@ -55,7 +58,8 @@ import json, os, sys
 keys = ["REPLAY_SOURCE", "GEN_PROTOCOL", "V1_ANCHOR_PREFIX_CHARS", "ROUTING_WEIGHT_MODE", "MRES_ENABLE",
         "MRES_NEW_ROW", "MRES_LAMBDA", "MRES_DELTA", "MRES_WARMUP_FRAC", "MRES_MARGIN_CURRENT",
         "MRES_WARMUP_FREEZE_ROUTER", "RESIDUAL_ROUTER_FT_TIMING", "RESIDUAL_ROUTER_FT_OBJECTIVE",
-        "RESIDUAL_DISTILL_PAD", "SPARSE15_DIAGONAL_CKPT_SUFFIX", "EPOCHS", "GPUS", "SEED_CKPT", "METHOD_NAME", "LAST_ROUND"]
+        "RESIDUAL_DISTILL_PAD", "RESIDUAL_POSTHOC_ROUTER_FRAC", "SPARSE15_DIAGONAL_CKPT_SUFFIX",
+        "SPARSE15_FINAL_ROW_PLAIN", "EPOCHS", "GPUS", "SEED_CKPT", "METHOD_NAME", "LAST_ROUND"]
 arm = {"arm": sys.argv[2], "env": {k: os.environ.get(k) for k in keys}}
 path = sys.argv[1]
 if os.path.exists(path):
@@ -98,4 +102,47 @@ PY
   echo "[mres-ablation] real replay <- $SUBSET ($(ls "$SUBSET"/task_*.json | wc -l) tasks)"
 fi
 echo "[mres-ablation] ARM=$ARM RUN_DIR=$RUN_DIR replay=$REPLAY_SOURCE new_row=$MRES_NEW_ROW lambda=$MRES_LAMBDA timing=$RESIDUAL_ROUTER_FT_TIMING objective=$RESIDUAL_ROUTER_FT_OBJECTIVE"
-exec bash "$TRACE/scripts/residual/run_residual_chain.sh"
+[ "$ARM" = posthoc ] || exec bash "$TRACE/scripts/residual/run_residual_chain.sh"
+
+# ---- posthoc: chain, then the last task's acquisition score from <last>_prephase2 and an
+# 8-task forgetting summary (sparse15_summary.json covers the acquisition scores of tasks 1-7 only)
+bash "$TRACE/scripts/residual/run_residual_chain.sh" || exit $?
+M=$RUN_DIR/model
+[ -f "$M/sparse15_summary.json" ] || exit 0          # LAST_ROUND < 7: nothing to score
+PY=${TRACE_PYTHON:-$TRACE/.venv-runtime/bin/python}
+VIEW=$RUN_DIR/last_acquisition            # own evaluation/ dir: order8/results-<task>.json would
+mkdir -p "$VIEW"                          # otherwise collide with the final-row cell
+ln -sfn "$M/7_prephase2" "$VIEW/7_prephase2"
+if [ ! -f "$RUN_DIR/posthoc_forgetting_summary.json" ]; then
+  echo "[mres-ablation] last-task acquisition score from 7_prephase2"
+  ( cd "$TRACE" && SPARSE15_FINAL_ROW_PLAIN=0 SPARSE15_EVAL_EXTRA_ARGS="--bos_guard --guard_header --guard_decision none" SPARSE15_CONV_MODE=llama3_template \
+      SLORA_LLAMA31_PATH=${SLORA_LLAMA31_PATH:-/data2/seonghyeonnoh/LLM-continual-learning-models/Llama-3.1-8B-Instruct} \
+      $PY scripts/run_ours_sparse15_optimized.py --run-dir "$VIEW" --method "${METHOD_NAME}_last_acq" \
+      --gpus "$GPUS" --matrix-mode last_acquisition --diagonal-checkpoint-suffix _prephase2 --no-collect \
+  ) > "$RUN_DIR/logs/eval_last_acquisition.log" 2>&1 || { echo "last-task acquisition eval failed" >&2; exit 1; }
+  $PY - "$M/sparse15_summary.json" "$VIEW" "$RUN_DIR/posthoc_forgetting_summary.json" <<'PY' | tee -a "$RUN_DIR/chain.log"
+import json, sys
+from pathlib import Path
+sys.path.insert(0, "scripts")
+import run_ours_sparse15_optimized as E
+s = json.load(open(sys.argv[1]))
+tasks = s["tasks"]
+acq = list(s["diagonal_scores_rounds_1_to_7"]) + [E.read_primary_score(Path(sys.argv[2]), E.Cell(8, tasks[-1]))]
+final = list(s["final_scores_round_8"])
+drop = [a - f for a, f in zip(acq, final)]
+out = {"tasks": tasks,
+       "acquisition_scores_pre_router_correction": acq,
+       "final_scores_after_router_correction": final,
+       "forgetting_per_task": drop,
+       "AA": sum(final) / len(final),
+       "F_8tasks": sum(drop) / len(drop),
+       "F_7tasks_sparse15": -s["BWT"],
+       "note": "acquisition = <round>_prephase2 (new task learned, router not yet corrected); "
+               "final = checkpoint 7 (after the last router correction) for every task"}
+json.dump(out, open(sys.argv[3], "w"), indent=1)
+print("[posthoc] AA %.2f  F(8 tasks, pre-correction acquisition) %.2f  F(7 tasks) %.2f"
+      % (out["AA"], out["F_8tasks"], out["F_7tasks_sparse15"]))
+print("[posthoc] acq  ", {t: round(v, 1) for t, v in zip(tasks, acq)})
+print("[posthoc] final", {t: round(v, 1) for t, v in zip(tasks, final)})
+PY
+fi
