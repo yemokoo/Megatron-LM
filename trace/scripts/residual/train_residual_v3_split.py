@@ -36,6 +36,20 @@ env
   RESIDUAL_RAMP_FRAC      task-0 residual ramp; default 0 here (the frozen
                           residual row replaces the ramp)
   RESIDUAL_SECOND_CHOICE  1 (default) / 0
+
+ablation env (defaults = the published recipe)
+  RESIDUAL_ROUTER_FT_TIMING     joint (default): router-FT gradient shares every optimizer
+                                update with the primary gradient.  posthoc: the task first
+                                trains the primary branch alone, then a separate router-FT pass
+                                replays exactly the same per-update router-FT batches (same
+                                replay records, same current-batch slices, same update count,
+                                fresh optimizer + LR/alpha/warm-up schedule).
+  RESIDUAL_ROUTER_FT_OBJECTIVE  lm (default) | distill: replay/BoS records in router-FT are
+                                trained with per-layer KL to the pre-expansion router instead of
+                                LM loss; the current-task slice keeps LM loss.  Mass reservoir
+                                only (the margin term is kept in both).
+  RESIDUAL_DISTILL_PAD          row (default): the teacher gets a zero router row per new expert.
+                                prob: teacher probability 0 on the new expert.
 """
 from __future__ import annotations
 
@@ -68,6 +82,15 @@ if NEW_EXPERT_INIT not in {"copy_router_zero_b", "random_router_zero_b"}:
     raise ValueError(
         "RESIDUAL_NEW_EXPERT_INIT must be copy_router_zero_b or "
         f"random_router_zero_b, got {NEW_EXPERT_INIT!r}")
+ROUTER_FT_TIMING = os.environ.get("RESIDUAL_ROUTER_FT_TIMING", "joint").strip().lower()
+if ROUTER_FT_TIMING not in {"joint", "posthoc"}:
+    raise ValueError(f"RESIDUAL_ROUTER_FT_TIMING must be joint or posthoc, got {ROUTER_FT_TIMING!r}")
+ROUTER_FT_OBJECTIVE = os.environ.get("RESIDUAL_ROUTER_FT_OBJECTIVE", "lm").strip().lower()
+if ROUTER_FT_OBJECTIVE not in {"lm", "distill"}:
+    raise ValueError(f"RESIDUAL_ROUTER_FT_OBJECTIVE must be lm or distill, got {ROUTER_FT_OBJECTIVE!r}")
+DISTILL_PAD = os.environ.get("RESIDUAL_DISTILL_PAD", "row").strip().lower()
+if DISTILL_PAD not in MR.DISTILL_PADS:
+    raise ValueError(f"RESIDUAL_DISTILL_PAD must be one of {MR.DISTILL_PADS}, got {DISTILL_PAD!r}")
 Trainer = V3.Ours_LoRA_MoE_V3_New
 
 
@@ -108,8 +131,11 @@ def _add_experts_mass_reservoir(model, count, old):
     _prev_add_experts(model, count)          # grows + residual + reservoir row
     if not exp["on"]:
         return
-    if old > 0:
+    if ROUTER_FT_OBJECTIVE == "distill":     # rows [:old] + skip are still the pre-expansion ones
+        MR.snapshot_distill_teacher(model, old, DISTILL_PAD)
+    if old > 0 and MR.ACTIVE.new_row == "reservoir":
         MR.copy_reservoir_into_rows(model, old, count)
+    # new_row == "random": the row keeps the stock nn.Linear init growth just drew
     MR.set_alpha(model, 0.0)
     if before is None:
         return
@@ -201,24 +227,35 @@ def _router_only_replay_mres(self):
             yield
             return
         MR.set_flag(self.raw_model, "_mres_margin", True)
+        MR.set_flag(self.raw_model, "_rd_on", ROUTER_FT_OBJECTIVE == "distill")
         MR.enable_stats(self.raw_model, "router_ft")
         try:
             yield
         finally:
             MR.set_flag(self.raw_model, "_mres_margin", False)
+            MR.set_flag(self.raw_model, "_rd_on", False)
             MR.disable_stats(self.raw_model)
             for router in MR.routers(self.raw_model):
                 router._mres_margin_buf.clear()
+                if getattr(router, "_rd_buf", None):
+                    router._rd_buf.clear()
 
 
 def _per_sample_losses_mres(self, logits, labels, ignore_index=-100):
-    losses = _stock_per_sample_losses(logits, labels, ignore_index)
+    current = getattr(self, "_mres_current_slice", False)
+    distill = (MR.pop_distill_per_sample(self.raw_model, logits.shape[0])
+               if MR.ACTIVE.enabled else None)
+    if distill is not None and not current:
+        # router distillation: replay / BoS records use the per-layer router KL instead of LM
+        losses = distill.float()
+    else:
+        losses = _stock_per_sample_losses(logits, labels, ignore_index)
     if not MR.ACTIVE.enabled:
         return losses
     margin = MR.pop_margin_per_sample(self.raw_model, logits.shape[0])
     if margin is None:
         return losses
-    if getattr(self, "_mres_current_slice", False) and not MR.ACTIVE.margin_current:
+    if current and not MR.ACTIVE.margin_current:
         return losses
     return losses + MR.ACTIVE.margin_weight * margin.to(losses.dtype)
 
@@ -227,6 +264,42 @@ Trainer._router_only_replay = _router_only_replay_mres
 Trainer._per_sample_causal_lm_losses = _per_sample_losses_mres
 Trainer._after_primary_backward = _after_primary_backward
 Trainer._extra_router_replay_batches = _extra_router_replay_batches
+
+
+# ------------------------------------------- post-hoc router correction (ablation)
+_prev_joint_epochs = Trainer._run_v2_joint_epochs
+
+
+def _run_joint_or_posthoc(self, primary_loader, memory_loader, epochs, device, phase_name,
+                          task=None, i_task=None, hidden_mse_teacher=None):
+    """joint: the stock loop.  posthoc: the same loop twice over the same loaders --
+    primary branch only (engine already built by train_one_task), then, on a fresh engine with
+    the same update count, router branch only.  The second walk re-draws the identical primary
+    order (sampler.set_epoch) and replay stream, so every post-hoc update carries exactly the
+    router-FT records and current-batch slices of the matching joint update."""
+    if ROUTER_FT_TIMING == "joint":
+        return _prev_joint_epochs(self, primary_loader, memory_loader, epochs, device, phase_name,
+                                  task=task, i_task=i_task, hidden_mse_teacher=hidden_mse_teacher)
+    if hidden_mse_teacher is not None:
+        raise ValueError("post-hoc router correction supports the lm/distill router-FT only")
+    updates = self._optimizer_update_count(primary_loader, epochs)
+    try:
+        self._joint_branches = ("primary",)
+        _prev_joint_epochs(self, primary_loader, memory_loader, epochs, device,
+                           f"{phase_name} [posthoc 1/2: primary only]", task=task, i_task=i_task)
+        if _rank0(self.args):
+            print(f"[residual-split] post-hoc router correction: {updates} router-only updates "
+                  f"(= the joint arm's update count)", flush=True)
+        self._reinit_engine(updates)              # fresh AdamW + LR schedule (+ mres alpha/warm-up)
+        self._joint_branches = ("router",)
+        # task/i_task None: no epoch probe and no gradient-memory record for the second walk
+        _prev_joint_epochs(self, primary_loader, memory_loader, epochs, device,
+                           f"{phase_name} [posthoc 2/2: router only]")
+    finally:
+        self._joint_branches = None
+
+
+Trainer._run_v2_joint_epochs = _run_joint_or_posthoc
 
 
 # ------------------------------------------------ backbone BoS pseudo-task
@@ -306,6 +379,15 @@ def train_one_task(self, task, i_task, epochs):
         print(f"[residual-split] round {i_task}: router-FT sources={self._router_ft_sources} "
               f"(past tasks + BoS); primary reuse per rank = {max(1, local // self._router_ft_sources)}"
               f"/{local}", flush=True)
+    if ROUTER_FT_OBJECTIVE == "distill" and not MR.ACTIVE.enabled:
+        raise ValueError("RESIDUAL_ROUTER_FT_OBJECTIVE=distill needs the mass reservoir "
+                         "(MRES_ENABLE=1)")
+    if _rank0(args) and (ROUTER_FT_TIMING != "joint" or ROUTER_FT_OBJECTIVE != "lm"
+                         or MR.ACTIVE.new_row != "reservoir"):
+        print(f"[residual-split] ablation: router-FT timing={ROUTER_FT_TIMING} "
+              f"objective={ROUTER_FT_OBJECTIVE}"
+              + (f" (pad={DISTILL_PAD})" if ROUTER_FT_OBJECTIVE == "distill" else "")
+              + f" new_row={MR.ACTIVE.new_row}", flush=True)
     if not MR.ACTIVE.enabled:
         return _prev_train_one_task(self, task, i_task, epochs)
     MR.EXPANDING.update(on=True, round=i_task, rank0=_rank0(args), probe=None,
@@ -316,6 +398,18 @@ def train_one_task(self, task, i_task, epochs):
         return _prev_train_one_task(self, task, i_task, epochs)
     finally:
         MR.EXPANDING.update(on=False, probe=None)
+        if ROUTER_FT_OBJECTIVE == "distill":
+            rows = MR.distill_summary(self.raw_model)
+            if _rank0(args):
+                MR.write_json(os.path.join(args.output_dir, f"router_distill_round{i_task}.json"),
+                              {"task": task, "round": i_task, "pad": DISTILL_PAD, "layers": rows})
+                if rows:
+                    mean = lambda k: sum(r[k] for r in rows) / len(rows)
+                    print(f"[residual-split] round {i_task} router distill ({DISTILL_PAD} pad): "
+                          f"KL {mean('kl'):.4f}, teacher new-expert mass "
+                          f"{mean('teacher_new_mass'):.4f}, student new-expert mass "
+                          f"{mean('student_new_mass'):.4f}", flush=True)
+            MR.clear_distill_teacher(self.raw_model)
 
 
 def _old_task_probe(self, i_task):
@@ -347,8 +441,13 @@ def save_meta_split(model, output_dir, args, trainer=None):
     meta["residual_expert"].update({
         "variant": "split_gradient",
         "new_row_init": (
+            ("copy_of_mass_reservoir_row" if MR.ACTIVE.new_row == "reservoir"
+             else "pytorch_linear_random") if MR.ACTIVE.enabled else
             "copy_of_residual_row" if NEW_EXPERT_INIT == "copy_router_zero_b"
             else "pytorch_linear_random"),
+        "router_ft_timing": ROUTER_FT_TIMING,
+        "router_ft_objective": ROUTER_FT_OBJECTIVE,
+        "router_distill_pad": DISTILL_PAD if ROUTER_FT_OBJECTIVE == "distill" else None,
         "new_expert_init": "lora_A_random_B_zero",
         "primary_routing": "residual_masked_out",
         "primary_gradient_rows": "all_but_residual",

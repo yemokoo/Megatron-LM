@@ -1626,8 +1626,21 @@ class Ours_LoRA_MoE_V3(Ours_LoRA_MoE_V2):
     def _run_v2_joint_epochs(
             self, primary_loader, memory_loader, epochs, device, phase_name,
             task=None, i_task=None, hidden_mse_teacher=None):
-        """Pair every optimizer update with V3 router-only replay."""
+        """Pair every optimizer update with V3 router-only replay.
+
+        ``self._joint_branches`` (default both) lets a subclass run one half
+        of the loop: ("primary",) forwards only the new-task batches and
+        ("router",) only the router-only replay + extra batches.  The loaders,
+        the per-update replay assignment and every exposure check are walked
+        identically in all modes, so a post-hoc router pass sees exactly the
+        records and current-batch slices the joint loop would have used.
+        """
         args = self.args
+        branches = tuple(getattr(self, "_joint_branches", None)
+                         or ("primary", "router"))
+        run_primary, run_router = "primary" in branches, "router" in branches
+        if not (run_primary or run_router):
+            raise ValueError(f"joint loop needs a branch, got {branches!r}")
         replay_objective = self._joint_replay_objective()
         if replay_objective not in {"lm", "hidden_mse"}:
             raise ValueError(
@@ -1720,7 +1733,8 @@ class Ours_LoRA_MoE_V3(Ours_LoRA_MoE_V2):
                 primary_tokens = self._valid_token_count(source_batch)
                 epoch_primary_tokens += primary_tokens
                 total_primary_tokens += primary_tokens
-                self._count_workload_batch("new_task", source_batch)
+                if run_primary:
+                    self._count_workload_batch("new_task", source_batch)
                 primary = dict(source_batch)
                 primary.pop("sources", None)
                 primary = to_device(primary, device)
@@ -1733,26 +1747,28 @@ class Ours_LoRA_MoE_V3(Ours_LoRA_MoE_V2):
                     and (step % args.loss_log_interval == 0
                          or step + 1 == len(primary_loader)))
 
-                no_sync = (
-                    self.model.no_sync()
-                    if isinstance(self.model, DDP) else nullcontext())
-                set_v3_router_token_mask(
-                    self.raw_model, primary.get("attention_mask"))
-                self._begin_gradient_memory_batch()
-                try:
-                    with no_sync:
-                        primary_outputs = self.model(
-                            **primary, use_cache=False)
-                        moe_loss = collect_v3_moe_losses(self.raw_model)
-                        primary_loss = primary_outputs.loss
-                        if moe_loss is not None:
-                            primary_loss = primary_loss + moe_loss
-                        (primary_loss / window_size).backward()
-                        self._after_primary_backward()
-                finally:
-                    set_v3_router_token_mask(self.raw_model, None)
-                self._record_gradient_memory_batch(
-                    task, source_batch, primary, window_size)
+                primary_loss = None
+                if run_primary:
+                    no_sync = (
+                        self.model.no_sync()
+                        if isinstance(self.model, DDP) else nullcontext())
+                    set_v3_router_token_mask(
+                        self.raw_model, primary.get("attention_mask"))
+                    self._begin_gradient_memory_batch()
+                    try:
+                        with no_sync:
+                            primary_outputs = self.model(
+                                **primary, use_cache=False)
+                            moe_loss = collect_v3_moe_losses(self.raw_model)
+                            primary_loss = primary_outputs.loss
+                            if moe_loss is not None:
+                                primary_loss = primary_loss + moe_loss
+                            (primary_loss / window_size).backward()
+                            self._after_primary_backward()
+                    finally:
+                        set_v3_router_token_mask(self.raw_model, None)
+                    self._record_gradient_memory_batch(
+                        task, source_batch, primary, window_size)
 
                 replay_loss = None
                 replay_loss_for_log = None
@@ -1791,8 +1807,12 @@ class Ours_LoRA_MoE_V3(Ours_LoRA_MoE_V2):
                         replay_source_batches.append(replay_source_batch)
 
                     local_replay_loss_sum = None
+                    if not run_router:
+                        # primary-only: the records are drawn (same stream
+                        # position) but not forwarded
+                        consumed_local_exposures += local_replay_count
                     for chunk_start in range(
-                            0, local_replay_count,
+                            0, local_replay_count if run_router else 0,
                             replay_forward_batch_size):
                         replay_source_chunk = replay_source_batches[
                             chunk_start:
@@ -1849,7 +1869,8 @@ class Ours_LoRA_MoE_V3(Ours_LoRA_MoE_V2):
                                 set_v3_router_token_mask(self.raw_model, None)
                         consumed_local_exposures += len(replay_source_chunk)
 
-                    for extra in self._extra_router_replay_batches(primary):
+                    for extra in (self._extra_router_replay_batches(primary)
+                                  if run_router else ()):
                         extra = dict(extra)
                         extra_labels = extra.pop("labels")
                         self._count_workload_batch("router_replay_extra", extra)
@@ -1900,7 +1921,7 @@ class Ours_LoRA_MoE_V3(Ours_LoRA_MoE_V2):
                             if replay_loss_scale is not None else "-")
                         progress.set_description(
                             f"{phase_name} e{epoch + 1} s{step} "
-                            f"new={primary_loss.detach().float().item():.4f} "
+                            f"new={primary_loss.detach().float().item() if primary_loss is not None else float('nan'):.4f} "
                             f"replay={replay_text} n={global_replay_count} "
                             f"scale={replay_scale_text} "
                             f"budget={consumed_global_exposures}/"

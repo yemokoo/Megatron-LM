@@ -23,6 +23,14 @@ Task cycle
       K-th largest candidate logit.  The new physical expert is not pushed down.
   refill: after the warm-up alpha rises linearly 0 -> 1, reaching 1 at the last update.
 
+Ablation hooks (defaults = the method above)
+  new_row="random" (MRES_NEW_ROW): skip the clone at expansion, the new row keeps the stock
+      nn.Linear init that growth already drew; everything else (alpha 1 -> 0, warm-up, margin)
+      is unchanged.
+  router distillation (router_distill_*): per-layer KL(teacher || student) over the Top-K
+      candidates [physical, skip], teacher = the router rows before this task's expansion
+      applied to the same (detached) layer input; see capture_router_distill.
+
 Configuration comes from MRES_* for training and from the checkpoint meta when loading.
 """
 from __future__ import annotations
@@ -48,6 +56,7 @@ class MassReservoirConfig:
     warmup_frac: float = 0.05          # share of a task's optimizer updates with forced new-expert routing
     margin_current: bool = True        # also apply the margin on the current-task router-correction slice
     warmup_freeze_router: bool = True  # during warm-up, old rows / skip / reservoir get no update
+    new_row: str = "reservoir"         # expansion init of the new router row: reservoir | random
 
     def to_meta(self, alpha_end):
         return {**asdict(self), "alpha_end": alpha_end,
@@ -60,16 +69,23 @@ def _flag(name, default):
     return os.environ.get(name, default).strip().lower() in ("1", "true", "yes", "on")
 
 
+NEW_ROW_CHOICES = ("reservoir", "random")
+
+
 def config_from_env():
     if not _flag("MRES_ENABLE", "0"):
         return MassReservoirConfig()
+    new_row = os.environ.get("MRES_NEW_ROW", "reservoir").strip().lower()
+    if new_row not in NEW_ROW_CHOICES:
+        raise ValueError(f"MRES_NEW_ROW must be one of {NEW_ROW_CHOICES}, got {new_row!r}")
     return MassReservoirConfig(
         enabled=True,
         delta=float(os.environ.get("MRES_DELTA", "0.5")),
         margin_weight=float(os.environ.get("MRES_LAMBDA", "0.1")),
         warmup_frac=float(os.environ.get("MRES_WARMUP_FRAC", "0.05")),
         margin_current=_flag("MRES_MARGIN_CURRENT", "1"),
-        warmup_freeze_router=_flag("MRES_WARMUP_FREEZE_ROUTER", "1"))
+        warmup_freeze_router=_flag("MRES_WARMUP_FREEZE_ROUTER", "1"),
+        new_row=new_row)
 
 
 def config_from_meta(meta):
@@ -230,6 +246,9 @@ def router_forward(router, hidden_states, V3):
     if router._mres_margin and router.training and torch.is_grad_enabled():
         hinge = F.relu(z_res - threshold + cfg.delta)
         router._mres_margin_buf.append((hinge, routed))
+    if (getattr(router, "_rd_on", False) and router.training and torch.is_grad_enabled()
+            and getattr(router, "_rd_teacher", None) is not None):
+        capture_router_distill(router, flat, cand, routed, real)
     if router._mres_stats is not None:
         _accumulate(router, cand, z_res, threshold, full_probs, topk_idx, routed, real)
     if router._mres_probe is not None:
@@ -266,6 +285,120 @@ def pop_margin_per_sample(model, batch_size):
     if not per_layer:
         return None
     return torch.stack(per_layer).mean(0)
+
+
+# ------------------------------------------------------- router distillation
+DISTILL_PADS = ("row", "prob")
+
+
+def snapshot_distill_teacher(model, old_count, pad):
+    """Freeze the pre-expansion router of every layer as the distillation teacher.
+
+    Called right after growth, before any update: rows [:old_count] and the skip row are the
+    pre-expansion values (growth copies them unchanged).  pad decides how the teacher covers the
+    student's new slots:
+      row  -- a zero router row per new expert (teacher logit 0 there, softmax over every slot)
+      prob -- teacher probability 0 there (KL only over the teacher's own slots)
+    """
+    if pad not in DISTILL_PADS:
+        raise ValueError(f"distill pad must be one of {DISTILL_PADS}, got {pad!r}")
+    for router in routers(model):
+        if not enabled(router):
+            continue
+        with torch.no_grad():
+            rows = router.router.weight[:old_count].detach().float().clone()
+            skip = router.residual_router.weight.detach().float().clone()
+        router._rd_teacher = {"rows": rows, "skip": skip, "old": int(old_count), "pad": pad}
+        router._rd_buf = []
+        router._rd_stats = {"tokens": 0.0, "kl": 0.0, "teacher_new_mass": 0.0,
+                            "student_new_mass": 0.0}
+
+
+def clear_distill_teacher(model):
+    for router in routers(model):
+        router._rd_teacher = None
+        router._rd_buf = []
+        router._rd_on = False
+
+
+def teacher_candidate_logits(router, flat, real):
+    """Teacher logits laid out on the student's candidate slots [0..real-1, skip] (row pad) or
+    on the teacher's own slots [0..old-1, skip] (prob pad), from the detached layer input."""
+    t = router._rd_teacher
+    x = flat.detach().float()
+    old = t["old"]
+    if t["pad"] == "row":
+        pad = torch.zeros(real - old, x.shape[-1], dtype=x.dtype, device=x.device)
+        rows = torch.cat([t["rows"].to(x.device), pad, t["skip"].to(x.device)], 0)
+    else:
+        rows = torch.cat([t["rows"].to(x.device), t["skip"].to(x.device)], 0)
+    return F.linear(x, rows)
+
+
+def capture_router_distill(router, flat, cand, routed, real):
+    """Per-token KL(teacher || student) over the candidate distribution (reservoir excluded: it
+    is not a candidate and the margin already governs it).  Student = the logits this forward
+    routes with; its gradient reaches the router rows (and, through the input, earlier layers)."""
+    t = router._rd_teacher
+    if real < t["old"]:
+        raise ValueError(f"distill teacher has {t['old']} rows, student {real}")
+    t_logits = teacher_candidate_logits(router, flat, real)
+    log_s = F.log_softmax(cand.float(), dim=-1)                         # [T, real + 1]
+    log_t = F.log_softmax(t_logits, dim=-1)
+    if t["pad"] == "prob":
+        # teacher slot i -> student slot: old experts keep their index, skip moves to `real`
+        index = torch.cat([torch.arange(t["old"], device=cand.device),
+                           torch.tensor([real], device=cand.device)])
+        log_s_on_t = log_s.index_select(-1, index)
+        kl = (log_t.exp() * (log_t - log_s_on_t)).sum(-1)
+        t_new = torch.zeros_like(kl)
+    else:
+        kl = (log_t.exp() * (log_t - log_s)).sum(-1)
+        t_new = log_t[:, t["old"]:real].exp().sum(-1)
+    router._rd_buf.append((kl, routed))
+    s = router._rd_stats
+    if s is not None:
+        with torch.no_grad():
+            keep = routed if routed is not None else torch.ones_like(kl, dtype=torch.bool)
+            s["tokens"] += float(keep.sum())
+            s["kl"] += float(kl.detach()[keep].sum())
+            s["teacher_new_mass"] += float(t_new[keep].sum())
+            s["student_new_mass"] += float(log_s[:, t["old"]:real].exp().sum(-1)[keep].sum())
+
+
+def pop_distill_per_sample(model, batch_size):
+    """Mean over layers of the per-sample routed-token-mean KL; clears the buffers.  None if the
+    distillation capture was off for this forward."""
+    per_layer = []
+    for router in routers(model):
+        buf = getattr(router, "_rd_buf", None)
+        if not buf:
+            continue
+        kl, valid = buf.pop()
+        buf.clear()
+        kl = kl.reshape(batch_size, -1)
+        mask = (torch.ones_like(kl, dtype=torch.bool) if valid is None
+                else valid.reshape(batch_size, -1)).to(kl.dtype)
+        per_layer.append((kl * mask).sum(-1) / mask.sum(-1).clamp_min(1.0))
+    if not per_layer:
+        return None
+    return torch.stack(per_layer).mean(0)
+
+
+def distill_summary(model, reset=True):
+    out = []
+    for i, router in enumerate(routers(model)):
+        s = getattr(router, "_rd_stats", None)
+        if not s:
+            continue
+        n = max(s["tokens"], 1.0)
+        out.append({"layer": i, "tokens": int(s["tokens"]), "kl": s["kl"] / n,
+                    "teacher_new_mass": s["teacher_new_mass"] / n,
+                    "student_new_mass": s["student_new_mass"] / n})
+        if reset:
+            for k in s:
+                s[k] = 0.0
+    return out
 
 
 # --------------------------------------------------------------------- stats

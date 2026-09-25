@@ -25,6 +25,8 @@
 #   REPLAY_SOURCE=real    RUN_DIR=/path/out bash scripts/residual/run_residual_chain.sh
 #   REPLAY_SOURCE=selfgen RUN_DIR=/path/out bash scripts/residual/run_residual_chain.sh
 #   (optional) SEED_CKPT=/path/to/model  reuses an existing round-0 checkpoint instead of training it
+#   The mass-reservoir ablation arms are launched through run_mres_ablation.sh (ARM=...), which
+#   sets MRES_* / RESIDUAL_ROUTER_FT_* and then runs this script; the trainer reads them from env.
 set -uo pipefail
 TRACE=${TRACE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}
 IMPL=$TRACE/implementations/llmcl_benchmark
@@ -83,7 +85,7 @@ fi
 
 train_once(){   # t gc(0|1)
   local t=$1 gc=$2
-  local task=${TASKS[$t]} port=$((29970+t))
+  local task=${TASKS[$t]} port=$((${PORT_BASE:-29970}+t))
   local -a resume=(); [ "$t" -gt 0 ] && resume=(--resume_checkpoint "$R/model/$((t-1))")
   local -a gc_args=(); [ "$gc" = 1 ] && gc_args=(--gradient_checkpointing)
   local -a src_env=()
@@ -131,7 +133,7 @@ train_round(){   # t : GRAD_CKPT=0 trains without checkpointing; an OOM retries 
   local t=$1 gc=${GRAD_CKPT:-1}
   local task=${TASKS[$t]} log=$R/logs/train_r$t.log
   [ -f "$R/model/$t/lora_moe_meta.json" ] && return 0
-  say "train round $t ($task): header guard ($DEC) + header loss OFF, replay=$REPLAY_SOURCE, init=$NEW_EXPERT_INIT, kd_init=$KD_INIT@$KD_INIT_STEP_FRACTION, GPUs=$GPUS, grad ckpt $gc"
+  say "train round $t ($task): header guard ($DEC) + header loss OFF, replay=$REPLAY_SOURCE, init=$NEW_EXPERT_INIT, kd_init=$KD_INIT@$KD_INIT_STEP_FRACTION, GPUs=$GPUS, grad ckpt $gc, routing=$ROUTING_WEIGHT_MODE, mres=${MRES_ENABLE:-0} (new_row=${MRES_NEW_ROW:-reservoir} lambda=${MRES_LAMBDA:-0.1} delta=${MRES_DELTA:-0.5} warmup=${MRES_WARMUP_FRAC:-0.05}), router-FT timing=${RESIDUAL_ROUTER_FT_TIMING:-joint} objective=${RESIDUAL_ROUTER_FT_OBJECTIVE:-lm}"
   train_once "$t" "$gc"
   if [ ! -f "$R/model/$t/lora_moe_meta.json" ] && [ "$gc" = 0 ] && grep -qE "OutOfMemoryError|CUDA out of memory" "$log"; then
     mv "$log" "$log.oom_gc0"
