@@ -259,6 +259,31 @@ if [ -n "$SECONDARY_PROBE_DATASET" ]; then
         --secondary-probe-data-path $(build_data_path "$SECONDARY_PROBE_DATASET")
     )
 fi
+if [ -n "${TERTIARY_PROBE_DATASET:-}" ]; then
+    PROBE_ARGS+=(
+        --tertiary-probe-name "${TERTIARY_PROBE_NAME:?}"
+        --tertiary-probe-eval-iters "${TERTIARY_PROBE_EVAL_ITERS:-25}"
+        --tertiary-probe-eval-interval "${TERTIARY_PROBE_EVAL_INTERVAL:-$SECONDARY_PROBE_EVAL_INTERVAL}"
+        --tertiary-probe-step-offset "${TERTIARY_PROBE_STEP_OFFSET:-0}"
+        --tertiary-probe-data-path $(build_data_path "$TERTIARY_PROBE_DATASET")
+    )
+fi
+# Optional router-only replay pass (mass reservoir margin from task 0) and extra Megatron flags.
+# JOINT_REPLAY_DATASET may list several directories separated by ':'; each gets equal weight.
+if [ "${MOE_JOINT_REPLAY_LM:-0}" = "1" ]; then
+    IFS=':' read -r -a _replay_dirs <<< "${JOINT_REPLAY_DATASET:?MOE_JOINT_REPLAY_LM=1 needs JOINT_REPLAY_DATASET}"
+    PROBE_ARGS+=(
+        --moe-joint-replay-lm
+        --moe-joint-replay-data-path $(build_equal_dataset_data_path "${_replay_dirs[@]}")
+    )
+    if [ -n "${JOINT_REPLAY_TOTAL_SAMPLES:-}" ] && [ "${JOINT_REPLAY_TOTAL_SAMPLES}" != "0" ]; then
+        PROBE_ARGS+=(--moe-joint-replay-total-samples "$JOINT_REPLAY_TOTAL_SAMPLES")
+    fi
+fi
+if [ -n "${EXTRA_MEGATRON_ARGS:-}" ]; then
+    read -r -a _extra_args <<< "$EXTRA_MEGATRON_ARGS"
+    PROBE_ARGS+=("${_extra_args[@]}")
+fi
 
 WANDB_ARGS=()
 if [ -n "$WANDB_PROJECT" ]; then

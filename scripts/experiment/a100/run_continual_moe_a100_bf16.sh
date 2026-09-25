@@ -504,6 +504,8 @@ if [ "$MOE_JOINT_REPLAY_LM" = "1" ]; then
     [ "$MOE_INTERLEAVE_CODE_STEPS" -eq 0 ] || { echo "ERROR: joint replay conflicts with interleave" >&2; exit 1; }
     JOINT_DIRS=("$SSD_JOINT_REPLAY_DATASET")
     [ -z "$JOINT_REPLAY_SECONDARY_DATASET" ] || JOINT_DIRS+=("$SSD_JOINT_REPLAY_SECONDARY_DATASET")
+    # third replay source (read in place; the router-FT subsets are small)
+    [ -z "${JOINT_REPLAY_TERTIARY_DATASET:-}" ] || JOINT_DIRS+=("$JOINT_REPLAY_TERTIARY_DATASET")
     case "$JOINT_REPLAY_DATA_WEIGHT_MODE" in
       equal_dataset) JOINT_PATH="$(build_equal_dataset_data_path "${JOINT_DIRS[@]}")" ;;
       equal_prefix) JOINT_PATH="$(build_data_path "${JOINT_DIRS[@]}")" ;;
@@ -830,7 +832,8 @@ GPU_LOG_PID=$!
     pretrain_gpt.py \
     "${MODEL_ARGS[@]}" "${INFRA_ARGS[@]}" "${TRAIN_ARGS[@]}" \
     "${DATA_ARGS[@]}" "${INTERLEAVE_ARGS[@]}" "${SAVE_ARGS[@]}" \
-    "${PROBE_ARGS[@]}" "${WANDB_ARGS[@]}" "${DEBUG_TRAINABLE_ARGS[@]}"
+    "${PROBE_ARGS[@]}" "${WANDB_ARGS[@]}" "${DEBUG_TRAINABLE_ARGS[@]}" \
+    ${EXTRA_MEGATRON_ARGS:-}
 
 kill "$GPU_LOG_PID" 2>/dev/null || true
 if [ "$SSD_TARGET_WEIGHTS" != "$TRAIN_WEIGHTS" ]; then

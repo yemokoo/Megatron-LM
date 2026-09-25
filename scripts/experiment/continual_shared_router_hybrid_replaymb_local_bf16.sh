@@ -73,6 +73,7 @@ export SSD_CODE_TRAIN="${SSD_MOUNT}/dataset/code_train"
 export SSD_CODE_TRAIN_SECONDARY="${SSD_MOUNT}/dataset/code_train_secondary"
 export SSD_JOINT_REPLAY_DATASET="${SSD_MOUNT}/dataset/joint_replay_train"
 export SSD_JOINT_REPLAY_SECONDARY_DATASET="${SSD_MOUNT}/dataset/joint_replay_secondary_train"
+export SSD_JOINT_REPLAY_TERTIARY_DATASET="${SSD_MOUNT}/dataset/joint_replay_tertiary_train"
 export SSD_ROUTER_MEMORY="${SSD_MOUNT}/dataset/router_memory"
 export SSD_ROUTER_MEMORY_EVAL="${SSD_MOUNT}/dataset/router_memory_eval"
 export SSD_SOURCE_WEIGHTS="${SSD_MOUNT}/source_weights"
@@ -126,6 +127,9 @@ export TRAIN_DATA_WEIGHT_MODE="${TRAIN_DATA_WEIGHT_MODE:-equal_prefix}"
 export MOE_JOINT_REPLAY_LM="${MOE_JOINT_REPLAY_LM:-0}"
 export JOINT_REPLAY_DATASET="${JOINT_REPLAY_DATASET:-}"
 export JOINT_REPLAY_SECONDARY_DATASET="${JOINT_REPLAY_SECONDARY_DATASET:-}"
+export JOINT_REPLAY_TERTIARY_DATASET="${JOINT_REPLAY_TERTIARY_DATASET:-}"
+# optional extra Megatron flags, word-split (e.g. the mass-reservoir options)
+export EXTRA_MEGATRON_ARGS="${EXTRA_MEGATRON_ARGS:-}"
 export JOINT_REPLAY_DATA_WEIGHT_MODE="${JOINT_REPLAY_DATA_WEIGHT_MODE:-equal_dataset}"
 export ROUTER_MEMORY_KL_COEFF="${ROUTER_MEMORY_KL_COEFF:-0.0}"
 export ROUTER_MEMORY_FORCE_ENABLE_ZERO_COEFF="${ROUTER_MEMORY_FORCE_ENABLE_ZERO_COEFF:-0}"
@@ -267,6 +271,9 @@ if [ "$MOE_JOINT_REPLAY_LM" = "1" ]; then
     if [ -n "$JOINT_REPLAY_SECONDARY_DATASET" ]; then
         mkdir -p "$SSD_JOINT_REPLAY_SECONDARY_DATASET"
     fi
+    if [ -n "$JOINT_REPLAY_TERTIARY_DATASET" ]; then
+        mkdir -p "$SSD_JOINT_REPLAY_TERTIARY_DATASET"
+    fi
 fi
 exec > >(
     tee -a "$RUN_LOG" | "$PYTHON_BIN" -u -c '
@@ -378,6 +385,10 @@ if [ "$MOE_JOINT_REPLAY_LM" = "1" ]; then
         rsync -rlptD --info=progress2 \
             "$JOINT_REPLAY_SECONDARY_DATASET/" "$SSD_JOINT_REPLAY_SECONDARY_DATASET/"
     fi
+    if [ -n "$JOINT_REPLAY_TERTIARY_DATASET" ]; then
+        rsync -rlptD --info=progress2 \
+            "$JOINT_REPLAY_TERTIARY_DATASET/" "$SSD_JOINT_REPLAY_TERTIARY_DATASET/"
+    fi
 fi
 if router_memory_requested; then
     if ! compgen -G "$ROUTER_MEMORY_DATASET/*.bin" >/dev/null; then
@@ -443,6 +454,8 @@ metadata = {
     'moe_joint_replay_lm': os.environ.get('MOE_JOINT_REPLAY_LM', '0') == '1',
     'joint_replay_dataset': os.environ.get('JOINT_REPLAY_DATASET', ''),
     'joint_replay_secondary_dataset': os.environ.get('JOINT_REPLAY_SECONDARY_DATASET', ''),
+    'joint_replay_tertiary_dataset': os.environ.get('JOINT_REPLAY_TERTIARY_DATASET', ''),
+    'extra_megatron_args': os.environ.get('EXTRA_MEGATRON_ARGS', ''),
     'joint_replay_data_weight_mode': os.environ.get('JOINT_REPLAY_DATA_WEIGHT_MODE', 'equal_dataset'),
     'moe_new_expert_lr_ramp_steps': int(os.environ.get('MOE_NEW_EXPERT_LR_RAMP_STEPS', '0')),
     'moe_aux_loss_coeff': float(os.environ.get('MOE_AUX_LOSS_COEFF', '0.01')),
@@ -662,6 +675,9 @@ if [ "$MOE_JOINT_REPLAY_LM" = "1" ]; then
     if [ -n "$JOINT_REPLAY_SECONDARY_DATASET" ]; then
         JOINT_REPLAY_DIRS+=("$SSD_JOINT_REPLAY_SECONDARY_DATASET")
     fi
+    if [ -n "$JOINT_REPLAY_TERTIARY_DATASET" ]; then
+        JOINT_REPLAY_DIRS+=("$SSD_JOINT_REPLAY_TERTIARY_DATASET")
+    fi
     case "$JOINT_REPLAY_DATA_WEIGHT_MODE" in
         equal_dataset)
             JOINT_REPLAY_DATA_PATH="$(build_equal_dataset_data_path "${JOINT_REPLAY_DIRS[@]}")"
@@ -781,6 +797,7 @@ torchrun \
     --secondary-probe-data-path $(build_data_path "$SECONDARY_PROBE_DATASET") \
     "${TERTIARY_PROBE_ARGS[@]}" \
     "${JOINT_REPLAY_ARGS[@]}" \
+    ${EXTRA_MEGATRON_ARGS} \
     "${NEW_EXPERT_LR_ARGS[@]}" \
     "${ROUTER_MEMORY_ARGS[@]}" \
     "${OLD_MODEL_KL_ARGS[@]}" \

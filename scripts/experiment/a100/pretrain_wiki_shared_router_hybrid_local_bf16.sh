@@ -190,6 +190,10 @@ metadata = {
     'moe_expert_capacity_factor': os.environ.get('MOE_EXPERT_CAPACITY_FACTOR', ''),
     'moe_pad_expert_input_to_capacity': os.environ.get('MOE_PAD_EXPERT_INPUT_TO_CAPACITY', '0') == '1',
     'shared_router_hybrid': True,
+    'moe_joint_replay_lm': os.environ.get('MOE_JOINT_REPLAY_LM', '0') == '1',
+    'joint_replay_dataset': os.environ.get('JOINT_REPLAY_DATASET', ''),
+    'joint_replay_total_samples': os.environ.get('JOINT_REPLAY_TOTAL_SAMPLES', ''),
+    'extra_megatron_args': os.environ.get('EXTRA_MEGATRON_ARGS', ''),
 }
 with open(os.environ['RUN_METADATA'], 'w', encoding='utf-8') as f:
     json.dump(metadata, f, indent=2)
@@ -210,6 +214,31 @@ fi
 LOG_STYLE_ARGS=()
 if [ "$TRAIN_LOG_STEP_TIME_ONLY" = "1" ]; then
     LOG_STYLE_ARGS+=(--train-log-step-time-only)
+fi
+
+TERTIARY_PROBE_ARGS=()
+if [ -n "${TERTIARY_PROBE_DATASET:-}" ]; then
+    TERTIARY_PROBE_ARGS+=(
+        --tertiary-probe-name "${TERTIARY_PROBE_NAME:?}"
+        --tertiary-probe-eval-iters "${TERTIARY_PROBE_EVAL_ITERS:-25}"
+        --tertiary-probe-eval-interval "${TERTIARY_PROBE_EVAL_INTERVAL:-$PROBE_EVAL_INTERVAL}"
+        --tertiary-probe-step-offset "${TERTIARY_PROBE_STEP_OFFSET:-0}"
+        --tertiary-probe-data-path $(build_data_path "$TERTIARY_PROBE_DATASET")
+    )
+fi
+
+# Optional router-only replay pass (used by the mass reservoir to train its margin from task 0).
+# JOINT_REPLAY_DATASET may list several directories separated by ':'; each gets equal weight.
+JOINT_REPLAY_ARGS=()
+if [ "${MOE_JOINT_REPLAY_LM:-0}" = "1" ]; then
+    IFS=':' read -r -a _replay_dirs <<< "${JOINT_REPLAY_DATASET:?MOE_JOINT_REPLAY_LM=1 needs JOINT_REPLAY_DATASET}"
+    JOINT_REPLAY_ARGS+=(
+        --moe-joint-replay-lm
+        --moe-joint-replay-data-path $(build_equal_dataset_data_path "${_replay_dirs[@]}")
+    )
+    if [ -n "${JOINT_REPLAY_TOTAL_SAMPLES:-}" ] && [ "${JOINT_REPLAY_TOTAL_SAMPLES}" != "0" ]; then
+        JOINT_REPLAY_ARGS+=(--moe-joint-replay-total-samples "$JOINT_REPLAY_TOTAL_SAMPLES")
+    fi
 fi
 
 torchrun \
@@ -255,6 +284,9 @@ torchrun \
     --secondary-probe-eval-interval "$SECONDARY_PROBE_EVAL_INTERVAL" \
     --secondary-probe-step-offset "$SECONDARY_PROBE_STEP_OFFSET" \
     --secondary-probe-data-path $(build_data_path "$SECONDARY_PROBE_DATASET") \
+    "${TERTIARY_PROBE_ARGS[@]}" \
+    "${JOINT_REPLAY_ARGS[@]}" \
+    ${EXTRA_MEGATRON_ARGS:-} \
     "${WANDB_ARGS[@]}"
 
 if [ "$SSD_WEIGHTS" != "$TRAIN_WEIGHTS" ]; then
