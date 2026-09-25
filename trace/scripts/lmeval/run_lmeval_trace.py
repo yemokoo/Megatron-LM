@@ -6,23 +6,51 @@ The model is built with the exact loaders the TRACE evaluators use
 load_v3_checkpoint / load_lora_moe_checkpoint), then handed to lm-eval's HFLM.
 
   python run_lmeval_trace.py --ckpt DIR --out OUT [--tasks mmlu] [--batch_size 8] [--limit N]
+                             [--bos_guard [--guard_header --guard_decision none]]
   --ckpt base  -> plain Llama-3.1-8B-Instruct (zero-shot row)
+
+Paths resolve relative to this repo; the base model comes from --base or $SLORA_LLAMA31_PATH.
+--bos_guard / --guard_header / --guard_decision mirror evaluate_Ours_LoRA_MoE.py and must match
+how the checkpoint was trained and scored on TRACE (the header-guarded residual/mass-reservoir
+runs use --bos_guard --guard_header --guard_decision none).  See README.md for the setup.
 """
 import argparse
 import json
 import os
 import sys
+from pathlib import Path
 
-LLMCL = "/home/seonghyeonnoh/yemokoo/30_flame_agent/LLM-continual-learning/trace/implementations/llmcl_benchmark"
-BASE = "/data2/seonghyeonnoh/LLM-continual-learning-models/Llama-3.1-8B-Instruct"
-SLORA_PORT = "/home/seonghyeonnoh/yemokoo/30_flame_agent/LLM-continual-learning/trace/implementations/SLoRA-upstream-port"
+TRACE = Path(__file__).resolve().parents[2]
+LLMCL = str(TRACE / "implementations" / "llmcl_benchmark")
+RESIDUAL = str(TRACE / "scripts" / "residual")
+BOS_TOKEN = str(TRACE / "scripts" / "bos_token")
+SLORA_PORT = str(TRACE / "implementations" / "SLoRA-upstream-port")
+BASE = os.environ.get(
+    "SLORA_LLAMA31_PATH",
+    "/data2/seonghyeonnoh/LLM-continual-learning-models/Llama-3.1-8B-Instruct")
 sys.path.insert(0, LLMCL)
 
 import torch  # noqa: E402
 from transformers import AutoModelForCausalLM, AutoTokenizer  # noqa: E402
 
 
-def build(ckpt, dtype=torch.bfloat16):
+def install_guard(model, tok, guard):
+    """Same switches as evaluate_Ours_LoRA_MoE.py --bos_guard/--guard_header/--guard_decision."""
+    if not guard or not guard.get("bos_guard"):
+        return
+    sys.path.insert(0, RESIDUAL)
+    import bos_guard
+    if guard.get("guard_header"):
+        sys.path.insert(0, BOS_TOKEN)
+        from train_bos_token import install_header_guard
+        install_header_guard(model, tok, guard.get("guard_decision", "none"))
+    else:
+        bos_guard.install_bos_guard(model)
+    print(f"bos_guard ON header={guard.get('guard_header')} "
+          f"decision={guard.get('guard_decision')}", flush=True)
+
+
+def build(ckpt, dtype=torch.bfloat16, guard=None):
     tok = AutoTokenizer.from_pretrained(BASE)
     if tok.pad_token_id is None:
         tok.pad_token = tok.eos_token
@@ -33,16 +61,18 @@ def build(ckpt, dtype=torch.bfloat16):
     lm_meta = os.path.join(ckpt, "lora_moe_meta.json")
     if os.path.exists(lm_meta) and "residual_expert" in json.load(open(lm_meta)):
         # V3 trained with a residual expert from task 0
-        sys.path.insert(0, "/home/seonghyeonnoh/yemokoo/30_flame_agent/LLM-continual-learning/trace/scripts/residual")
+        sys.path.insert(0, RESIDUAL)
         import residual_expert as RE
+        # (mass-reservoir runs included: the loader restores the reservoir from the meta)
         model, meta = RE.load_v3_residual_checkpoint(ckpt, tok, BASE, dtype=dtype)
+        install_guard(model, tok, guard)
         from model import Ours_LoRA_MoE_V3 as V3
         for layer in V3.shared_router_layers(model):
             layer.shared_expert_router._residual_stats = [0, 0]
         return model.eval(), tok, meta
     if os.path.exists(os.path.join(ckpt, "residual_expert_meta.json")):
         # router-tuned V3 (optionally + residual no-op expert rows)
-        sys.path.insert(0, "/home/seonghyeonnoh/yemokoo/30_flame_agent/LLM-continual-learning/trace/scripts/residual")
+        sys.path.insert(0, RESIDUAL)
         import residual_expert as RE
         model, meta = RE.load_router_tuned(ckpt, tok, BASE, device=dev, dtype=dtype)
         if meta.get("n_residual", 0):
@@ -108,10 +138,20 @@ def main():
     p.add_argument("--tasks", default="mmlu")
     p.add_argument("--batch_size", default="8")
     p.add_argument("--limit", type=float, default=None)
+    p.add_argument("--base", default=None, help="base model dir (default $SLORA_LLAMA31_PATH)")
+    p.add_argument("--bos_guard", action="store_true")
+    p.add_argument("--guard_header", action="store_true")
+    p.add_argument("--guard_decision", default="none")
     a = p.parse_args()
     os.makedirs(a.out, exist_ok=True)
+    if a.base:
+        global BASE
+        BASE = a.base
+    if a.guard_header and not a.bos_guard:
+        p.error("--guard_header needs --bos_guard")
 
-    model, tok, meta = build(a.ckpt)
+    model, tok, meta = build(a.ckpt, guard={"bos_guard": a.bos_guard, "guard_header": a.guard_header,
+                                            "guard_decision": a.guard_decision})
     short = {k: meta.get(k) for k in ("method", "architecture", "num_experts", "r", "alpha", "top_k")
              if meta.get(k) is not None}
     print(f"Loaded {a.ckpt}: {short}", flush=True)
@@ -142,6 +182,8 @@ def main():
         print("residual stats skipped:", exc)
     res["trace_checkpoint"] = a.ckpt
     res["trace_meta"] = short
+    res["trace_bos_guard"] = {"bos_guard": a.bos_guard, "guard_header": a.guard_header,
+                              "guard_decision": a.guard_decision if a.bos_guard else None}
     with open(os.path.join(a.out, f"results_{a.tasks.replace(',', '_')}.json"), "w") as f:
         json.dump(res, f, indent=2, default=str)
 
