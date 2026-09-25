@@ -7,7 +7,8 @@
 #                   also the reference arm for every arm below, which all use real replay
 #   ARM=random_row  new router row: clone(r_res) -> stock nn.Linear random init (MRES_NEW_ROW)
 #   ARM=no_margin   margin loss weight lambda -> 0 (MRES_LAMBDA=0; margin stats still logged)
-#   ARM=posthoc     joint router correction -> post-hoc: the task trains the primary branch
+#   ARM=posthoc     joint router correction -> post-hoc (router tuning on 20% of the train):
+#                   the task trains the primary branch
 #                   alone, then a router-only pass replays exactly the joint arm's per-update
 #                   router-FT batches (same records, same current slices, same update count);
 #                   <round>_prephase2 = pre-correction checkpoint, used for the diagonal scores
@@ -42,7 +43,8 @@ case "$ARM" in
   random_row) MRES_NEW_ROW=random ;;
   no_margin)  MRES_LAMBDA=0 ;;
   posthoc)    RESIDUAL_ROUTER_FT_TIMING=posthoc
-              export RESIDUAL_POSTHOC_ROUTER_FRAC=${RESIDUAL_POSTHOC_ROUTER_FRAC:-1.0}
+              # router tuning on 20% of the train: 20% of the joint updates, same per-update batch
+              export RESIDUAL_POSTHOC_ROUTER_FRAC=${RESIDUAL_POSTHOC_ROUTER_FRAC:-0.2}
               # acquisition score = right after the new task, before the router correction
               # (<round>_prephase2); final row = the corrected final model for all 8 tasks; the
               # last task's acquisition score is scored separately after the chain (see below)
