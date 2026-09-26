@@ -443,6 +443,13 @@ def get_blend_and_blend_per_split(args):
     return blend, blend_per_split
 
 
+def _needs_dataset_id(args):
+    """Per-sample blend dataset_id is carried for LPR and for the per-sample replay objective
+    split (--moe-joint-replay-current-task-dataset-id)."""
+    return (getattr(args, "moe_lpr_loss_coeff", 0.0) > 0.0
+            or int(getattr(args, "moe_joint_replay_current_task_dataset_id", -1)) >= 0)
+
+
 def get_batch_on_this_tp_rank(data_iterator):
 
     args = get_args()
@@ -515,7 +522,7 @@ def get_batch_on_this_tp_rank(data_iterator):
                batch['old_like_sample_id'] = torch.full(
                    expected_id_shape, -1, dtype=torch.int64, device=torch.cuda.current_device()
                )
-       if args.moe_lpr_loss_coeff > 0.0:
+       if _needs_dataset_id(args):
            # Probe/validation datasets may be unblended and therefore have no
            # dataset_id. They never execute LPR; -1 is only a broadcast placeholder.
            if "dataset_id" in data:
@@ -536,7 +543,7 @@ def get_batch_on_this_tp_rank(data_iterator):
            if old_like_gt_enabled:
                _broadcast(batch['old_like_mask'])
                _broadcast(batch['old_like_sample_id'])
-           if args.moe_lpr_loss_coeff > 0.0:
+           if _needs_dataset_id(args):
                _broadcast(batch['dataset_id'])
 
        elif mpu.is_pipeline_first_stage():
@@ -576,7 +583,7 @@ def get_batch_on_this_tp_rank(data_iterator):
                (runtime_micro_batch_size,), dtype=torch.int64,
                device=torch.cuda.current_device()
            )
-       if args.moe_lpr_loss_coeff > 0.0:
+       if _needs_dataset_id(args):
            dataset_id=torch.empty((runtime_micro_batch_size,), dtype=torch.int64, device=torch.cuda.current_device())
 
        if args.pipeline_model_parallel_size == 1:
@@ -588,7 +595,7 @@ def get_batch_on_this_tp_rank(data_iterator):
            if old_like_gt_enabled:
                _broadcast(old_like_mask)
                _broadcast(old_like_sample_id)
-           if args.moe_lpr_loss_coeff > 0.0:
+           if _needs_dataset_id(args):
                _broadcast(dataset_id)
 
        elif mpu.is_pipeline_first_stage():
@@ -620,7 +627,7 @@ def get_batch_on_this_tp_rank(data_iterator):
            'attention_mask': attention_mask,
            'position_ids': position_ids
        }
-       if args.moe_lpr_loss_coeff > 0.0:
+       if _needs_dataset_id(args):
            batch['dataset_id'] = dataset_id
        if old_like_gt_enabled:
            batch['old_like_mask'] = old_like_mask

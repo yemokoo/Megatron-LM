@@ -2576,6 +2576,36 @@ def _add_moe_args(parser):
                        help='Use teacher/student Transformer layer-output hidden KL (no replay '
                             'LM or vocabulary-logit KD) on the replay branch. Replay gradients '
                             'remain router-only under the joint-replay freeze mask.')
+    group.add_argument('--moe-joint-replay-old-data-router-kl', action='store_true',
+                       help='Use per-layer router-probability KL to the pre-expansion teacher (no '
+                            'replay LM or vocabulary-logit KD) on the replay branch: at every '
+                            'router layer KL(softmax(teacher gating) || softmax(student gating)) '
+                            'over the experts, the teacher distribution zero-padded on the new '
+                            'experts (continual_learning_utils.teacher_student_router_kl), '
+                            'averaged over layers. Replay gradients remain router-only.')
+    group.add_argument('--moe-old-router-kl-coeff', type=float, default=1.0,
+                       help='Scale factor for the old-data per-layer router KL.')
+    group.add_argument('--moe-old-router-kl-new-experts', choices=['zero_pad', 'mask'], default='zero_pad',
+                       help='How the old-data router KL treats the experts added after the teacher. '
+                            'zero_pad (default): the teacher distribution is zero-padded on the new '
+                            'experts and the student softmax covers all experts. mask: the student '
+                            'logits of the new experts are masked out and the old experts '
+                            're-normalised, KL over the teacher experts only (no KD gradient on the '
+                            'new rows).')
+    group.add_argument('--moe-old-data-objective-on-primary', action='store_true',
+                       help='Post-hoc router retune: apply the selected old-data objective '
+                            '(logits KD / hidden KL / hidden MSE / router KL, optionally split '
+                            'per sample with --moe-joint-replay-current-task-dataset-id) to the '
+                            'ordinary training batches instead of a joint replay branch. The '
+                            'frozen teacher comes from --moe-old-model-kl-load with '
+                            '--moe-old-model-kl-num-experts experts.')
+    group.add_argument('--moe-joint-replay-current-task-dataset-id', type=int, default=-1,
+                       help='With an old-data replay objective (logits KD / hidden KL / hidden '
+                            'MSE / router KL): replay samples whose blend dataset_id equals this '
+                            'index (the position of the current task in --moe-joint-replay-data-'
+                            'path) keep the LM loss, every other replay sample gets the old-data '
+                            'objective. -1 (default) applies the old-data objective to all replay '
+                            'samples.')
     group.add_argument('--moe-joint-replay-old-data-hidden-mse', action='store_true',
                        help='Use teacher/student Transformer layer-output hidden MSE (no replay '
                             'LM or vocabulary-logit KD) on the replay branch. Replay gradients '

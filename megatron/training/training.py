@@ -1037,6 +1037,8 @@ def _moe_joint_replay_old_like_objective(args):
         return 'layer_output_hidden_mse'
     if _moe_joint_replay_old_data_hidden_kl_enabled(args):
         return 'layer_output_hidden_kl'
+    if _moe_joint_replay_old_data_router_kl_enabled(args):
+        return 'router_prob_kl'
     if _moe_joint_replay_old_data_kd_enabled(args):
         return 'output_vocab_kl'
     return 'lm'
@@ -1218,6 +1220,10 @@ def _moe_joint_replay_old_data_hidden_mse_enabled(args):
     return bool(getattr(args, 'moe_joint_replay_old_data_hidden_mse', False))
 
 
+def _moe_joint_replay_old_data_router_kl_enabled(args):
+    return bool(getattr(args, 'moe_joint_replay_old_data_router_kl', False))
+
+
 def _old_moe_distill_teacher_requested(args):
     """Whether any configured objective needs the frozen old-model teacher."""
     return bool(
@@ -1237,6 +1243,10 @@ def _old_moe_distill_teacher_requested(args):
             _moe_joint_replay_old_data_hidden_mse_enabled(args)
             and getattr(args, 'moe_old_hidden_mse_coeff', 0.0) > 0.0
         )
+        or (
+            _moe_joint_replay_old_data_router_kl_enabled(args)
+            and getattr(args, 'moe_old_router_kl_coeff', 0.0) > 0.0
+        )
     )
 
 
@@ -1244,7 +1254,8 @@ def _validate_joint_replay_old_data_kd(args):
     logits_kd = _moe_joint_replay_old_data_kd_enabled(args)
     hidden_kl = _moe_joint_replay_old_data_hidden_kl_enabled(args)
     hidden_mse = _moe_joint_replay_old_data_hidden_mse_enabled(args)
-    selected_objectives = sum((logits_kd, hidden_kl, hidden_mse))
+    router_kl = _moe_joint_replay_old_data_router_kl_enabled(args)
+    selected_objectives = sum((logits_kd, hidden_kl, hidden_mse, router_kl))
     explicit_replay_samples = int(
         getattr(args, 'moe_joint_replay_total_samples', 0) or 0
     )
@@ -1293,20 +1304,34 @@ def _validate_joint_replay_old_data_kd(args):
         elif not logits_kd and float(getattr(args, 'moe_expansion_distill_lm_loss_coeff', 1.0)) <= 0.0:
             raise ValueError('old-like replay LM requires a positive LM loss coefficient')
         budget = _moe_joint_replay_old_like_budget(args)
+    split_id = int(getattr(args, 'moe_joint_replay_current_task_dataset_id', -1))
+    if split_id >= 0 and selected_objectives != 1:
+        raise ValueError('--moe-joint-replay-current-task-dataset-id needs exactly one old-data '
+                         'replay objective (logits KD, hidden KL, hidden MSE, or router KL)')
     if selected_objectives == 0:
         return
     if selected_objectives != 1:
         raise ValueError(
-            'select exactly one old-data replay objective: logits KD, hidden KL, or hidden MSE'
+            'select exactly one old-data replay objective: logits KD, hidden KL, hidden MSE, '
+            'or router KL'
         )
-    if not _moe_joint_replay_enabled(args):
-        raise ValueError('old-data distillation replay requires --moe-joint-replay-lm')
+    if not _moe_joint_replay_enabled(args) and not getattr(
+            args, 'moe_old_data_objective_on_primary', False):
+        raise ValueError('old-data distillation replay requires --moe-joint-replay-lm '
+                         '(or --moe-old-data-objective-on-primary for a post-hoc retune)')
+    if getattr(args, 'moe_old_data_objective_on_primary', False) and _moe_joint_replay_enabled(args):
+        raise ValueError('--moe-old-data-objective-on-primary is the post-hoc retune path; '
+                         'it cannot be combined with --moe-joint-replay-lm')
     if logits_kd and args.moe_old_model_kl_coeff <= 0:
         raise ValueError('old-data KD replay requires --moe-old-model-kl-coeff > 0')
     if hidden_kl and args.moe_old_hidden_kl_coeff <= 0:
         raise ValueError('old-data hidden KL replay requires --moe-old-hidden-kl-coeff > 0')
     if hidden_mse and args.moe_old_hidden_mse_coeff <= 0:
         raise ValueError('old-data hidden MSE replay requires --moe-old-hidden-mse-coeff > 0')
+    if router_kl and args.moe_old_router_kl_coeff <= 0:
+        raise ValueError('old-data router KL replay requires --moe-old-router-kl-coeff > 0')
+    if router_kl and int(getattr(args, 'pipeline_model_parallel_size', 1)) != 1:
+        raise ValueError('old-data router KL replay currently requires pipeline parallel size 1')
     if not args.moe_old_model_kl_load:
         raise ValueError('old-data distillation replay requires --moe-old-model-kl-load')
 
@@ -1544,6 +1569,8 @@ def _joint_replay_objective_coefficient(args):
         return coefficient
     if _moe_joint_replay_old_data_hidden_mse_enabled(args):
         return float(args.moe_old_hidden_mse_coeff)
+    if _moe_joint_replay_old_data_router_kl_enabled(args):
+        return float(args.moe_old_router_kl_coeff)
     # Plain joint replay uses the replay LM numerator produced by loss_func.
     return float(getattr(args, 'moe_expansion_distill_lm_loss_coeff', 1.0))
 
@@ -3527,6 +3554,28 @@ def setup_model_and_optimizer(model_provider_func,
                     "Loaded full old shared-router hybrid teacher for resumed "
                     "teacher-student router KD."
                 )
+            if (getattr(args, 'moe_old_data_objective_on_primary', False)
+                    and _old_moe_distill_teacher_requested(args) and args.moe_old_model_kl_load):
+                teacher_num_experts = (
+                    args.moe_old_model_kl_num_experts
+                    if args.moe_old_model_kl_num_experts is not None
+                    else args.shared_router_hybrid_resume_from_num_experts)
+                original_load = args.load
+                original_num_flops = args.num_floating_point_operations_so_far
+                args.load = args.moe_old_model_kl_load
+                source_model = _load_shared_router_hybrid_source_model(
+                    model_provider_func, model_type, checkpointing_context, teacher_num_experts)
+                args.load = original_load
+                args.num_floating_point_operations_so_far = original_num_flops
+                for teacher_shard in source_model:
+                    teacher_shard.eval()
+                    for param in teacher_shard.parameters():
+                        param.requires_grad = False
+                set_old_moe_distill_teacher(source_model)
+                args._posthoc_old_data_teacher_loaded = True
+                print_rank_0(
+                    f'Loaded post-hoc old-data teacher ({teacher_num_experts} experts) from '
+                    f'{args.moe_old_model_kl_load}.')
             print_rank_0(
                 'Resumed expanded shared-router hybrid checkpoint at iteration '
                 f'{args.iteration} with continual-learning freeze reapplied.'
@@ -3559,6 +3608,7 @@ def setup_model_and_optimizer(model_provider_func,
         elif (
             args.moe_resume_from_num_experts is None
             and args.attn_lora_resume_from_num_experts is None
+            and not getattr(args, '_posthoc_old_data_teacher_loaded', False)
         ):
             set_old_moe_distill_teacher(None)
     else:
@@ -3973,15 +4023,24 @@ def train_step(
                 captured_router_maps,
             )
         else:
-            losses_reduced = forward_backward_func(
-                forward_step_func=forward_step_func,
-                data_iterator=data_iterator,
-                model=model,
-                num_microbatches=get_num_microbatches(),
-                seq_length=args.seq_length,
-                micro_batch_size=args.micro_batch_size,
-                decoder_seq_length=args.decoder_seq_length,
-                forward_only=False)
+            posthoc_objective = bool(getattr(args, 'moe_old_data_objective_on_primary', False))
+            if posthoc_objective:
+                # post-hoc router retune: the ordinary batches carry the old-data objective
+                # (probes / validation run outside train_step and keep plain LM)
+                args._moe_joint_replay_old_data_kd_active = True
+            try:
+                losses_reduced = forward_backward_func(
+                    forward_step_func=forward_step_func,
+                    data_iterator=data_iterator,
+                    model=model,
+                    num_microbatches=get_num_microbatches(),
+                    seq_length=args.seq_length,
+                    micro_batch_size=args.micro_batch_size,
+                    decoder_seq_length=args.decoder_seq_length,
+                    forward_only=False)
+            finally:
+                if posthoc_objective:
+                    args._moe_joint_replay_old_data_kd_active = False
         joint_replay_loss_dict={}
         if _moe_joint_replay_enabled(args):
             router_ids=set()
@@ -4101,6 +4160,7 @@ def train_step(
                         _moe_joint_replay_old_data_kd_enabled(args)
                         or _moe_joint_replay_old_data_hidden_kl_enabled(args)
                         or _moe_joint_replay_old_data_hidden_mse_enabled(args)
+                        or _moe_joint_replay_old_data_router_kl_enabled(args)
                     )
                     args._moe_joint_replay_gradient_scale = (
                         1.0

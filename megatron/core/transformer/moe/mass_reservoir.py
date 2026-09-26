@@ -26,6 +26,7 @@ Checkpoints hold the end-of-task state, so loading sets alpha = alpha_end.
 from __future__ import annotations
 
 import math
+from contextlib import contextmanager
 from functools import partial
 
 import torch
@@ -260,3 +261,18 @@ def begin_step(args, iteration: int, num_existing_experts):
 def set_pass(name: str, grad_scale: float = 1.0) -> None:
     STATE["pass"] = name
     STATE["grad_scale"] = float(grad_scale)
+
+
+@contextmanager
+def teacher_alpha():
+    """Forward the frozen pre-expansion teacher at its end-of-task mass.
+
+    alpha is one global shared by every router, and after expansion it follows the student's
+    0 -> alpha_end schedule.  The pre-expansion model was trained up to alpha_end, so a teacher
+    forward under the student's alpha would distill toward a model that never existed."""
+    saved = STATE["alpha"]
+    STATE["alpha"] = STATE["alpha_end"]
+    try:
+        yield
+    finally:
+        STATE["alpha"] = saved

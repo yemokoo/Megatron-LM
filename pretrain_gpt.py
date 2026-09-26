@@ -30,6 +30,7 @@ from megatron.core.utils import StragglerDetector
 from megatron.core.transformer.spec_utils import import_module
 from megatron.core.transformer.shared_router_hybrid import capture_shared_router_inputs
 from megatron.core.transformer.moe.continual_learning_utils import teacher_student_router_kl
+from megatron.core.transformer.moe import mass_reservoir
 from megatron.training.utils import (
     get_batch_on_this_cp_rank,
     get_batch_on_this_tp_rank,
@@ -281,6 +282,8 @@ def get_batch(data_iterator):
 
     if getattr(get_args(), "moe_lpr_loss_coeff", 0.0) > 0.0:
         get_args()._moe_lpr_dataset_ids = batch["dataset_id"]
+    if int(getattr(get_args(), "moe_joint_replay_current_task_dataset_id", -1)) >= 0:
+        get_args()._moe_batch_dataset_ids = batch.get("dataset_id")
     return (
         batch["tokens"], batch["labels"], batch["loss_mask"],
         batch["attention_mask"], batch["position_ids"],
@@ -375,6 +378,7 @@ def _teacher_kd_enabled_for_current_branch(args, teacher_model, expansion_distil
         getattr(args, "moe_joint_replay_old_data_kd", False)
         or getattr(args, "moe_joint_replay_old_data_hidden_kl", False)
         or getattr(args, "moe_joint_replay_old_data_hidden_mse", False)
+        or getattr(args, "moe_joint_replay_old_data_router_kl", False)
     )
     if replay_distillation_requested:
         return bool(getattr(args, "_moe_joint_replay_old_data_kd_active", False))
@@ -384,6 +388,28 @@ def _teacher_kd_enabled_for_current_branch(args, teacher_model, expansion_distil
 def _old_data_hidden_kl_enabled_for_current_branch(args):
     return bool(
         getattr(args, "moe_joint_replay_old_data_hidden_kl", False)
+        and getattr(args, "_moe_joint_replay_old_data_kd_active", False)
+    )
+
+
+def _replay_objective_token_masks(loss_mask, dataset_ids, current_task_dataset_id):
+    """Per-token split of a replay micro-batch: samples of the current task keep the LM loss,
+    every other (old-task) sample gets the old-data objective.  Returns float masks shaped like
+    loss_mask: (lm_mask, kd_mask), lm_mask + kd_mask == loss_mask."""
+    if dataset_ids is None:
+        raise RuntimeError("replay objective split needs per-sample dataset_id in the batch")
+    if dataset_ids.dim() != 1 or dataset_ids.shape[0] != loss_mask.shape[0]:
+        raise RuntimeError(
+            f"replay dataset_id shape {tuple(dataset_ids.shape)} vs loss_mask {tuple(loss_mask.shape)}")
+    current = (dataset_ids == int(current_task_dataset_id)).to(loss_mask.dtype)[:, None]
+    loss_mask = loss_mask.float()
+    lm_mask = loss_mask * current.float()
+    return lm_mask, loss_mask - lm_mask
+
+
+def _old_data_router_kl_enabled_for_current_branch(args):
+    return bool(
+        getattr(args, "moe_joint_replay_old_data_router_kl", False)
         and getattr(args, "_moe_joint_replay_old_data_kd_active", False)
     )
 
@@ -420,6 +446,7 @@ def loss_func(
     old_hidden_mse_loss = None
     hidden_kl_loss = None
     router_kl_loss = None
+    old_router_kl_loss = None
     lpr_loss = None
     fingerprint_kd_loss = None
     fingerprint_mean_score = None
@@ -427,6 +454,8 @@ def loss_func(
     fingerprint_hard_coverage = None
     fingerprint_score_weight_covariance = None
     fingerprint_layer_loss_means = None
+    lm_token_mask = None
+    kd_token_count = None
     if isinstance(output_tensor, dict):
         losses = output_tensor["losses"].float()
         teacher_logits = output_tensor.get("teacher_logits")
@@ -435,6 +464,7 @@ def loss_func(
         old_hidden_mse_loss = output_tensor.get("old_hidden_mse_loss")
         hidden_kl_loss = output_tensor.get("hidden_kl_loss")
         router_kl_loss = output_tensor.get("router_kl_loss")
+        old_router_kl_loss = output_tensor.get("old_router_kl_loss")
         lpr_loss = output_tensor.get("lpr_loss")
         fingerprint_kd_loss = output_tensor.get("fingerprint_kd_loss")
         fingerprint_mean_score = output_tensor.get("fingerprint_mean_score")
@@ -444,13 +474,24 @@ def loss_func(
             "fingerprint_score_weight_covariance"
         )
         fingerprint_layer_loss_means = output_tensor.get("fingerprint_layer_loss_means")
+        lm_token_mask = output_tensor.get("lm_token_mask")
+        kd_token_mask = output_tensor.get("kd_token_mask")
     else:
         losses = output_tensor.float()
     loss_mask = loss_mask.view(-1).float()
     total_tokens = loss_mask.sum()
-    lm_loss = torch.sum(losses.view(-1) * loss_mask)
-    lm_loss_coeff = _effective_lm_loss_coeff(args)
-    lm_loss = lm_loss * lm_loss_coeff
+    if lm_token_mask is not None:
+        # replay objective split: current-task tokens keep the LM loss at its normal coefficient,
+        # old-task tokens carry the old-data objective (added below over kd_token_mask)
+        lm_loss = torch.sum(losses.view(-1) * lm_token_mask.view(-1).float())
+        lm_loss = lm_loss * float(getattr(args, "moe_expansion_distill_lm_loss_coeff", 1.0))
+        kd_token_count = kd_token_mask.view(-1).float().sum()
+        kd_loss_mask = kd_token_mask.view(-1).float()
+    else:
+        lm_loss = torch.sum(losses.view(-1) * loss_mask)
+        lm_loss_coeff = _effective_lm_loss_coeff(args)
+        lm_loss = lm_loss * lm_loss_coeff
+        kd_loss_mask = loss_mask
     loss = torch.cat([lm_loss.view(1), total_tokens.view(1)])
 
     if teacher_logits is not None and student_logits is not None:
@@ -458,7 +499,7 @@ def loss_func(
         student_log_probs = F.log_softmax(student_logits.float() / temperature, dim=-1)
         teacher_probs = F.softmax(teacher_logits.float() / temperature, dim=-1)
         kl_per_token = F.kl_div(student_log_probs, teacher_probs, reduction="none").sum(dim=-1)
-        kl_loss_sum = torch.sum(kl_per_token.view(-1) * loss_mask)
+        kl_loss_sum = torch.sum(kl_per_token.view(-1) * kd_loss_mask)
         kl_loss = kl_loss_sum / total_tokens.clamp_min(1.0)
         kl_loss = kl_loss * (temperature ** 2)
         if getattr(args, "moe_expansion_distill_mode", "none") != "none":
@@ -491,11 +532,18 @@ def loss_func(
         loss[0] = (
             loss[0]
             + hidden_kl_coeff
-            * _token_mean_to_loss_numerator(hidden_kl_loss, total_tokens)
+            * _token_mean_to_loss_numerator(
+                hidden_kl_loss, total_tokens if kd_token_count is None else kd_token_count)
         )
 
     if router_kl_loss is not None:
         loss[0] = loss[0] + args.moe_expansion_distill_router_kl_coeff * router_kl_loss
+
+    if old_router_kl_loss is not None:
+        # _masked_router_prob_kl already returns a token-sum numerator (per-layer
+        # KL summed over valid tokens, averaged over layers); Megatron divides
+        # loss[0] by the returned token count.
+        loss[0] = loss[0] + args.moe_old_router_kl_coeff * old_router_kl_loss
 
     if lpr_loss is not None:
         loss[0] = loss[0] + args.moe_lpr_loss_coeff * lpr_loss
@@ -614,6 +662,15 @@ def loss_func(
         router_kl_sum = router_kl_loss.detach().view(1)
         torch.distributed.all_reduce(router_kl_sum, group=mpu.get_data_parallel_group())
         reporting['router prob kl loss'] = (router_kl_sum[0], reporting_loss[1])
+    if lm_token_mask is not None:
+        split_counts = torch.stack((
+            lm_token_mask.view(-1).float().sum().detach(), total_tokens.detach()))
+        torch.distributed.all_reduce(split_counts, group=mpu.get_data_parallel_group())
+        reporting['replay current-task (LM) token fraction'] = (split_counts[0], split_counts[1])
+    if old_router_kl_loss is not None:
+        old_router_kl_sum = old_router_kl_loss.detach().view(1)
+        torch.distributed.all_reduce(old_router_kl_sum, group=mpu.get_data_parallel_group())
+        reporting['old router kl loss'] = (old_router_kl_sum[0], reporting_loss[1])
     if lpr_loss is not None:
         lpr_sum = lpr_loss.detach().view(1)
         torch.distributed.all_reduce(lpr_sum, group=mpu.get_data_parallel_group())
@@ -750,6 +807,12 @@ def forward_step(data_iterator, model: GPTModel):
     timers('batch-generator').stop()
 
     teacher_model = get_old_moe_distill_teacher()
+    if (getattr(args, "moe_old_data_objective_on_primary", False)
+            and getattr(args, "_moe_joint_replay_old_data_kd_active", False)
+            and teacher_model is None):
+        raise RuntimeError(
+            "--moe-old-data-objective-on-primary is active but no old-data teacher is loaded; "
+            "the objective would silently train on zero loss")
     distill_mode = getattr(args, "moe_expansion_distill_mode", "none")
     expansion_distill_enabled = distill_mode != "none"
     if expansion_distill_enabled and teacher_model is None:
@@ -779,7 +842,7 @@ def forward_step(data_iterator, model: GPTModel):
                 student_modules, layer_spec, detach=False
             ) as student_hidden:
                 student_losses = model(tokens, position_ids, attention_mask, labels=labels)
-        with torch.no_grad():
+        with torch.no_grad(), mass_reservoir.teacher_alpha():
             with _capture_transformer_layer_outputs(
                 teacher_modules, layer_spec, detach=True
             ) as teacher_hidden:
@@ -816,12 +879,15 @@ def forward_step(data_iterator, model: GPTModel):
     elif teacher_kd_enabled:
         old_data_hidden_kl_enabled = _old_data_hidden_kl_enabled_for_current_branch(args)
         old_data_hidden_mse_enabled = _old_data_hidden_mse_enabled_for_current_branch(args)
-        if old_data_hidden_kl_enabled and old_data_hidden_mse_enabled:
+        old_data_router_kl_enabled = _old_data_router_kl_enabled_for_current_branch(args)
+        if (old_data_hidden_kl_enabled + old_data_hidden_mse_enabled
+                + old_data_router_kl_enabled) > 1:
             raise RuntimeError(
-                "Select exactly one old-data hidden replay objective: hidden KL or hidden MSE."
+                "Select exactly one old-data replay objective: hidden KL, hidden MSE, or router KL."
             )
         final_logits_kd_enabled = expansion_distill_enabled or not (
             old_data_hidden_kl_enabled or old_data_hidden_mse_enabled
+            or old_data_router_kl_enabled
         )
         if final_logits_kd_enabled and args.moe_old_model_kl_coeff <= 0:
             raise RuntimeError(
@@ -833,11 +899,20 @@ def forward_step(data_iterator, model: GPTModel):
             or _distill_mode_includes_router(args)
             or old_data_hidden_kl_enabled
             or old_data_hidden_mse_enabled
+            or old_data_router_kl_enabled
         ):
             raise RuntimeError(
                 "Hidden/router expansion distillation currently requires "
                 "--pipeline-model-parallel-size 1."
             )
+
+        split_id = int(getattr(args, "moe_joint_replay_current_task_dataset_id", -1))
+        lm_token_mask = kd_mask = None
+        if split_id >= 0 and getattr(args, "_moe_joint_replay_old_data_kd_active", False):
+            lm_token_mask, kd_mask = _replay_objective_token_masks(
+                loss_mask, getattr(args, "_moe_batch_dataset_ids", None), split_id)
+        kd_loss_mask = loss_mask if kd_mask is None else kd_mask
+        has_kd_tokens = bool(kd_loss_mask.sum() > 0)
 
         student_modules = _as_module_list(model)
         teacher_modules = _as_module_list(teacher_model[0])
@@ -866,14 +941,15 @@ def forward_step(data_iterator, model: GPTModel):
             if capture_hidden
             else nullcontext({})
         )
+        capture_router = _distill_mode_includes_router(args) or old_data_router_kl_enabled
         student_router_ctx = (
             _capture_distill_router_inputs(student_modules, detach=False)
-            if _distill_mode_includes_router(args)
+            if capture_router
             else nullcontext(({}, {}))
         )
         teacher_router_ctx = (
             _capture_distill_router_inputs(teacher_modules, detach=True)
-            if _distill_mode_includes_router(args)
+            if capture_router
             else nullcontext(({}, {}))
         )
 
@@ -892,7 +968,7 @@ def forward_step(data_iterator, model: GPTModel):
                 else:
                     output_tensor = model(tokens, position_ids, attention_mask, labels=labels)
                     student_logits = None
-        with torch.no_grad():
+        with torch.no_grad(), mass_reservoir.teacher_alpha():
             with teacher_hidden_ctx as teacher_hidden, teacher_router_ctx as (
                 teacher_router_inputs,
                 teacher_routers,
@@ -906,6 +982,8 @@ def forward_step(data_iterator, model: GPTModel):
                 )
                 teacher_logits = teacher_output if final_logits_kd_enabled else None
         output_tensor = {"losses": output_tensor}
+        if lm_token_mask is not None:
+            output_tensor.update(lm_token_mask=lm_token_mask, kd_token_mask=kd_mask)
         if final_logits_kd_enabled:
             output_tensor.update(student_logits=student_logits, teacher_logits=teacher_logits)
         if _distill_mode_includes_hidden(args):
@@ -915,17 +993,31 @@ def forward_step(data_iterator, model: GPTModel):
                 labels,
                 loss_mask,
             )
-        if old_data_hidden_kl_enabled:
+        if old_data_hidden_kl_enabled and has_kd_tokens:
             output_tensor["hidden_kl_loss"] = _masked_layer_hidden_kl(
-                student_hidden, teacher_hidden, labels, loss_mask,
+                student_hidden, teacher_hidden, labels, kd_loss_mask,
                 args.moe_old_hidden_kl_temperature,
             )
-        if old_data_hidden_mse_enabled:
+        if old_data_hidden_mse_enabled and has_kd_tokens:
             output_tensor["old_hidden_mse_loss"] = _masked_layer_hidden_mse(
                 student_hidden,
                 teacher_hidden,
                 labels,
-                loss_mask,
+                kd_loss_mask,
+            )
+        if old_data_router_kl_enabled and has_kd_tokens:
+            # per-layer KL(teacher router probs || student router probs) on the replay
+            # tokens; teacher = the frozen pre-expansion model on its own layer inputs,
+            # zero-padded on the new experts; the reservoir is not an expert and is left out
+            output_tensor["old_router_kl_loss"] = _masked_router_prob_kl(
+                student_router_inputs,
+                teacher_router_inputs,
+                student_routers,
+                teacher_routers,
+                labels,
+                kd_loss_mask,
+                existing_experts_only=(
+                    getattr(args, "moe_old_router_kl_new_experts", "zero_pad") == "mask"),
             )
         if _distill_mode_includes_router(args):
             output_tensor["router_kl_loss"] = _masked_router_prob_kl(
@@ -1854,6 +1946,7 @@ def _masked_router_prob_kl(
     teacher_routers,
     labels,
     loss_mask,
+    existing_experts_only=False,
 ):
     student_router_inputs = _router_inputs_by_layer(student_router_inputs)
     teacher_router_inputs = _router_inputs_by_layer(teacher_router_inputs)
@@ -1885,7 +1978,9 @@ def _masked_router_prob_kl(
             teacher_logits = teacher_routers[layer_number].gating(teacher_flat)
         student_logits = student_routers[layer_number].gating(student_flat)
         layer_losses.append(
-            teacher_student_router_kl(student_logits, teacher_logits) * student_flat.shape[0]
+            teacher_student_router_kl(
+                student_logits, teacher_logits, existing_experts_only=existing_experts_only)
+            * student_flat.shape[0]
         )
 
     if not layer_losses:
