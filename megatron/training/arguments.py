@@ -2445,6 +2445,14 @@ def _add_moe_args(parser):
                        help='Reservoir mass at the end of a task (= experts added per task).')
     group.add_argument('--mres-delta', type=float, default=0.5,
                        help='Margin below the K-th candidate logit.')
+    group.add_argument('--mres-sigma', type=float, default=0.0,
+                       help='Reservoir noise: new rows are r_res + eps, eps ~ N(0, sigma^2 I); the reservoir term '
+                            'becomes alpha*exp(z_res + sigma^2 |x|^2 / 2) and the margin sigma |x| sqrt(2 ln(m / eta)). '
+                            '0 = exact copies with the constant --mres-delta.')
+    group.add_argument('--mres-eta', type=float, default=None,
+                       help='Top-K failure probability bound for the margin (required when --mres-sigma > 0).')
+    group.add_argument('--mres-noise-seed', type=int, default=None,
+                       help='Seed of the expansion noise (default --seed).')
     group.add_argument('--mres-lambda', type=float, default=0.1,
                        help='Weight of the reservoir margin loss on the replay pass.')
     group.add_argument('--mres-warmup-frac', type=float, default=0.05,

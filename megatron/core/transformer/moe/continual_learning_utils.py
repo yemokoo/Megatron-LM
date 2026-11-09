@@ -209,7 +209,7 @@ def expand_moe_model(target_model, source_model, num_existing_experts):
             raise ValueError("mass reservoir expansion cannot be combined with MOE_EXPAND_CLONE_EXISTING")
         report = mass_reservoir.expand(target_model, num_existing_experts)
         if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
-            print(f"[mres] expansion: new rows := r_res, new FFN down := 0, alpha -> 0 {report}",
+            print(f"[mres] expansion: new rows := r_res + N(0, sigma^2), new FFN down := 0, alpha -> 0 {report}",
                   flush=True)
 
 
