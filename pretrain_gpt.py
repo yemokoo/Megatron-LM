@@ -1584,7 +1584,19 @@ def route_agreement_eval(model, data_iterator, iteration):
         hoff = bi * tok_per_batch
         with torch.no_grad():
             with _capture_moe_router_inputs(_as_module_list(model), detach=True) as (cap, routers):
-                model[0](tokens, position_ids, attention_mask, labels=labels)
+                if routers:
+                    model[0](tokens, position_ids, attention_mask, labels=labels)
+                else:
+                    # shared-router hybrid: one router per layer on the input-layernorm output
+                    from megatron.core.transformer.shared_router_hybrid import capture_shared_router_inputs
+                    with capture_shared_router_inputs(detach=True) as shared_cap:
+                        model[0](tokens, position_ids, attention_mask, labels=labels)
+                    for m in unwrap_model(_as_module_list(model)):
+                        for layer in getattr(getattr(m, "decoder", None), "layers", []):
+                            r = getattr(layer, "shared_expert_router", None)
+                            if r is not None:
+                                routers[int(layer.layer_number)] = r
+                    cap.update({int(ln): h for ln, h in shared_cap})
             for ln, hidden in cap.items():
                 if ln not in routers:
                     continue

@@ -614,5 +614,10 @@ class TopKRouter(Router):
         logits = self.gating(input)
 
         scores, routing_map = self.routing(logits)
+        if mass_reservoir.CAPTURE["maps"] is not None:          # expansion-drift analysis only
+            mass_reservoir.CAPTURE["maps"].append(routing_map.detach().reshape(-1, routing_map.shape[-1]))
+        if mass_reservoir.CAPTURE["scores"] is not None:
+            mass_reservoir.CAPTURE["scores"].append(
+                torch.softmax(logits.detach().float().reshape(-1, logits.shape[-1]), dim=-1))
 
         return scores, routing_map

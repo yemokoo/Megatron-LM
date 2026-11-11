@@ -2451,6 +2451,9 @@ def _add_moe_args(parser):
                        help='Share of updates with new-expert-only primary routing and alpha 0.')
     group.add_argument('--mres-no-warmup-freeze-router', action='store_true',
                        help='Let old router rows and the reservoir update during the warm-up.')
+    group.add_argument('--mres-inert', action='store_true',
+                       help='Baseline: keep the reservoir in the denominator at alpha_end but no '
+                            'copy init, warm-up, refill or margin; the reservoir row is frozen.')
     group.add_argument('--moe-router-pre-softmax', action='store_true',
                        help='Enable pre-softmax routing for MoE, which means softmax is before the top-k selection. By default, softmax is done after top-k.')
     group.add_argument('--moe-router-num-groups', type=int, default=None,

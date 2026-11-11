@@ -3200,7 +3200,8 @@ def setup_model_and_optimizer(model_provider_func,
             expand_moe_model(
                 target_shard, source_shard, args.shared_router_hybrid_expand_from_num_experts
             )
-            if getattr(args, 'moe_mass_reservoir', False):
+            if (getattr(args, 'moe_mass_reservoir', False)
+                    or os.environ.get('MRES_EXPANSION_CHECK_ONLY', '0') == '1'):
                 _mres_expansion_check(
                     target_shard, source_shard, args,
                     args.shared_router_hybrid_expand_from_num_experts,
@@ -3803,25 +3804,37 @@ def _summarize_and_log_train_router_usage(iteration, captured_router_maps):
 @torch.no_grad()
 def _mres_expansion_check(target, source, args, num_existing, num_sequences=8):
     """Forward the same replay tokens through the pre-expansion model (alpha = alpha_end) and
-    the expanded one (alpha = 0) and report how exact the expansion is.
-
-    A sequence is exact only if no token changes its Top-K at any layer: attention experts make
-    later tokens depend on earlier tokens' routing.  On such sequences the logits must agree up to
-    fp32 summation-order noise of the softmax denominator."""
+    the expanded one (alpha after expand: 0 for the reservoir copy, alpha_end otherwise) and report
+    how much the expansion itself moves earlier-task inputs, before any update:
+      topk_changed_rate_flat   fraction of (MoE layer, token) whose top-k set changes
+      layer_out_rel_change     mean over tokens and MoE layers of ||h_new - h_old|| / ||h_old|| (layer output)
+      delta_p_orig_selected    mean over (layer, token) of sum_{i in S_k(old)} |p_new_i - p_old_i|
+    Replay tokens are taken in equal shares from every replay path (so the conv expansion sees wiki
+    and code).  MRES_CHECK_SEQS overrides num_sequences; MRES_EXPANSION_CHECK_ONLY=1 exits after."""
     from megatron.core.datasets.indexed_dataset import IndexedDataset
 
-    mass_reservoir.configure_from_args(args)
+    mres = bool(getattr(args, 'moe_mass_reservoir', False))
+    if mres:
+        mass_reservoir.configure_from_args(args)
+    else:                                          # plain model: alpha unused by the stock router
+        mass_reservoir.STATE['alpha'] = mass_reservoir.STATE['alpha_end'] = 0.0
+    tgt_alpha = mass_reservoir.STATE['alpha']      # 0 after the reservoir copy, alpha_end otherwise
+    num_sequences = int(os.environ.get('MRES_CHECK_SEQS', num_sequences))
     seq = int(args.seq_length)
     paths = [p for p in (args.moe_joint_replay_data_path or []) if not _is_float_str(p)]
+    if not paths:
+        print_rank_0('[mres] expansion check skipped: no replay paths')
+        return None
+    per_path = [num_sequences // len(paths) + (i < num_sequences % len(paths)) for i in range(len(paths))]
     ids = []
-    for prefix in paths:
+    for prefix, nseq in zip(paths, per_path):
         ds = IndexedDataset(prefix, multimodal=False, mmap=True)
+        buf = []
         for i in range(len(ds)):
-            ids.extend(int(t) for t in ds[i])
-            if len(ids) >= num_sequences * seq:
+            buf.extend(int(t) for t in ds[i])
+            if len(buf) >= nseq * seq:
                 break
-        if len(ids) >= num_sequences * seq:
-            break
+        ids.extend(buf[:nseq * seq])
     if len(ids) < num_sequences * seq:
         print_rank_0('[mres] expansion check skipped: not enough replay tokens')
         return None
@@ -3837,49 +3850,87 @@ def _mres_expansion_check(target, source, args, num_existing, num_sequences=8):
         mass_reservoir.STATE['alpha'] = alpha
         mass_reservoir.set_pass('eval')
         maps = mass_reservoir.CAPTURE['maps'] = []
+        scores = mass_reservoir.CAPTURE['scores'] = []
+        outs, hooks = [], []
+        for layer in model.decoder.layers:
+            hooks.append(layer.register_forward_hook(
+                lambda m, i, o: outs.append((o[0] if isinstance(o, tuple) else o).detach().float())))
         try:
-            logits = model(tokens, position_ids, attention_mask, labels=None)
+            with torch.no_grad():
+                logits = model(tokens, position_ids, attention_mask, labels=None)
         finally:
             mass_reservoir.CAPTURE['maps'] = None
+            mass_reservoir.CAPTURE['scores'] = None
+            for h in hooks:
+                h.remove()
         model.train(was_training)
-        return logits.float(), maps
+        return logits, maps, scores, outs            # kept in model dtype; diffs are taken per sequence
 
-    src_logits, src_maps = run(source, mass_reservoir.STATE['alpha_end'])
-    tgt_logits, tgt_maps = run(target, 0.0)
-    mass_reservoir.STATE['alpha'] = 0.0
-    changed = torch.zeros(num_sequences * seq, dtype=torch.bool, device=device)
-    new_picked = torch.zeros_like(changed)
-    per_layer = []
+    src_logits, src_maps, src_scores, src_outs = run(source, mass_reservoir.STATE['alpha_end'])
+    target_ckpt = os.environ.get('MRES_CHECK_TARGET_CKPT', '')
+    if target_ckpt:                 # compare against a trained checkpoint of the expanded shape instead
+        saved = (args.finetune, args.no_load_optim, args.no_load_rng)
+        args._mres_check_load = target_ckpt
+        args.finetune, args.no_load_optim, args.no_load_rng = True, True, True
+        load_checkpoint([target], None, None, load_arg='_mres_check_load')
+        args.finetune, args.no_load_optim, args.no_load_rng = saved
+        tgt_alpha = mass_reservoir.STATE['alpha_end']   # end-of-task checkpoint: alpha refilled
+        print_rank_0(f'[mres] expansion check target loaded from {target_ckpt} (alpha {tgt_alpha})')
+    tgt_logits, tgt_maps, tgt_scores, tgt_outs = run(target, tgt_alpha)
+    mass_reservoir.STATE['alpha'] = tgt_alpha
     if not src_maps or len(src_maps) != len(tgt_maps):
         raise RuntimeError(f'[mres] expansion check captured {len(src_maps)}/{len(tgt_maps)} routing maps')
-    for m_src, m_tgt in zip(src_maps, tgt_maps):
+    changed = torch.zeros(num_sequences * seq, dtype=torch.bool, device=device)
+    new_picked = torch.zeros_like(changed)
+    per_layer, dp_layer = [], []
+    for m_src, m_tgt, p_src, p_tgt in zip(src_maps, tgt_maps, src_scores, tgt_scores):
         m_src = m_src.bool(); m_tgt = m_tgt.bool()
         c = (m_src != m_tgt[:, :num_existing]).any(-1) | m_tgt[:, num_existing:].any(-1)
-        # routing maps are [s*b] ordered; move to [b*s] to match tokens
+        dp = ((p_tgt[:, :num_existing] - p_src) .abs() * m_src.float()).sum(-1)
+        dp_layer.append(round(float(dp.mean()), 5))
         c = c.view(seq, num_sequences).t().reshape(-1)
         changed |= c
         new_picked |= m_tgt[:, num_existing:].any(-1).view(seq, num_sequences).t().reshape(-1)
         per_layer.append(round(float(c.float().mean()), 4))
+    first_moe = len(src_outs) - len(src_maps)            # dense layers before the MoE stack
+    rel_layer = []
+    for h_s, h_t in zip(src_outs[first_moe:], tgt_outs[first_moe:]):
+        rel_layer.append(round(float(((h_t - h_s).norm(dim=-1) / h_s.norm(dim=-1).clamp_min(1e-8)).mean()), 5))
     seq_exact = ~changed.view(num_sequences, seq).any(-1)
     if src_logits.shape[0] != num_sequences:        # [s, b, V] layout
         src_logits = src_logits.transpose(0, 1)
         tgt_logits = tgt_logits.transpose(0, 1)
-    diff = (src_logits - tgt_logits).abs().amax(-1)          # [b, s]
+    diff = torch.stack([(src_logits[i].float() - tgt_logits[i].float()).abs().amax(-1)
+                        for i in range(num_sequences)])          # [b, s], one sequence at a time
+    del src_logits, tgt_logits
     report = {
+        'row_init': os.environ.get('MRES_CHECK_LABEL') or os.environ.get('MRES_EXPAND_ROW_INIT', 'reservoir'),
+        'target_ckpt': target_ckpt or None,
+        'alpha_source': mass_reservoir.STATE['alpha_end'], 'alpha_target': tgt_alpha,
+        'replay_paths': paths, 'sequences_per_path': per_path, 'seq_length': seq,
         'tokens': int(changed.numel()),
+        'topk_changed_rate_flat': round(sum(per_layer) / len(per_layer), 5),
         'topk_changed_token_rate_any_layer': round(float(changed.float().mean()), 5),
         'topk_changed_rate_per_layer': per_layer,
+        'layer_out_rel_change': round(sum(rel_layer) / len(rel_layer), 5),
+        'layer_out_rel_change_per_layer': rel_layer,
+        'delta_p_orig_selected': round(sum(dp_layer) / len(dp_layer), 5),
+        'delta_p_orig_selected_per_layer': dp_layer,
         'new_expert_selected_token_rate': round(float(new_picked.float().mean()), 5),
         'exact_sequences': f'{int(seq_exact.sum())}/{num_sequences}',
-        'max_logit_diff_exact_sequences': (float(diff[seq_exact].max()) if seq_exact.any() else None),
-        'max_logit_diff_unchanged_tokens': float(diff.reshape(-1)[~changed].max()) if (~changed).any() else None,
         'max_logit_diff_all': float(diff.max()),
     }
     print_rank_0(f'[mres] expansion check {num_existing}->{args.num_experts}: {report}')
     if torch.distributed.get_rank() == 0 and args.save:
         os.makedirs(os.path.join(args.save, 'expansion_audit'), exist_ok=True)
-        with open(os.path.join(args.save, 'expansion_audit', 'mres_expansion_check.json'), 'w') as f:
+        name = f"mres_expansion_check_{report['row_init']}.json"
+        with open(os.path.join(args.save, 'expansion_audit', name), 'w') as f:
             json.dump(report, f, indent=2)
+    if os.environ.get('MRES_EXPANSION_CHECK_ONLY', '0') == '1':
+        torch.distributed.barrier()
+        print_rank_0('[mres] MRES_EXPANSION_CHECK_ONLY=1 -> exiting after the expansion check')
+        torch.distributed.destroy_process_group()
+        sys.exit(0)
     return report
 
 
@@ -3896,7 +3947,7 @@ def _mres_begin_step(args, model):
     if not getattr(args, '_mres_configured', False):
         if args.mres_alpha_end is None:
             raise ValueError('--moe-mass-reservoir needs --mres-alpha-end')
-        if not args.moe_joint_replay_lm:
+        if not args.moe_joint_replay_lm and not getattr(args, 'mres_inert', False):
             raise ValueError('--moe-mass-reservoir needs --moe-joint-replay-lm (router-only '
                              'correction pass that trains the reservoir margin)')
         mass_reservoir.configure_from_args(args)

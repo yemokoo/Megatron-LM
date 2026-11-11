@@ -204,13 +204,20 @@ def expand_moe_model(target_model, source_model, num_existing_experts):
     if os.environ.get("MOE_EXPAND_CLONE_EXISTING") == "1":
         _clone_existing_into_new_experts(target_model, num_existing_experts)
 
+    if (not any(mass_reservoir.enabled(m) for m in target_model.modules())
+            and os.environ.get("MRES_EXPAND_ROW_INIT") in ("random", "zero")):   # drift analysis only
+        report = mass_reservoir.expand_plain(target_model, num_existing_experts,
+                                             os.environ["MRES_EXPAND_ROW_INIT"])
+        if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
+            print(f"[mres] plain expansion (no reservoir): {report}", flush=True)
     if any(mass_reservoir.enabled(m) for m in target_model.modules()):
         if os.environ.get("MOE_EXPAND_CLONE_EXISTING") == "1":
             raise ValueError("mass reservoir expansion cannot be combined with MOE_EXPAND_CLONE_EXISTING")
         report = mass_reservoir.expand(target_model, num_existing_experts)
         if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
-            print(f"[mres] expansion: new rows := r_res, new FFN down := 0, alpha -> 0 {report}",
-                  flush=True)
+            what = ("inert, stock new-expert init, alpha kept" if report.get("inert")
+                    else "new rows := r_res, new FFN down := 0, alpha -> 0")
+            print(f"[mres] expansion: {what} {report}", flush=True)
 
 
 def _clone_existing_into_new_experts(target_model, num_existing_experts):
@@ -464,7 +471,7 @@ def freeze_all_but_new_moe_params(
         if isinstance(module, Router):
             module.weight.requires_grad = True
             if mass_reservoir.enabled(module):
-                getattr(module, mass_reservoir.PARAM_NAME).requires_grad = True
+                getattr(module, mass_reservoir.PARAM_NAME).requires_grad = mass_reservoir.reservoir_trainable()
             if getattr(module, "expert_bias", None) is not None:
                 module.expert_bias.requires_grad = True
             if freeze_existing_router:
@@ -781,7 +788,7 @@ def freeze_all_but_router_params(model):
         if isinstance(module, Router):
             module.weight.requires_grad = True
             if mass_reservoir.enabled(module):
-                getattr(module, mass_reservoir.PARAM_NAME).requires_grad = True
+                getattr(module, mass_reservoir.PARAM_NAME).requires_grad = mass_reservoir.reservoir_trainable()
             if getattr(module, "expert_bias", None) is not None:
                 module.expert_bias.requires_grad = True
 
@@ -828,7 +835,7 @@ def freeze_all_but_new_shared_router_params(model, num_existing_experts):
         if isinstance(module, Router):
             module.weight.requires_grad = True
             if mass_reservoir.enabled(module):
-                getattr(module, mass_reservoir.PARAM_NAME).requires_grad = True
+                getattr(module, mass_reservoir.PARAM_NAME).requires_grad = mass_reservoir.reservoir_trainable()
             _freeze_router(module, num_existing_experts)
 
 

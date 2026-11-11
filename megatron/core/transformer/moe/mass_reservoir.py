@@ -22,6 +22,10 @@ Task cycle (alpha_end = experts added per task, e.g. 8):
              lambda * relu(z_res - stopgrad(z_(K)) + delta), z_(K) the K-th largest candidate.
   refill     after the warm-up alpha rises linearly 0 -> alpha_end, reaching it on the last update.
 Checkpoints hold the end-of-task state, so loading sets alpha = alpha_end.
+
+Inert mode (--mres-inert, baseline for a reservoir-trained source): the row stays in the
+denominator at alpha_end but does nothing else -- no expansion copy (stock new-expert init), no
+alpha reset/refill, no warm-up, no margin, r_res frozen.
 """
 from __future__ import annotations
 
@@ -53,8 +57,9 @@ STATE = {
     "freeze_reservoir": False,
     "num_layers": 1,
     "grad_scale": 1.0,
+    "inert": False,            # --mres-inert: reservoir kept in the denominator, otherwise off
 }
-CAPTURE = {"maps": None}     # list while an expansion check records routing maps, else None
+CAPTURE = {"maps": None, "scores": None}   # lists while an expansion check records routing, else None
 
 
 def configure_from_args(args):
@@ -63,12 +68,26 @@ def configure_from_args(args):
     STATE["lam"] = float(args.mres_lambda)
     STATE["warmup_frac"] = float(args.mres_warmup_frac)
     STATE["warmup_freeze_router"] = not bool(args.mres_no_warmup_freeze_router)
+    STATE["inert"] = bool(getattr(args, "mres_inert", False))
+    if STATE["inert"]:
+        STATE["lam"] = 0.0
     if STATE["alpha"] is None:
         STATE["alpha"] = STATE["alpha_end"]
 
 
 def enabled(router) -> bool:
     return getattr(router, PARAM_NAME, None) is not None
+
+
+def _ensure_configured():
+    if STATE["alpha"] is None:
+        from megatron.training import get_args
+        configure_from_args(get_args())
+
+
+def reservoir_trainable() -> bool:
+    _ensure_configured()
+    return not STATE["inert"]
 
 
 def attach(router) -> None:
@@ -116,9 +135,7 @@ def route(router, input: torch.Tensor):
         raise RuntimeError("mass reservoir needs --moe-router-pre-softmax with softmax scores")
     if config.moe_expert_capacity_factor is not None or router.expert_bias is not None:
         raise RuntimeError("mass reservoir does not support capacity factors or expert bias")
-    if STATE["alpha"] is None:
-        from megatron.training import get_args
-        configure_from_args(get_args())
+    _ensure_configured()
 
     num_experts = config.num_moe_experts
     dtype = _router_dtype(config, input.dtype)
@@ -147,6 +164,8 @@ def route(router, input: torch.Tensor):
     routing_map = torch.zeros_like(scores, dtype=torch.bool).scatter(1, top_idx, True)
     if CAPTURE["maps"] is not None:
         CAPTURE["maps"].append(routing_map.detach())
+    if CAPTURE["scores"] is not None:
+        CAPTURE["scores"].append(scores.detach().float())
 
     if training and config.moe_aux_loss_coeff:
         aux_scores = torch.softmax(logits, dim=-1, dtype=torch.float32)
@@ -194,17 +213,29 @@ def expand(target_model, num_existing_experts: int) -> dict:
     from megatron.core.transformer.moe.experts import GroupedMLP, SequentialMLP
     from megatron.core.transformer.moe.router import Router
 
+    _ensure_configured()
+    import os
+    row_init = os.environ.get("MRES_EXPAND_ROW_INIT", "reservoir")   # expansion-drift analysis only
+    if row_init not in ("reservoir", "random", "zero"):
+        raise ValueError(f"MRES_EXPAND_ROW_INIT must be reservoir|random|zero, got {row_init}")
+    if STATE["inert"]:
+        return {"inert": True, "num_existing_experts": num_existing_experts,
+                "new_expert_init": "stock", "alpha": STATE["alpha"]}
     rows = ffn = lora = 0
     row_diff = w2_max = lora_b_max = 0.0
     with torch.no_grad():
         for module in target_model.modules():
             if isinstance(module, Router) and enabled(module):
                 total = module.weight.shape[0]
-                module.weight[num_existing_experts:total].copy_(
-                    getattr(module, PARAM_NAME).expand(total - num_existing_experts, -1))
-                row_diff = max(row_diff, float(
-                    (module.weight[num_existing_experts:total] - getattr(module, PARAM_NAME))
-                    .abs().max()))
+                if row_init == "reservoir":
+                    module.weight[num_existing_experts:total].copy_(
+                        getattr(module, PARAM_NAME).expand(total - num_existing_experts, -1))
+                    row_diff = max(row_diff, float(
+                        (module.weight[num_existing_experts:total] - getattr(module, PARAM_NAME))
+                        .abs().max()))
+                elif row_init == "zero":
+                    module.weight[num_existing_experts:total].zero_()
+                # random: keep the stock init of the new rows
                 rows += 1
             elif isinstance(module, GroupedMLP):
                 w2 = module.weight2.view(module.num_local_experts, -1, module.config.hidden_size)
@@ -226,11 +257,12 @@ def expand(target_model, num_existing_experts: int) -> dict:
                         lora_b_max = max(lora_b_max, float(b[num_existing_experts:].abs().max()))
                         lora += 1
     alpha_before = STATE["alpha"]
-    STATE["alpha"] = 0.0
-    report = {"routers": rows, "ffn_expert_modules": ffn, "attn_lora_b_tensors": lora,
+    if row_init == "reservoir":
+        STATE["alpha"] = 0.0          # mass transfer: the new rows take the reservoir's mass
+    report = {"row_init": row_init, "routers": rows, "ffn_expert_modules": ffn, "attn_lora_b_tensors": lora,
               "num_existing_experts": num_existing_experts,
               "max|new_row - r_res|": row_diff, "max|new FFN down|": w2_max,
-              "max|new attn LoRA B|": lora_b_max, "alpha_before": alpha_before, "alpha_after": 0.0}
+              "max|new attn LoRA B|": lora_b_max, "alpha_before": alpha_before, "alpha_after": STATE["alpha"]}
     if rows == 0 or ffn == 0:
         raise RuntimeError(f"mass reservoir expansion found no routers or FFN experts: {report}")
     if row_diff != 0.0 or w2_max != 0.0 or lora_b_max != 0.0:
@@ -238,8 +270,47 @@ def expand(target_model, num_existing_experts: int) -> dict:
     return report
 
 
+def expand_plain(target_model, num_existing_experts: int, row_init: str) -> dict:
+    """Expansion-drift analysis on a model WITHOUT a reservoir: new router rows random (stock) or
+    zero, new FFN down projections zeroed and new attention LoRA B checked zero, as in expand()."""
+    from megatron.core.transformer.moe.experts import GroupedMLP, SequentialMLP
+    from megatron.core.transformer.moe.router import Router
+    if row_init not in ("random", "zero"):
+        raise ValueError(f"expand_plain supports random|zero, got {row_init}")
+    rows = ffn = 0; w2_max = lora_b_max = 0.0
+    with torch.no_grad():
+        for module in target_model.modules():
+            if isinstance(module, Router):
+                if row_init == "zero":
+                    module.weight[num_existing_experts:].zero_()
+                rows += 1
+            elif isinstance(module, GroupedMLP):
+                w2 = module.weight2.view(module.num_local_experts, -1, module.config.hidden_size)
+                w2[num_existing_experts:].zero_(); ffn += 1
+            elif isinstance(module, SequentialMLP):
+                for expert in module.local_experts[num_existing_experts:]:
+                    expert.linear_fc2.weight.zero_()
+                    if getattr(expert.linear_fc2, "bias", None) is not None:
+                        expert.linear_fc2.bias.zero_()
+                ffn += 1
+            else:
+                for name in ("qkv_lora_b", "q_lora_b", "k_lora_b", "v_lora_b", "proj_lora_b"):
+                    b = getattr(module, name, None)
+                    if isinstance(b, torch.Tensor) and b.dim() >= 1 and b.shape[0] > num_existing_experts:
+                        lora_b_max = max(lora_b_max, float(b[num_existing_experts:].abs().max()))
+    report = {"row_init": row_init, "routers": rows, "ffn_expert_modules": ffn,
+              "max|new attn LoRA B|": lora_b_max, "num_existing_experts": num_existing_experts}
+    if rows == 0 or ffn == 0 or lora_b_max != 0.0:
+        raise RuntimeError(f"plain expansion check failed: {report}")
+    return report
+
+
 def begin_step(args, iteration: int, num_existing_experts):
     """Set alpha and the warm-up flags for update `iteration` (0-based) of args.train_iters."""
+    if STATE["inert"]:
+        STATE.update(alpha=STATE["alpha_end"], force_new_from=None, freeze_old_from=None,
+                     freeze_reservoir=True)
+        return {"alpha": STATE["alpha"], "warmup": False, "warmup_updates": 0}
     total = int(args.train_iters)
     warm = max(0, math.ceil(STATE["warmup_frac"] * total))
     if iteration < warm:
