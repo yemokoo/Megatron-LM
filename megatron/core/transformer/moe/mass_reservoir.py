@@ -22,6 +22,17 @@ Task cycle (alpha_end = experts added per task, e.g. 8):
              lambda * relu(z_res - stopgrad(z_(K)) + delta), z_(K) the K-th largest candidate.
   refill     after the warm-up alpha rises linearly 0 -> alpha_end, reaching it on the last update.
 Checkpoints hold the end-of-task state, so loading sets alpha = alpha_end.
+
+Gaussian reservoir prior (--mres-sigma > 0 with --mres-eta; sigma = 0 is everything above, bit-identical),
+the same definition as trace/scripts/residual/mass_reservoir.py (branch mres-sigma-prior):
+  The reservoir stands for m = alpha_end experts whose rows are draws from N(r_res, sigma^2 I):
+  Z          = sum_i exp(z_i) + alpha * exp(z_res + sigma^2 |x|^2 / 2)        (their expected mass)
+  expansion  new rows r_res + eps_j, eps_j ~ N(0, sigma^2 I), from a CPU generator seeded by
+             (noise_seed, num_existing_experts, layer), so every rank draws the same rows; alpha -> 0,
+             hence E_eps[Z_after] = Z_before.
+  margin     lambda * relu(z_res - stopgrad(z_(K)) + delta(x)), delta(x) = sigma |x| sqrt(2 ln(m / eta)):
+             with probability >= 1 - eta none of the m drawn logits reaches z_(K) (Gaussian tail + union
+             bound).  delta(x) replaces the constant --mres-delta.
 """
 from __future__ import annotations
 
@@ -54,6 +65,9 @@ STATE = {
     "freeze_reservoir": False,
     "num_layers": 1,
     "grad_scale": 1.0,
+    "sigma": 0.0,              # Gaussian prior std; 0 = exact copy (the deterministic method)
+    "eta": 0.0,                # failure probability of the margin bound (sigma > 0 only)
+    "noise_seed": 1234,
 }
 CAPTURE = {"maps": None}     # list while an expansion check records routing maps, else None
 
@@ -64,6 +78,14 @@ def configure_from_args(args):
     STATE["lam"] = float(args.mres_lambda)
     STATE["warmup_frac"] = float(args.mres_warmup_frac)
     STATE["warmup_freeze_router"] = not bool(args.mres_no_warmup_freeze_router)
+    STATE["sigma"] = float(getattr(args, "mres_sigma", 0.0) or 0.0)
+    STATE["eta"] = float(getattr(args, "mres_eta", 0.0) or 0.0)
+    seed = getattr(args, "mres_noise_seed", None)
+    STATE["noise_seed"] = int(seed if seed is not None else args.seed)
+    if STATE["sigma"] < 0.0:
+        raise ValueError(f"--mres-sigma must be >= 0, got {STATE['sigma']}")
+    if STATE["sigma"] > 0.0 and not 0.0 < STATE["eta"] < min(1.0, STATE["alpha_end"]):
+        raise ValueError(f"--mres-sigma > 0 needs 0 < --mres-eta < min(1, alpha_end), got {STATE['eta']}")
     if STATE["alpha"] is None:
         STATE["alpha"] = STATE["alpha_end"]
 
@@ -106,6 +128,21 @@ def _router_dtype(config, input_dtype):
     return input_dtype
 
 
+def margin_width(x: torch.Tensor):
+    """delta(x) = sigma |x| sqrt(2 ln(m / eta)) per token (m = alpha_end) for sigma > 0, else the constant delta."""
+    if STATE["sigma"] <= 0.0:
+        return STATE["delta"]
+    m = STATE["alpha_end"]
+    return (STATE["sigma"] * x.float().norm(dim=-1) * math.sqrt(2.0 * math.log(m / STATE["eta"]))).detach()
+
+
+def log_mass_shift(x: torch.Tensor):
+    """sigma^2 |x|^2 / 2 per token (log of the Gaussian-prior mass factor), or 0.0 for sigma = 0."""
+    if STATE["sigma"] <= 0.0:
+        return 0.0
+    return (0.5 * STATE["sigma"] ** 2 * x.float().pow(2).sum(-1)).detach()
+
+
 def route(router, input: torch.Tensor):
     """Replacement for TopKRouter.forward after input jitter: returns (probs, routing_map)."""
     config = router.config
@@ -138,8 +175,11 @@ def route(router, input: torch.Tensor):
     alpha = STATE["alpha"]
     if training and phase == "primary":
         alpha = 0.0
+    flat = input.reshape(-1, input.shape[-1])
     if alpha > 0.0:
-        full = torch.cat([logits, (z_res + math.log(alpha))[:, None]], dim=-1)
+        res_col = z_res + math.log(alpha) + log_mass_shift(flat).to(z_res.dtype) \
+            if STATE["sigma"] > 0.0 else z_res + math.log(alpha)
+        full = torch.cat([logits, res_col[:, None]], dim=-1)
     else:
         full = logits
     scores = torch.softmax(full, dim=-1, dtype=torch.float32)[:, :num_experts]
@@ -163,14 +203,17 @@ def route(router, input: torch.Tensor):
 
     if training and phase == "replay" and STATE["lam"] > 0 and torch.is_grad_enabled():
         threshold = logits.gather(1, top_idx)[:, -1].detach()        # K-th candidate logit
-        hinge = F.relu(z_res - threshold + STATE["delta"])
+        width = margin_width(flat)                                   # delta, or delta(x) for sigma > 0
+        if torch.is_tensor(width):
+            width = width.to(z_res.dtype)
+        hinge = F.relu(z_res - threshold + width)
         margin = hinge.mean() * (STATE["lam"] / STATE["num_layers"] * STATE["grad_scale"])
         probs = MoEAuxLossAutoScaler.apply(probs, margin)
         with torch.no_grad():
             save_to_aux_losses_tracker(
                 "mres_margin_hinge", hinge.mean(), router.layer_number, config.num_layers)
             save_to_aux_losses_tracker(
-                "mres_violation_rate", (z_res > threshold - STATE["delta"]).float().mean(),
+                "mres_violation_rate", (z_res > threshold - width).float().mean(),
                 router.layer_number, config.num_layers)
             if alpha > 0.0:
                 save_to_aux_losses_tracker(
@@ -195,17 +238,34 @@ def expand(target_model, num_existing_experts: int) -> dict:
     from megatron.core.transformer.moe.experts import GroupedMLP, SequentialMLP
     from megatron.core.transformer.moe.router import Router
 
+    if STATE["alpha"] is None:          # expansion runs before the first routed forward: read the args here
+        from megatron.training import get_args
+        configure_from_args(get_args())
     rows = ffn = lora = 0
     row_diff = w2_max = lora_b_max = 0.0
+    noise_std = []
+    sigma = STATE["sigma"]
     with torch.no_grad():
         for module in target_model.modules():
             if isinstance(module, Router) and enabled(module):
                 total = module.weight.shape[0]
-                module.weight[num_existing_experts:total].copy_(
-                    getattr(module, PARAM_NAME).expand(total - num_existing_experts, -1))
+                n_new = total - num_existing_experts
+                res = getattr(module, PARAM_NAME)
+                if sigma > 0.0:
+                    # same eps on every rank: CPU fp32 generator seeded by (noise_seed, round, layer)
+                    gen = torch.Generator(device="cpu").manual_seed(
+                        _noise_seed(STATE["noise_seed"], num_existing_experts, int(module.layer_number or 0)))
+                    eps = torch.randn((n_new, res.shape[-1]), generator=gen, dtype=torch.float32)
+                    new = res.detach().float().cpu() + sigma * eps
+                    module.weight[num_existing_experts:total].copy_(
+                        new.to(device=module.weight.device, dtype=module.weight.dtype))
+                    target = new.to(device=module.weight.device, dtype=module.weight.dtype)
+                    noise_std.append(float(eps.std()) * sigma)
+                else:
+                    module.weight[num_existing_experts:total].copy_(res.expand(n_new, -1))
+                    target = res.expand(n_new, -1)
                 row_diff = max(row_diff, float(
-                    (module.weight[num_existing_experts:total] - getattr(module, PARAM_NAME))
-                    .abs().max()))
+                    (module.weight[num_existing_experts:total] - target).abs().max()))
                 rows += 1
             elif isinstance(module, GroupedMLP):
                 w2 = module.weight2.view(module.num_local_experts, -1, module.config.hidden_size)
@@ -231,12 +291,18 @@ def expand(target_model, num_existing_experts: int) -> dict:
     report = {"routers": rows, "ffn_expert_modules": ffn, "attn_lora_b_tensors": lora,
               "num_existing_experts": num_existing_experts,
               "max|new_row - r_res|": row_diff, "max|new FFN down|": w2_max,
-              "max|new attn LoRA B|": lora_b_max, "alpha_before": alpha_before, "alpha_after": 0.0}
+              "max|new attn LoRA B|": lora_b_max, "alpha_before": alpha_before, "alpha_after": 0.0,
+              "sigma": sigma, "eta": STATE["eta"], "noise_seed": STATE["noise_seed"],
+              "mean_noise_std": (sum(noise_std) / len(noise_std)) if noise_std else 0.0}
     if rows == 0 or ffn == 0:
         raise RuntimeError(f"mass reservoir expansion found no routers or FFN experts: {report}")
     if row_diff != 0.0 or w2_max != 0.0 or lora_b_max != 0.0:
         raise RuntimeError(f"mass reservoir expansion is not exact: {report}")
     return report
+
+
+def _noise_seed(base: int, round_index: int, layer_index: int) -> int:
+    return (int(base) * 1_000_003 + int(round_index) * 1_009 + int(layer_index)) % (2 ** 63 - 1)
 
 
 def begin_step(args, iteration: int, num_existing_experts):

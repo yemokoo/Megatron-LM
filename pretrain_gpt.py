@@ -1176,8 +1176,10 @@ def _build_probe_dataloader(probe_data_path, probe_eval_iters, cache_key):
     if not probe_data_path or probe_eval_iters <= 0:
         return None
 
+    probe_seed = getattr(args, "probe_seed", None)
     config = GPTDatasetConfig(
-        random_seed=args.seed,
+        # --probe-seed pins the probe sequences across training seeds (default: --seed)
+        random_seed=args.seed if probe_seed is None else probe_seed,
         sequence_length=args.seq_length,
         blend=get_blend_from_list(probe_data_path),
         blend_per_split=None,

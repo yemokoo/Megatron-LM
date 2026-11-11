@@ -1358,6 +1358,9 @@ def _add_logging_args(parser):
                        help='Display/log name for the probe dataset.')
     group.add_argument('--probe-eval-iters', type=int, default=0,
                        help='Number of iterations for probe evaluation.')
+    group.add_argument('--probe-seed', type=int, default=None,
+                       help='Seed of the probe datasets (document order = which sequences are scored). '
+                            'Default: --seed. Pin it to score every training seed on the same sequences.')
     group.add_argument('--probe-micro-batch-size', type=int, default=None,
                        help='Optional micro batch size used only by primary, secondary, and '
                             'tertiary probe evaluation. Training micro batch size is unchanged.')
@@ -2451,6 +2454,14 @@ def _add_moe_args(parser):
                        help='Share of updates with new-expert-only primary routing and alpha 0.')
     group.add_argument('--mres-no-warmup-freeze-router', action='store_true',
                        help='Let old router rows and the reservoir update during the warm-up.')
+    group.add_argument('--mres-sigma', type=float, default=0.0,
+                       help='Gaussian reservoir prior std: new rows r_res + N(0, sigma^2 I), reservoir mass '
+                            'alpha*exp(z_res + sigma^2|x|^2/2), margin delta(x) = sigma|x|sqrt(2 ln(m/eta)) '
+                            '(m = alpha_end) in place of --mres-delta.  0 = exact copy (default).')
+    group.add_argument('--mres-eta', type=float, default=0.0,
+                       help='Failure probability of the delta(x) bound; required (0, 1) when --mres-sigma > 0.')
+    group.add_argument('--mres-noise-seed', type=int, default=None,
+                       help='Seed of the expansion noise (default: --seed); combined with round and layer.')
     group.add_argument('--moe-router-pre-softmax', action='store_true',
                        help='Enable pre-softmax routing for MoE, which means softmax is before the top-k selection. By default, softmax is done after top-k.')
     group.add_argument('--moe-router-num-groups', type=int, default=None,
